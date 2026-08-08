@@ -271,6 +271,8 @@ In the **Link Local Mods to FaceFinder** window, drag a mod from the FaceFinder 
 
 If you check **Auto-Generate missing mugshots**, N.P.C.2 will render its own mugshots using a built-in 3D renderer, directly from the mod’s mesh/texture data — so you can preview any appearance mod even if nobody has published mugshots for it.
 
+This setting controls **rendering, not displaying**. Renders you already have on disk keep showing in the galleries after you switch it back off — nothing you paid render time for disappears because automatic generation is now idle. That also means you can leave this off permanently and render NPCs one at a time with **Generate Mugshot** in the [mugshot right-click menu](#mugshot-right-click-menu), which is the light-touch way to work if you only want renders for the handful of mods that ship none.
+
 NPCs that inherit their looks through the **Traits** template flag are rendered too: they own no face of their own, so N.P.C.2 follows the template chain (through *that mod’s* records, so two mods can disagree about it) and draws the face the game will actually give them — while still showing their own outfit. You’ll see the same face on the tile as on the NPC it inherits from, which is the point. Chains N.P.C.2 can’t follow — one ending in a leveled NPC, a missing record, or a loop — have no fixed appearance to show, so those tiles keep the placeholder.
 
 * **Renderer**: Which engine produces the renders — **Internal** or **Legacy** (more on this below).
@@ -597,6 +599,8 @@ Right-clicking a mugshot opens a rich context menu:
 * **Jump to Mod** — switch to the Mods tab focused on this mod.
 * **Show Full Image (Ctrl+RClick)** — full-screen view of the mugshot.
 * **Show 3D Preview (Ctrl+Shift+RClick)** — opens the interactive [3D preview](#3d-preview).
+* **Generate Mugshot** — renders *this one* appearance with the built-in 3D renderer, right now. It works whether or not **Auto-Generate missing mugshots** is switched on, so you don't have to detour through Settings to render a single NPC and then switch it off again. It always re-renders, even if a render already exists, which makes it the right button after you've fixed a mod's folders. (Hidden for mods you don't have installed — there's no data to render.)
+* **Delete Mugshot** — deletes the image the tile is *currently showing*, and says which of the three sources that is (Downloaded / FaceFinder / Auto-Generated) so you can't delete the wrong one by accident. The tile then falls back to whatever ranks next, or to the placeholder. Empty folders left behind are cleaned up, and N.P.C.2 asks first — a **downloaded** mugshot is the one kind it can't recreate for you.
 * **Share with NPC** — make this appearance available to a *different* NPC (see below).
 * **Add to Favorites** — save this face to your [Favorites](#favorite-faces) library.
 * **Open Mod Folder / Open Mugshot Folder / Visit Mod Page** — quick links to the files on disk or the mod’s web page.

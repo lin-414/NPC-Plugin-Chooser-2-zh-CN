@@ -500,11 +500,18 @@ public sealed class BatchMugshotGenerator
     /// is only used for an SHA compare against stamped metadata, not for a
     /// fresh FaceGen lookup, so passing null still catches every drift case
     /// (renderer/resolution/version/settings hash).</summary>
+    /// <para>Deliberately NOT gated on <see cref="Settings.UsePortraitCreatorFallback"/>.
+    /// That setting is labelled "Auto-Generate missing mugshots" and means "render new
+    /// ones", not "hide the ones I already have": a render the user paid seconds for
+    /// (or asked for explicitly via the tile's Generate Mugshot command, which works
+    /// with the setting off) must keep showing after they switch auto-generation back
+    /// off. The generation gate stays on <see cref="RunSelectedRendererAsync"/>. This
+    /// also matches the Mods tab, which has always listed whatever is on disk in the
+    /// AutoGen folder (<c>VM_Mods.ShowMugshotsAsync</c>).</para>
     public bool TryGetExistingFreshAutoGenPath(
         FormKey npcFormKey, VM_ModSetting modSetting, out string? path, FormKey? targetNpcFormKey = null)
     {
         path = null;
-        if (!_settings.UsePortraitCreatorFallback) return false;
         if (modSetting == null) return false;
 
         var savePath = GetAutoGenSavePath(_settings, modSetting.DisplayName, npcFormKey);
@@ -547,11 +554,12 @@ public sealed class BatchMugshotGenerator
             MugshotPngMetadata.TryRead(savePath));
     }
 
+    /// <para>Like its fresh-only sibling, not gated on
+    /// <see cref="Settings.UsePortraitCreatorFallback"/> — see that method's note.</para>
     public bool TryGetExistingAutoGenPath(
         FormKey npcFormKey, VM_ModSetting modSetting, out string? path)
     {
         path = null;
-        if (!_settings.UsePortraitCreatorFallback) return false;
         if (modSetting == null) return false;
 
         var savePath = GetAutoGenSavePath(_settings, modSetting.DisplayName, npcFormKey);
@@ -569,15 +577,21 @@ public sealed class BatchMugshotGenerator
     /// the user fixes a mod's asset scope mid-session — a newly-added
     /// CorrespondingFolderPath. Without the force, such a click reuses (or
     /// faithfully re-renders) the same asset-less PNG.</param>
+    /// <param name="bypassSourceGate">Renders even with
+    /// <see cref="Settings.UsePortraitCreatorFallback"/> off. Set ONLY by an explicit
+    /// per-tile user request (the NPCs-menu "Generate Mugshot" context-menu item),
+    /// which exists precisely so a user who keeps automatic generation off can still
+    /// render one NPC on demand. Every automatic path leaves it false.</param>
     public async Task<GenerationResult> RunSelectedRendererAsync(
         FormKey npcFormKey,
         VM_ModSetting modSetting,
         CancellationToken token,
         bool assetValidatedOnly = false,
         FormKey? targetNpcFormKey = null,
-        bool forceRegenerate = false)
+        bool forceRegenerate = false,
+        bool bypassSourceGate = false)
     {
-        if (!_settings.UsePortraitCreatorFallback) return GenerationResult.None;
+        if (!_settings.UsePortraitCreatorFallback && !bypassSourceGate) return GenerationResult.None;
 
         try
         {

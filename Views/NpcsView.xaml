@@ -757,6 +757,7 @@
                                  dd:DragDrop.DropHandler="{Binding}"
                                  dd:DragDrop.DragDropContext="{Binding}"
                                  AllowDrop="True"
+                                 ContextMenuOpening="MugshotBorder_OnContextMenuOpening"
                                  dd:DragDrop.DragAdornerTemplate="{StaticResource AppearanceModDragAdorner}">
                                  <i:Interaction.Triggers>
                                      <i:EventTrigger EventName="MouseLeftButtonUp">
@@ -1290,6 +1291,15 @@
                                          
                                          <MenuItem Header="Show Full Image (Ctrl+RClick)" Command="{Binding ToggleFullScreenCommand}"/>
                                          <MenuItem Header="Show 3D Preview (Ctrl+Shift+RClick)" Command="{Binding Show3DPreviewCommand}"/>
+                                         <Separator/>
+                                         <MenuItem Header="Generate Mugshot"
+                                                   Command="{Binding GenerateMugshotCommand}"
+                                                   Visibility="{Binding CanGenerateMugshot, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                                   ToolTip="Render this appearance now with the built-in 3D renderer, replacing any auto-generated mugshot it already has. Works whether or not Auto-Generate missing mugshots is switched on."/>
+                                         <MenuItem Header="{Binding DeleteMugshotHeader}"
+                                                   Command="{Binding DeleteMugshotCommand}"
+                                                   Visibility="{Binding CanDeleteMugshot, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                                   ToolTip="Delete the image currently shown on this tile and fall back to the next available mugshot source."/>
                                          <Separator/>
                                          <MenuItem Command="{Binding ShareWithNpcCommand}"
                                                    ToolTip="Make this appearance available for another NPC.">

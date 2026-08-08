@@ -4030,15 +4030,33 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
     }
 
     /// <summary>Arms the one-shot forced re-render for the AG override click.
-    /// <para>Syncs VM_Mods → Settings.ModSettings first, and that ordering is the
-    /// whole point: the renderer builds its per-mod asset-resolution scope from
-    /// the PERSISTED model (BatchMugshotGenerator → NpcMeshResolver.BuildResolutionScopes),
-    /// while a folder the user just added in the Mods tab lives only on the
-    /// VM_ModSetting until something calls SaveModSettingsToModel — previously
-    /// nothing did before app exit. That gap is why a fixed mod only rendered
-    /// correctly after a restart; forcing the render without the sync would just
-    /// reproduce the same missing assets more expensively.</para></summary>
+    /// <para>The <see cref="SyncModSettingsForRender"/> call must come first, and that
+    /// ordering is the whole point — see that method for why. Users reach for the AG
+    /// button right after adding the folder that holds a mod's missing assets, and
+    /// without the sync the forced render just reproduces the same gaps more
+    /// expensively.</para></summary>
     private void ArmForcedAutoGenRegeneration()
+    {
+        SyncModSettingsForRender();
+
+        lock (_forcedAutoGenLock)
+        {
+            _forcedAutoGenTilesServed.Clear();
+            _forcedAutoGenPending = true;
+        }
+    }
+
+    /// <summary>Pushes VM_Mods' in-memory mod list down into Settings.ModSettings
+    /// ahead of a render. Load-bearing, not hygiene: the renderer builds its per-mod
+    /// asset-resolution scope from the PERSISTED model
+    /// (BatchMugshotGenerator → NpcMeshResolver.BuildResolutionScopes), while a folder
+    /// the user just added in the Mods tab lives only on the VM_ModSetting until
+    /// something calls SaveModSettingsToModel. Without this, a render triggered right
+    /// after fixing a mod reproduces the same missing assets more expensively.
+    /// <para>A sync failure is logged and swallowed rather than aborting the render —
+    /// the cost is that the render sees the previously-persisted scope, which is just
+    /// the pre-fix behaviour.</para></summary>
+    public void SyncModSettingsForRender()
     {
         try
         {
@@ -4046,15 +4064,22 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         }
         catch (Exception ex)
         {
-            // Sync failure shouldn't block the render — it just means the render
-            // sees the previously-persisted scope, i.e. the old behavior.
-            Debug.WriteLine($"ArmForcedAutoGenRegeneration: model sync failed: {ExceptionLogger.GetExceptionStack(ex)}");
+            Debug.WriteLine($"SyncModSettingsForRender: model sync failed: {ExceptionLogger.GetExceptionStack(ex)}");
         }
+    }
 
-        lock (_forcedAutoGenLock)
+    /// <summary>Drops <paramref name="imagePath"/> from the curated mugshot index
+    /// built by the startup scan of <see cref="Settings.MugshotsFolder"/>. Called
+    /// after a tile deletes a downloaded mugshot: the index is only rebuilt on a
+    /// rescan, so without this every subsequent lookup — including the tile's own
+    /// reload — would resolve straight back to the file that was just deleted.</summary>
+    public void ForgetCuratedMugshotPath(string imagePath)
+    {
+        if (string.IsNullOrWhiteSpace(imagePath)) return;
+
+        foreach (var entry in _downloadedMugshotData)
         {
-            _forcedAutoGenTilesServed.Clear();
-            _forcedAutoGenPending = true;
+            entry.Value.RemoveAll(m => string.Equals(m.ImagePath, imagePath, StringComparison.OrdinalIgnoreCase));
         }
     }
 

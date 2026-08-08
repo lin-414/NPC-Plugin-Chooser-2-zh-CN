@@ -602,6 +602,20 @@ namespace NPC_Plugin_Chooser_2.Views
             }
         }
 
+        /// <summary>Classifies the tile's displayed image (curated / FaceFinder /
+        /// auto-generated) just before its context menu is built, so the Delete
+        /// Mugshot entry can name and target the right one. Done here rather than
+        /// reactively in the VM because the auto-generated test reads the PNG's
+        /// metadata chunk — cheap once per right-click, expensive across a gallery
+        /// of tiles reloading their images.</summary>
+        private void MugshotBorder_OnContextMenuOpening(object sender, ContextMenuEventArgs e)
+        {
+            if (sender is FrameworkElement { DataContext: VM_NpcsMenuMugshot vm })
+            {
+                vm.RefreshVisibleMugshotSource();
+            }
+        }
+
 
         private void ZoomPercentageTextBox_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
         {
