@@ -2008,13 +2008,16 @@ public class VM_NpcsMenuMugshot : ReactiveObject, IDisposable, IHasMugshotImage,
             // MUST run off the dispatcher. RunSelectedRendererAsync has a long
             // synchronous prefix, and under forceRegenerate it reaches
             // NpcChooserBsaProviderAdapter.RefreshArchivesForMod, which blocks on
-            // BsaHandler.AddMissingModToCache via GetAwaiter().GetResult(). That
-            // method awaits without ConfigureAwait(false), so it tries to resume on
-            // the very thread the blocking call is holding — invoked from the UI
-            // thread it deadlocks outright, not merely slowly. This is why every
-            // other generation call site wraps the tile's work in Task.Run
-            // (see TriggerAsyncMugshotGeneration). The continuation lands back on
-            // the dispatcher, which the message box below requires.
+            // BsaHandler.AddMissingModToCache via GetAwaiter().GetResult().
+            // Historically that hung the app outright — AddMissingModToCache
+            // awaited without ConfigureAwait(false) and tried to resume on the very
+            // thread the blocking call was holding. BsaHandler now uses
+            // ConfigureAwait(false) on both awaits, so the hang is gone, but the
+            // Task.Run still has to stay: the synchronous prefix plus the BSA
+            // re-index would otherwise freeze the UI for seconds. This is why every
+            // generation call site wraps the tile's work in Task.Run (see
+            // TriggerAsyncMugshotGeneration). The continuation lands back on the
+            // dispatcher, which the message box below requires.
             var result = await Task.Run(() => _batchGenerator.RunSelectedRendererAsync(
                 SourceNpcFormKey, AssociatedModSetting, CancellationToken.None,
                 targetNpcFormKey: _targetNpcFormKey,

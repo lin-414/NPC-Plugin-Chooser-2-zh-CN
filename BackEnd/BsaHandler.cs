@@ -695,7 +695,23 @@ public class BsaHandler : OptionalUIModule
         // archives per BSA path and only opens ones not yet indexed, so fully
         // cached mods cost one directory scan and no archive I/O.
         BsaContentsDiag.Log($"AddMissingModToCache delegating to PopulateBsaContentPathsAsync mod='{mod.DisplayName}'");
-        await PopulateBsaContentPathsAsync(new List<ModSetting>() {mod}, gameRelease, reinitializeCache: false);
+        // ConfigureAwait(false): this method is bridged over synchronously by
+        // NpcChooserBsaProviderAdapter (EnsureAllArchivesOpened /
+        // RefreshArchivesForMod, both .GetAwaiter().GetResult()) and by
+        // PortraitCreator.FindNpcNifPath's caller in FaceGenAnalysisCache.
+        // Called from a thread carrying a SynchronizationContext — the WPF
+        // dispatcher — a context-capturing await here would try to resume on
+        // the very thread the blocking call is holding and hang forever. The
+        // call sites all wrap in Task.Run today, but that is convention, not
+        // enforcement, and the renderer reaches EnsureAllArchivesOpened from
+        // its GL render callback (CharacterViewer.Rendering GameAssetResolver
+        // .TryResolveFromBsa), which for the live preview IS the UI thread —
+        // guarded only by the adapter's _allOpened latch, which deliberately
+        // does not latch on the empty-model bail. Nothing runs after this await
+        // (it is the last statement, and the method returns plain Task), so
+        // dropping the context is free.
+        await PopulateBsaContentPathsAsync(new List<ModSetting>() {mod}, gameRelease, reinitializeCache: false)
+            .ConfigureAwait(false);
     }
     
     public async Task PopulateBsaContentPathsAsync(IEnumerable<ModSetting> mods, GameRelease gameRelease, bool cacheReaders = false, bool reinitializeCache = true)
@@ -716,6 +732,15 @@ public class BsaHandler : OptionalUIModule
         BsaContentsDiag.Log($"PopulateBsaContentPathsAsync ENTER modsToProcess={mods.Count()} reinit={reinitializeCache} envDataFolderPath=[{dfp}] envDataFolderExists={(string.IsNullOrWhiteSpace(dfp) ? "(empty)" : Directory.Exists(dfp).ToString())}");
 
         // Use Task.Run to offload the blocking I/O of reading BSA headers.
+        // ConfigureAwait(false) on the closing line, for the same reason as
+        // AddMissingModToCache above — and it is needed on BOTH: each await
+        // captures its own context, so fixing only one leaves the other posting
+        // its continuation back to the dispatcher. This await is the method's
+        // last statement (the EXIT log is inside the lambda) and the method
+        // returns plain Task, so there is no continuation beyond completing the
+        // returned Task. Awaiting callers (Patcher.PreInitializationLogicAsync,
+        // PortraitCreator) are unaffected: they capture their OWN context at
+        // their own await, which nothing done in here can change.
         await Task.Run(() =>
         {
             foreach (var mod in mods)
@@ -812,7 +837,7 @@ public class BsaHandler : OptionalUIModule
             int finalCount;
             lock (_bsaContentsLock) { finalCount = _bsaContents.Count; }
             BsaContentsDiag.Log($"PopulateBsaContentPathsAsync EXIT — _bsaContents.Count now={finalCount}");
-        });
+        }).ConfigureAwait(false);
     }
     
     public Dictionary<ModKey, HashSet<string>> GetAllFilePathsForMod(IEnumerable<ModKey> modKeys, IEnumerable<string> modDirs, GameRelease gameRelease)

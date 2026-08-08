@@ -169,7 +169,15 @@ public class PortraitCreator
             else
             {
                 var gameRelease = _environmentProvider.SkyrimVersion.ToGameRelease();
-                await _bsaHandler.AddMissingModToCache(modSettingModel, gameRelease);
+                // ConfigureAwait(false): FaceGenAnalysisCache.Get bridges over this
+                // method synchronously (FindNpcNifPath(...).GetAwaiter().GetResult()),
+                // so a context-capturing await here deadlocks if that caller is ever
+                // on the WPF dispatcher. Both of Get's call sites wrap in Task.Run
+                // today, but this closes the mechanism rather than relying on it.
+                // Everything after this await is file / BsaHandler I/O — no WPF, no
+                // dispatcher affinity — so dropping the context is safe.
+                await _bsaHandler.AddMissingModToCache(modSettingModel, gameRelease)
+                    .ConfigureAwait(false);
 
                 // Folder-scoped first: the BSA index is keyed by plugin
                 // FILENAME, and another mod shipping the same plugin name in a

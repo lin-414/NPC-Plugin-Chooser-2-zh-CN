@@ -591,6 +591,20 @@ public sealed class BatchMugshotGenerator
         bool forceRegenerate = false,
         bool bypassSourceGate = false)
     {
+        // Convention guard. Every call site must wrap this in Task.Run — see
+        // VM_NpcSelectionBar.TriggerAsyncMugshotGeneration, whose comment
+        // documents the pattern. The method has a long SYNCHRONOUS prefix
+        // (staleness check + renderer setup, ~500ms per tile) that runs on the
+        // caller's thread before the first real yield, and under forceRegenerate
+        // it reaches NpcChooserBsaProviderAdapter.RefreshArchivesForMod, which
+        // blocks on an async method. The blocking side no longer deadlocks
+        // (BsaHandler's awaits are ConfigureAwait(false) now), so a dispatcher
+        // caller costs a multi-second freeze rather than a hang — still wrong,
+        // and previously it WAS a hang. Debug-only: null Application (tests,
+        // headless harness runners) and background threads both pass.
+        Debug.Assert(System.Windows.Application.Current?.Dispatcher.CheckAccess() != true,
+            "RunSelectedRendererAsync must not be called on the WPF dispatcher — wrap the call in Task.Run.");
+
         if (!_settings.UsePortraitCreatorFallback && !bypassSourceGate) return GenerationResult.None;
 
         try
