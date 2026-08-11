@@ -1340,6 +1340,11 @@ public class NpcMeshResolver
             // unreachable and the outfit rendered as nothing. Let those fall back to the
             // load-order-ranked archive lookup, which reproduces what the game resolves.
             bool outfitAssetsOutsideScope = !outfitDisplay.UseModScopedResolution;
+            // Collects the plugins that define the outfit's armors / addons / texture
+            // sets, so their BSAs can be indexed before the render. Only allocated when
+            // the fallback is live: the broadcast lookup is the sole consumer, and a
+            // donor outfit's assets are already covered by the scope chain.
+            var outfitPluginSink = outfitAssetsOutsideScope ? new HashSet<ModKey>() : null;
             var outfit = ResolveRecord<IOutfitGetter>(effectiveOutfitKey.ToLink<IOutfitGetter>(), linkCache, outfitContext);
             if (outfitDisplay.Source != OutfitDisplaySource.AppearanceMod)
             {
@@ -1366,15 +1371,24 @@ public class NpcMeshResolver
                     if (suppressRemovedAntlers && wigPlan!.SuppressedOutfitItemKeys.Contains(itemLink.FormKey))
                         continue;
                     CollectOutfitItemArmors(itemLink.FormKey, linkCache, outfitContext,
-                        "Outfit:" + effectiveOutfitKey, outfitArmors, seenArmorKeys, depth: 0);
+                        "Outfit:" + effectiveOutfitKey, outfitArmors, seenArmorKeys, depth: 0,
+                        pluginSink: outfitPluginSink);
                 }
                 foreach (var (armor, source) in outfitArmors)
                 {
                     AppendArmorMeshOverrides(armor, source, sex, npcRaceKey, armorRaceKey, linkCache, outfitContext,
                         includeBody: includeDefaultOutfit, includeHeadgear: includeHeadgear,
                         hairCountsAsHeadgear: true, result, seenOverrideKeys,
-                        allowLoadOrderFallback: outfitAssetsOutsideScope);
+                        allowLoadOrderFallback: outfitAssetsOutsideScope,
+                        pluginSink: outfitPluginSink);
                 }
+
+                // Index the donor plugins' Data-folder archives now, while we still know
+                // which plugins the depicted attire actually came from. Must happen here,
+                // BEFORE the render consumes these overrides: the renderer discovers a
+                // NIF's textures lazily and caches NotFound per scope signature, so an
+                // archive admitted after the first lookup would never be consulted.
+                WidenArchiveIndexForOutfitDonors(outfitPluginSink, npcName);
             }
             else
             {
@@ -1583,12 +1597,98 @@ public class NpcMeshResolver
     /// the result is logged. Non-apparel items (weapons / ammo / quest items)
     /// and unresolvable links are skipped.
     /// </summary>
+    /// <summary>
+    /// Indexes the Data-folder BSAs of the plugins that supplied a load-order-owned
+    /// outfit, so the renderer's Phase 3 broadcast can actually find their meshes and
+    /// textures.
+    ///
+    /// <para>Without this the broadcast is starved: every writer of the BSA index takes a
+    /// <c>ModSetting</c>, and a mod only becomes a ModSetting if it ships FaceGen — so an
+    /// armor mod that is active in the load order but carries no faces had its archives
+    /// invisible, and an outfit SkyPatcher/SPID distributed from it rendered as nothing.
+    /// (Its LOOSE files resolved fine all along, because the vanilla scope probes the
+    /// Data folder directly and MO2's VFS merges every enabled mod into it — which is why
+    /// the failure looked intermittent and mod-specific for so long.)</para>
+    ///
+    /// <para>Masters are included one level deep: a plugin's records routinely reference
+    /// assets that ship in the parent mod it masters (the "De-Standalone" shape). Base
+    /// game and Creation Club keys are dropped because their archives are indexed at
+    /// startup, and anything absent from the load order is dropped because the game would
+    /// not load its archive either.</para>
+    /// </summary>
+    private void WidenArchiveIndexForOutfitDonors(HashSet<ModKey>? donorPlugins, string npcName)
+    {
+        if (donorPlugins == null || donorPlugins.Count == 0) return;
+
+        var loadOrder = _env.LoadOrder;
+        if (loadOrder == null) return;
+
+        var keys = SelectDonorPluginsToIndex(
+            donorPlugins,
+            loadOrder.ListedOrder.Select(l =>
+                (l.ModKey, (IReadOnlyList<ModKey>?)l.Mod?.ModHeader.MasterReferences.Select(m => m.Master).ToList())),
+            _env.BaseGamePlugins,
+            _env.CreationClubPlugins);
+        if (keys.Count == 0) return;
+
+        LogVerbose("CharacterViewer: widening BSA index for " + npcName + "'s load-order outfit donors: "
+            + string.Join(", ", keys.Select(k => k.FileName.String)));
+        _bsaHandler.EnsureDataFolderArchivesIndexed(keys, _env.SkyrimVersion.ToGameRelease());
+    }
+
+    /// <summary>
+    /// Narrows the raw donor-plugin set to the keys actually worth indexing: those
+    /// present in the load order, plus one level of their masters, minus base game and
+    /// Creation Club (already indexed at startup).
+    ///
+    /// <para>Masters are pulled in because a plugin's records routinely point at assets
+    /// shipped by the parent mod it masters — the "De-Standalone" shape. Only one level:
+    /// deeper ancestry is almost always vanilla, which is filtered out anyway.</para>
+    ///
+    /// <para>Pure and static so the selection rule is testable without a game install or
+    /// a resolved environment, matching
+    /// <c>NpcChooserBsaProviderAdapter.SelectByLoadOrder</c>.</para>
+    /// </summary>
+    /// <param name="loadOrder">
+    /// (plugin, its masters) in listed order. Masters may be null for a listing whose
+    /// mod could not be loaded — the plugin itself still counts.
+    /// </param>
+    public static HashSet<ModKey> SelectDonorPluginsToIndex(
+        IReadOnlyCollection<ModKey> donorPlugins,
+        IEnumerable<(ModKey Key, IReadOnlyList<ModKey>? Masters)> loadOrder,
+        IEnumerable<ModKey>? baseGamePlugins,
+        IEnumerable<ModKey>? creationClubPlugins)
+    {
+        var keys = new HashSet<ModKey>();
+        if (donorPlugins == null || donorPlugins.Count == 0 || loadOrder == null) return keys;
+
+        var wanted = donorPlugins as ISet<ModKey> ?? new HashSet<ModKey>(donorPlugins);
+
+        // One pass: confirm membership and harvest masters together, rather than a
+        // lookup per key.
+        foreach (var (key, masters) in loadOrder)
+        {
+            if (!wanted.Contains(key)) continue;
+            keys.Add(key);
+            if (masters == null) continue;
+            // Masters of a loaded plugin are by definition in the load order, so no
+            // second membership check is needed.
+            foreach (var master in masters) keys.Add(master);
+        }
+
+        if (baseGamePlugins != null) keys.ExceptWith(baseGamePlugins);
+        if (creationClubPlugins != null) keys.ExceptWith(creationClubPlugins);
+        keys.Remove(ModKey.Null);
+        return keys;
+    }
+
     private void CollectOutfitItemArmors(FormKey itemFormKey, ILinkCache linkCache, NpcResolutionContext? context,
-        string source, List<(IArmorGetter armor, string source)> armors, HashSet<FormKey> seen, int depth)
+        string source, List<(IArmorGetter armor, string source)> armors, HashSet<FormKey> seen, int depth,
+        HashSet<ModKey>? pluginSink = null)
     {
         if (depth > 10) return; // guard against pathological leveled-list cycles
 
-        var armor = ResolveRecord<IArmorGetter>(itemFormKey.ToLink<IArmorGetter>(), linkCache, context);
+        var armor = ResolveRecord<IArmorGetter>(itemFormKey.ToLink<IArmorGetter>(), linkCache, context, pluginSink);
         if (armor != null)
         {
             if (seen.Add(itemFormKey)) armors.Add((armor, source));
@@ -1599,7 +1699,7 @@ public class NpcMeshResolver
         if (lvli != null)
         {
             var collected = new List<(IArmorGetter armor, string label)>();
-            CollectArmorsFromLeveledItem(lvli, linkCache, context, depth, collected);
+            CollectArmorsFromLeveledItem(lvli, linkCache, context, depth, collected, pluginSink);
             if (collected.Count > 0)
             {
                 bool useAll = lvli.Flags.HasFlag(LeveledItem.Flag.UseAll);
@@ -1634,7 +1734,7 @@ public class NpcMeshResolver
     /// as a plain list's "first yielding entry".</summary>
     private void CollectArmorsFromLeveledItem(
         ILeveledItemGetter lvli, ILinkCache linkCache, NpcResolutionContext? context, int depth,
-        List<(IArmorGetter armor, string label)> collected)
+        List<(IArmorGetter armor, string label)> collected, HashSet<ModKey>? pluginSink = null)
     {
         if (depth > 10 || lvli.Entries == null) return;
         bool useAll = lvli.Flags.HasFlag(LeveledItem.Flag.UseAll);
@@ -1647,7 +1747,7 @@ public class NpcMeshResolver
 
             int countBefore = collected.Count;
 
-            var armor = ResolveRecord<IArmorGetter>(fk.ToLink<IArmorGetter>(), linkCache, context);
+            var armor = ResolveRecord<IArmorGetter>(fk.ToLink<IArmorGetter>(), linkCache, context, pluginSink);
             if (armor != null)
             {
                 collected.Add((armor, armor.EditorID ?? fk.ToString()));
@@ -1657,7 +1757,7 @@ public class NpcMeshResolver
                 var nested = ResolveRecord<ILeveledItemGetter>(fk.ToLink<ILeveledItemGetter>(), linkCache, context);
                 if (nested != null)
                 {
-                    CollectArmorsFromLeveledItem(nested, linkCache, context, depth + 1, collected);
+                    CollectArmorsFromLeveledItem(nested, linkCache, context, depth + 1, collected, pluginSink);
                 }
             }
 
@@ -1675,12 +1775,15 @@ public class NpcMeshResolver
     /// <see cref="MeshOverride.AllowLoadOrderFallback"/>). Set it when these armors come from
     /// somewhere other than the appearance mod, so their assets may live in a mod that
     /// contributes no render scope.</param>
+    /// <param name="pluginSink">Collects the ARMA / TXST donor plugins so their archives can
+    /// be indexed before the render. Passed only alongside
+    /// <paramref name="allowLoadOrderFallback"/>; null everywhere else.</param>
     private void AppendArmorMeshOverrides(IArmorGetter armor, string source, Sex sex, FormKey? npcRaceKey,
         FormKey? armorRaceKey,
         ILinkCache linkCache, NpcResolutionContext? context, bool includeBody, bool includeHeadgear,
         bool hairCountsAsHeadgear, List<MeshOverride> result, HashSet<string> seenKeys,
         WigPieceClass wigPiece = WigPieceClass.None, IReadOnlySet<FormKey>? suppressArmaKeys = null,
-        bool allowLoadOrderFallback = false)
+        bool allowLoadOrderFallback = false, HashSet<ModKey>? pluginSink = null)
     {
         if (armor.Armature == null) return;
         foreach (var armaLink in armor.Armature)
@@ -1688,7 +1791,7 @@ public class NpcMeshResolver
             if (armaLink == null || armaLink.IsNull) continue;
             // Host-designated ArmorAddon suppression (antler Remove, source 2).
             if (suppressArmaKeys != null && suppressArmaKeys.Contains(armaLink.FormKey)) continue;
-            var arma = ResolveRecord<IArmorAddonGetter>(armaLink, linkCache, context);
+            var arma = ResolveRecord<IArmorAddonGetter>(armaLink, linkCache, context, pluginSink);
             if (arma?.BodyTemplate == null) continue;
             if (!IsArmatureForRace(arma, npcRaceKey, armorRaceKey)) continue;
 
@@ -1750,7 +1853,7 @@ public class NpcMeshResolver
             //    embedded BSShaderTextureSet renders (correct for plain armor).
             meshPath = RebaseToAbsoluteIfPresent(meshPath, context) ?? meshPath;
 
-            var txst = ResolveTxstTextures(arma, sex, linkCache, context, armaLink.FormKey);
+            var txst = ResolveTxstTextures(arma, sex, linkCache, context, armaLink.FormKey, pluginSink);
             Dictionary<int, string>? textures = null;
             if (txst.Count > 0)
             {
@@ -1762,7 +1865,7 @@ public class NpcMeshResolver
                 textures = txst;
             }
 
-            var altTxst = ResolveAlternateTextures(arma, sex, linkCache, context, armaLink.FormKey);
+            var altTxst = ResolveAlternateTextures(arma, sex, linkCache, context, armaLink.FormKey, pluginSink);
             IReadOnlyList<AlternateTextureSpec>? alternateTextures = null;
             if (altTxst.Count > 0)
             {
@@ -2025,9 +2128,30 @@ public class NpcMeshResolver
     /// When <paramref name="context"/> is null, this is a straight LinkCache
     /// lookup and behaves identically to the pre-mod-scoping resolver.
     /// </summary>
-    private T? ResolveRecord<T>(IFormLinkGetter<T> link, ILinkCache linkCache, NpcResolutionContext? context)
+    /// <param name="pluginSink">
+    /// When non-null, receives the plugins that could carry this record's ASSETS: the
+    /// originating plugin (<c>link.FormKey.ModKey</c>) and, additionally, the plugin whose
+    /// override the link cache resolves to — a patch that repoints a model at its own
+    /// asset is a different plugin from the one that first defined the record.
+    /// <para>Only the outfit walk passes a sink, and only when the outfit came from
+    /// outside the appearance mod's scope. The extra context lookup is deliberately
+    /// ADDITIVE rather than replacing the <c>TryResolve</c> below: that branch is shared
+    /// by every record type this resolver touches (NPC, Race, WornArmor, head parts) and
+    /// the widening must not perturb any of them.</para>
+    /// </param>
+    private T? ResolveRecord<T>(IFormLinkGetter<T> link, ILinkCache linkCache, NpcResolutionContext? context,
+        HashSet<ModKey>? pluginSink = null)
         where T : class, IMajorRecordGetter
     {
+        if (pluginSink != null)
+        {
+            if (!link.FormKey.ModKey.IsNull) pluginSink.Add(link.FormKey.ModKey);
+            if (linkCache.TryResolveSimpleContext<T>(link, out var winnerCtx) && !winnerCtx.ModKey.IsNull)
+            {
+                pluginSink.Add(winnerCtx.ModKey);
+            }
+        }
+
         bool capturing = RenderLogCapture.IsCapturing;
         if (capturing)
         {
@@ -2168,7 +2292,8 @@ public class NpcMeshResolver
     }
 
     private Dictionary<int, string> ResolveTxstTextures(
-        IArmorAddonGetter armaGetter, Sex sex, ILinkCache linkCache, NpcResolutionContext? context, FormKey armaFormKey)
+        IArmorAddonGetter armaGetter, Sex sex, ILinkCache linkCache, NpcResolutionContext? context, FormKey armaFormKey,
+        HashSet<ModKey>? pluginSink = null)
     {
         var result = new Dictionary<int, string>();
         try
@@ -2176,7 +2301,7 @@ public class NpcMeshResolver
             if (armaGetter.SkinTexture == null) return result;
             var skinTextureLink = sex == Sex.Female ? armaGetter.SkinTexture.Female : armaGetter.SkinTexture.Male;
             if (skinTextureLink == null || skinTextureLink.IsNull) return result;
-            var txst = ResolveRecord<ITextureSetGetter>(skinTextureLink, linkCache, context);
+            var txst = ResolveRecord<ITextureSetGetter>(skinTextureLink, linkCache, context, pluginSink);
             if (txst == null)
             {
                 LogVerbose("CharacterViewer: Could not resolve TXST " + skinTextureLink.FormKey + " from ARMA " + armaFormKey);
@@ -2211,7 +2336,8 @@ public class NpcMeshResolver
     /// with a log line. Duplicate targets are preserved; the renderer applies
     /// them in order (later wins per slot).</summary>
     private List<(string ShapeName, int ShapeIndex, Dictionary<int, string> Slots)> ResolveAlternateTextures(
-        IArmorAddonGetter armaGetter, Sex sex, ILinkCache linkCache, NpcResolutionContext? context, FormKey armaFormKey)
+        IArmorAddonGetter armaGetter, Sex sex, ILinkCache linkCache, NpcResolutionContext? context, FormKey armaFormKey,
+        HashSet<ModKey>? pluginSink = null)
     {
         var result = new List<(string, int, Dictionary<int, string>)>();
         try
@@ -2227,7 +2353,7 @@ public class NpcMeshResolver
                 int shapeIndex = alt.Index;
                 if (string.IsNullOrWhiteSpace(shapeName) && shapeIndex < 0) continue;
                 if (alt.NewTexture.IsNull) continue;
-                var txst = ResolveRecord<ITextureSetGetter>(alt.NewTexture, linkCache, context);
+                var txst = ResolveRecord<ITextureSetGetter>(alt.NewTexture, linkCache, context, pluginSink);
                 if (txst == null)
                 {
                     LogVerbose("CharacterViewer: Could not resolve AlternateTexture TXST " + alt.NewTexture.FormKey

@@ -101,12 +101,16 @@ public sealed class NpcChooserBsaProviderAdapter : IBsaArchiveProvider
             _allOpened = true;
             Trace($"EXIT tid={tid} mods={total} totalElapsed={sw.ElapsedMilliseconds}ms");
 
-            // Dump the full BSA-path inventory once so subsequent lookup traces
-            // can be correlated against it. The set is invariant after
-            // EnsureAllArchivesOpened completes (no further BSAs get indexed
-            // during a session), so logging once is sufficient — the user can
-            // scroll back to this block to see exactly which archives every
-            // TryLocateInBsa call scans.
+            // Dump the full BSA-path inventory so subsequent lookup traces can be
+            // correlated against it: the user can scroll back to this block to see
+            // which archives a TryLocateInBsa call scans.
+            //
+            // This is the STARTUP baseline, not the final set. Two paths widen the
+            // index later in the session, each logging its own additions:
+            // RefreshArchivesForMod (a folder added to a mod mid-session) and
+            // BsaHandler.EnsureDataFolderArchivesIndexed (record-scoped widening for
+            // an outfit whose donor plugin has no ModSetting). A miss logged below
+            // must be read against this block PLUS any such lines that precede it.
             var bsaPaths = _bsa.GetIndexedBsaPaths();
             Trace($"Indexed BSA inventory ({bsaPaths.Count} archive(s)):");
             foreach (var bsaPath in bsaPaths)
@@ -118,12 +122,11 @@ public sealed class NpcChooserBsaProviderAdapter : IBsaArchiveProvider
 
     /// <summary>
     /// Re-scans ONE mod's folders and indexes any BSA that wasn't indexed yet.
-    /// <para><see cref="EnsureAllArchivesOpened"/> latches for the whole session
-    /// and its comment calls the indexed set invariant — true for the startup
-    /// walk, but a mod folder the user ADDS mid-session (Mods tab → Add folder)
-    /// brings archives that walk never saw, so a forced re-render would keep
-    /// missing their assets until the next launch. This is the targeted escape
-    /// hatch: <see cref="BsaHandler.AddMissingModToCache"/> merges per archive
+    /// <para><see cref="EnsureAllArchivesOpened"/> latches for the whole session,
+    /// which covers the startup walk — but a mod folder the user ADDS mid-session
+    /// (Mods tab → Add folder) brings archives that walk never saw, so a forced
+    /// re-render would keep missing their assets until the next launch. This is the
+    /// targeted escape hatch: <see cref="BsaHandler.AddMissingModToCache"/> merges per archive
     /// path and filters out already-indexed archives, so a mod with nothing new
     /// costs one directory scan and no archive I/O. Deliberately does NOT clear
     /// <c>_allOpened</c> — a full re-walk is far more expensive and the startup
