@@ -17,6 +17,7 @@ public class VM_MainWindow : ReactiveObject, IDisposable
     // Injected ViewModels for the different tabs
     private readonly VM_NpcSelectionBar _npcsViewModel;
     private readonly VM_Mods _modsViewModel;
+    private readonly VM_ModIssues _modIssuesViewModel;
     private readonly VM_Summary _summaryViewModel;
     private readonly VM_Settings _settingsViewModel;
     private readonly VM_Run _runViewModel;
@@ -40,6 +41,7 @@ public class VM_MainWindow : ReactiveObject, IDisposable
     // Properties to control which tab is selected (bound to RadioButtons)
     [Reactive] public bool IsNpcsTabSelected { get; set; } // Default tab
     [Reactive] public bool IsModsTabSelected { get; set; }
+    [Reactive] public bool IsModIssuesTabSelected { get; set; }
     [Reactive] public bool IsSummaryTabSelected { get; set; }
     [Reactive] public bool IsSettingsTabSelected { get; set; }
     [Reactive] public bool IsRunTabSelected { get; set; }
@@ -50,6 +52,7 @@ public class VM_MainWindow : ReactiveObject, IDisposable
     public VM_MainWindow(
         VM_NpcSelectionBar npcsViewModel,
         VM_Mods modsViewModel,
+        VM_ModIssues modIssuesViewModel,
         VM_Summary summaryViewModel,
         VM_Settings settingsViewModel,
         VM_Run runViewModel,
@@ -58,6 +61,7 @@ public class VM_MainWindow : ReactiveObject, IDisposable
     {
         _npcsViewModel = npcsViewModel;
         _modsViewModel = modsViewModel;
+        _modIssuesViewModel = modIssuesViewModel;
         _summaryViewModel = summaryViewModel;
         _settingsViewModel = settingsViewModel;
         _runViewModel = runViewModel;
@@ -95,6 +99,7 @@ public class VM_MainWindow : ReactiveObject, IDisposable
                     IsSettingsTabSelected = true;
                     IsNpcsTabSelected = false;
                     IsModsTabSelected = false;
+                    IsModIssuesTabSelected = false;
                     IsRunTabSelected = false;
                 }
             }).DisposeWith(_disposables);
@@ -137,6 +142,15 @@ public class VM_MainWindow : ReactiveObject, IDisposable
                     _modsNeedsMugshotPriorityRefresh = false;
                     _modsViewModel.RefreshCurrentModMugshots();
                 }
+            }).DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.IsModIssuesTabSelected)
+            .Where(isSelected => isSelected && AreOtherTabsEnabled)
+            .Subscribe(_ =>
+            {
+                if (CurrentViewModel != _modIssuesViewModel) CurrentViewModel = _modIssuesViewModel;
+                // First visit loads the cached scan results from disk (no scan).
+                _modIssuesViewModel.EnsureLoaded();
             }).DisposeWith(_disposables);
 
         this.WhenAnyValue(x => x.IsSummaryTabSelected)
@@ -183,6 +197,7 @@ public class VM_MainWindow : ReactiveObject, IDisposable
                 CurrentViewModel = _npcsViewModel;
                 IsNpcsTabSelected = true;
                 IsModsTabSelected = false;
+                IsModIssuesTabSelected = false;
                 IsSettingsTabSelected = false;
                 IsRunTabSelected = false;
             }
@@ -204,6 +219,7 @@ public class VM_MainWindow : ReactiveObject, IDisposable
             // as conditions are not met.
             IsNpcsTabSelected = false;
             IsModsTabSelected = false;
+            IsModIssuesTabSelected = false;
             IsRunTabSelected = false;
         }
     }

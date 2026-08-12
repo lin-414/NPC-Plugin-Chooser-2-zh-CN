@@ -869,6 +869,19 @@ The two are independent: a mod whose wigs you want forwarded to the skin but who
 
 Mods that contain [templated NPCs](#output-settings) grow a **Templated NPCs** dropdown in the same spot, overriding the global setting for just that mod's NPCs: **Default** (use the Settings tab's value), **Use the template's appearance**, or **Give each NPC its own copy**. Unlike the wig/antler dropdowns it shows in every output mode, because the setting applies in plain *Create* mode too.
 
+## Mod Issues Menu
+
+The Mod Issues tab finds appearance mods with broken or missing assets *before* you build a patch around them. Press **Scan** and N.P.C.2 walks every installed appearance mod's NPCs — no rendering involved — checking the files the game engine actually reads:
+
+* **Missing FaceGen mesh / tint** — the NPC's baked head `.nif` or face tint `.dds` can't be found in the mod, the vanilla archives, or your Data folder (the classic dark-face/no-head setup). Templated NPCs and races that don't use FaceGen are correctly exempt.
+* **Dark-face mismatch** — the FaceGen file exists, but the head parts baked into it don't match what the mod's records ask for (wrong plugin version, missing master, and similar), which dark-faces in game even though every file is present.
+* **Missing meshes** — a body/skin or outfit ArmorAddon model the engine would draw (including the NPC's effective outfit, leveled lists and runtime distributors included) doesn't resolve, along with missing `_0`/`_1` weight counterparts.
+* **Missing textures** — a texture path baked inside a rendered NIF, or referenced by an AlternateTextures entry, resolves nowhere. These are the white/wireframe body parts and untextured outfit pieces.
+
+The display works like a filtered Mods tab: the left panel lists only mods with issues (with per-type counts), and clicking one shows mugshots of just the affected NPCs, each carrying the warning badge whose tooltip lists the specific missing files. From a tile you can jump to that NPC in the NPCs tab, and each row has a button to show the mod in the Mods tab. The **Issue Type** dropdown narrows both the mod list and the tiles to one problem class, **Export CSV** dumps everything for spreadsheet triage, and **Ctrl+Shift+C** clears the search filters here like everywhere else.
+
+Results are cached to `ModIssuesCache.json` next to the executable, so the tab repopulates instantly on the next launch. **Scan** only re-examines mods whose files have changed since their last scan (rows that have drifted are marked as stale); **Rescan All** ignores the cache and starts fresh. A scan takes a few minutes on a large library the first time — it runs in the background, so you can keep using the other tabs while it works — and later scans only pay for what changed.
+
 ## Summary Menu
 
 ![Summary menu](docs/Screenshots/Summary/Summary_Menu.png)

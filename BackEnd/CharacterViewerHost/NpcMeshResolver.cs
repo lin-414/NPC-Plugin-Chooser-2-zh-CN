@@ -1930,6 +1930,10 @@ public class NpcMeshResolver
                 Textures = textures,
                 AlternateTextures = alternateTextures,
                 AllowLoadOrderFallback = allowLoadOrderFallback,
+                // Whether the engine morphs this piece between its _0/_1 pair.
+                // Pieces with the slider off ship a single weight file, so a
+                // "missing" sibling is not a defect for them (Mod Issues scan).
+                HasWeightVariants = GetWeightSliderEnabled(arma, sex),
             });
             LogVerbose("CharacterViewer: attire override '" + key + "' mesh=" + meshPath
                 + " slots=" + slots + " kind=" + kind + " src=" + source
@@ -2275,6 +2279,11 @@ public class NpcMeshResolver
         if (npcGetter.Race == null || npcGetter.Race.IsNull) return null;
         return Auxilliary.GetArmorRaceKey(ResolveRecord<IRaceGetter>(npcGetter.Race, linkCache, context));
     }
+
+    /// <summary>The ARMA's per-sex weight-slider flag — the engine's own signal
+    /// for whether this piece morphs between a _0/_1 world-model pair.</summary>
+    private static bool GetWeightSliderEnabled(IArmorAddonGetter armaGetter, Sex sex)
+        => sex == Sex.Female ? armaGetter.WeightSliderEnabled.Female : armaGetter.WeightSliderEnabled.Male;
 
     private static string? GetWorldModelPath(IArmorAddonGetter armaGetter, Sex sex)
     {

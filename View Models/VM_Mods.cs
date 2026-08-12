@@ -4301,6 +4301,31 @@ private VM_ModsMenuMugshot CreateMugshotVmFromData(VM_ModSetting modSetting, str
         }
     }
 
+    /// <summary>
+    /// Navigates to the Mods tab and brings <paramref name="modSetting"/> into
+    /// view with its mugshots loaded. The Mod Issues tab uses this for its
+    /// "Show in Mods tab" affordance; mirrors <see cref="NavigateToNpc"/>.
+    /// </summary>
+    public void NavigateToMod(VM_ModSetting modSetting)
+    {
+        _lazyMainWindowVm.Value.IsModsTabSelected = true;
+
+        // Give the tab switch a moment to render before selecting + scrolling,
+        // matching NavigateToNpc's scheduling approach.
+        RxApp.MainThreadScheduler.Schedule(TimeSpan.FromMilliseconds(100), () =>
+        {
+            if (!ModSettingsList.Contains(modSetting))
+            {
+                // Filtered out — clear the search filters so it can be shown.
+                ClearSearchFilters();
+                ApplyFilters();
+            }
+
+            ShowMugshotsCommand.Execute(modSetting).Subscribe().DisposeWith(_disposables);
+            SignalScrollToMod(modSetting);
+        });
+    }
+
     public void SignalScrollToMod(VM_ModSetting? modSetting)
     {
         if (modSetting != null)

@@ -292,6 +292,8 @@ namespace NPC_Plugin_Chooser_2
             builder.RegisterType<MeshSurveyRunner>().AsSelf().SingleInstance();
             builder.RegisterType<FaceGenAnalysisCache>().AsSelf().SingleInstance();
             builder.RegisterType<FaceGenConsistencyAnalyzer>().AsSelf().SingleInstance();
+            builder.RegisterType<ModIssuesCache>().AsSelf().SingleInstance();
+            builder.RegisterType<ModIssueScanner>().AsSelf().SingleInstance();
 
             // Offscreen renderer is a managed singleton — its GameWindow + FBO
             // are amortized across many mugshot renders. The factory must be
@@ -314,7 +316,8 @@ namespace NPC_Plugin_Chooser_2
             builder.RegisterType<VM_NpcSelectionBar>().AsSelf().SingleInstance();
             builder.RegisterType<VM_Settings>().AsSelf().SingleInstance(); 
             builder.RegisterType<VM_Run>().AsSelf().SingleInstance();
-            builder.RegisterType<VM_Mods>().AsSelf().SingleInstance();  
+            builder.RegisterType<VM_Mods>().AsSelf().SingleInstance();
+            builder.RegisterType<VM_ModIssues>().AsSelf().SingleInstance();
             builder.RegisterType<VM_Summary>().AsSelf().SingleInstance();
             builder.RegisterType<VM_FavoriteFaces>().AsSelf();
             builder.RegisterType<VM_FullScreenImage>().AsSelf();
@@ -337,6 +340,7 @@ namespace NPC_Plugin_Chooser_2
             builder.RegisterType<RunView>().As<IViewFor<VM_Run>>();
             builder.RegisterType<SummaryView>().As<IViewFor<VM_Summary>>();
             builder.RegisterType<ModsView>().As<IViewFor<VM_Mods>>();
+            builder.RegisterType<ModIssuesView>().As<IViewFor<VM_ModIssues>>();
             builder.RegisterType<FullScreenImageView>().As<IViewFor<VM_FullScreenImage>>();
             builder.RegisterType<FullScreen3DPreviewView>().As<IViewFor<VM_FullScreen3DPreview>>();
             builder.RegisterType<MultiImageDisplayView>().As<IViewFor<VM_MultiImageDisplay>>();
@@ -363,6 +367,7 @@ namespace NPC_Plugin_Chooser_2
             Locator.CurrentMutable.Register(() => new RunView(), typeof(IViewFor<VM_Run>));
             Locator.CurrentMutable.Register(() => new SummaryView(), typeof(IViewFor<VM_Summary>));
             Locator.CurrentMutable.Register(() => new ModsView(), typeof(IViewFor<VM_Mods>));
+            Locator.CurrentMutable.Register(() => new ModIssuesView(), typeof(IViewFor<VM_ModIssues>));
             Locator.CurrentMutable.Register(() => new FullScreenImageView(), typeof(IViewFor<VM_FullScreenImage>));
             Locator.CurrentMutable.Register(() => new FullScreen3DPreviewView(), typeof(IViewFor<VM_FullScreen3DPreview>));
             Locator.CurrentMutable.Register(() => new MultiImageDisplayView(), typeof(IViewFor<VM_MultiImageDisplay>));

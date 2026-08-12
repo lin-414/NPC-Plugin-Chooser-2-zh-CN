@@ -1023,6 +1023,7 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
         {
             HasMissingAssets = false;
             MissingAssetNotificationText = string.Empty;
+            MergeScanOverlayIntoMissingAssets();
             return;
         }
 
@@ -1046,6 +1047,66 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
 
         HasMissingAssets = true;
         MissingAssetNotificationText = sb.ToString();
+        MergeScanOverlayIntoMissingAssets();
+    }
+
+    // --- Mod Issues scan overlay -------------------------------------------
+    // The Mod Issues tab annotates tiles with scan-detected problems. The
+    // tile's own async image load re-applies metadata-derived notifications
+    // (deliberately, even with empty lists, to clear stale state), which would
+    // silently wipe a value set from outside — so the scan text is stored
+    // separately and re-merged after every rebuild of the notification text.
+    private string? _scanIssueOverlayText;
+
+    /// <summary>Overlays scan-detected issue text onto the missing-asset badge.
+    /// Persists across the tile's own metadata refreshes and deliberately
+    /// ignores the ShowMissingNpcAssetsIcon display gate — on the Mod Issues
+    /// tab the badge IS the content.</summary>
+    public void ApplyScanIssueOverlay(string text)
+    {
+        _scanIssueOverlayText = string.IsNullOrWhiteSpace(text) ? null : text;
+        MergeScanOverlayIntoMissingAssets();
+    }
+
+    private void MergeScanOverlayIntoMissingAssets()
+    {
+        if (_scanIssueOverlayText == null) return;
+        HasMissingAssets = true;
+        if (string.IsNullOrEmpty(MissingAssetNotificationText))
+        {
+            MissingAssetNotificationText = _scanIssueOverlayText;
+        }
+        else if (!MissingAssetNotificationText.Contains(_scanIssueOverlayText, StringComparison.Ordinal))
+        {
+            MissingAssetNotificationText += "\n\n" + _scanIssueOverlayText;
+        }
+    }
+
+    // Outfit twin of the pair above: scan-detected outfit/headgear issues route
+    // to the Missing Outfit Assets badge, and survive ApplyOutfitAssetNotices'
+    // deliberate rebuild-from-metadata the same way.
+    private string? _scanOutfitOverlayText;
+
+    /// <summary>Overlays scan-detected OUTFIT issue text onto the missing-outfit-assets
+    /// badge. See <see cref="ApplyScanIssueOverlay"/> for the semantics.</summary>
+    public void ApplyScanOutfitIssueOverlay(string text)
+    {
+        _scanOutfitOverlayText = string.IsNullOrWhiteSpace(text) ? null : text;
+        MergeScanOverlayIntoOutfitAssets();
+    }
+
+    private void MergeScanOverlayIntoOutfitAssets()
+    {
+        if (_scanOutfitOverlayText == null) return;
+        HasMissingOutfitAssets = true;
+        if (string.IsNullOrEmpty(MissingOutfitAssetsText))
+        {
+            MissingOutfitAssetsText = _scanOutfitOverlayText;
+        }
+        else if (!MissingOutfitAssetsText.Contains(_scanOutfitOverlayText, StringComparison.Ordinal))
+        {
+            MissingOutfitAssetsText += "\n\n" + _scanOutfitOverlayText;
+        }
     }
 
     /// <summary>Sets the outfit-asset badge from render output or stamped
@@ -1063,6 +1124,7 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
         {
             HasMissingOutfitAssets = false;
             MissingOutfitAssetsText = string.Empty;
+            MergeScanOverlayIntoOutfitAssets();
             return;
         }
 
@@ -1083,6 +1145,7 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
 
         HasMissingOutfitAssets = true;
         MissingOutfitAssetsText = sb.ToString();
+        MergeScanOverlayIntoOutfitAssets();
     }
 
     /// <summary>Builds the placeholder tooltip body listing where NPC2 looks

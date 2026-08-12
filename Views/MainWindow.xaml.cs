@@ -74,6 +74,10 @@ namespace NPC_Plugin_Chooser_2.Views
                           v  => v.ModsRadioButton.IsChecked)
                     .DisposeWith(disposables);
                 this.Bind(ViewModel,
+                          vm => vm.IsModIssuesTabSelected,
+                          v  => v.ModIssuesRadioButton.IsChecked)
+                    .DisposeWith(disposables);
+                this.Bind(ViewModel,
                         vm => vm.IsSummaryTabSelected,
                         v  => v.SummaryRadioButton.IsChecked)
                     .DisposeWith(disposables);
@@ -92,6 +96,7 @@ namespace NPC_Plugin_Chooser_2.Views
                     {
                         NpcsRadioButton.IsEnabled      = enabled;
                         ModsRadioButton.IsEnabled      = enabled;
+                        ModIssuesRadioButton.IsEnabled = enabled;
                         SummaryRadioButton.IsEnabled   = enabled;
                         RunRadioButton.IsEnabled       = enabled;
                         // Settings remains always enabled
@@ -108,6 +113,7 @@ namespace NPC_Plugin_Chooser_2.Views
                             // Clear to let your style/template restore normal look
                             NpcsRadioButton.ClearValue(Control.ForegroundProperty);
                             ModsRadioButton.ClearValue(Control.ForegroundProperty);
+                            ModIssuesRadioButton.ClearValue(Control.ForegroundProperty);
                             SummaryRadioButton.ClearValue(Control.ForegroundProperty);
                             RunRadioButton.ClearValue(Control.ForegroundProperty);
                         }
@@ -118,6 +124,9 @@ namespace NPC_Plugin_Chooser_2.Views
                                 Control.ForegroundProperty,
                                 SystemColors.GrayTextBrushKey);
                             ModsRadioButton.SetResourceReference(
+                                Control.ForegroundProperty,
+                                SystemColors.GrayTextBrushKey);
+                            ModIssuesRadioButton.SetResourceReference(
                                 Control.ForegroundProperty,
                                 SystemColors.GrayTextBrushKey);
                             SummaryRadioButton.SetResourceReference(
@@ -151,6 +160,7 @@ namespace NPC_Plugin_Chooser_2.Views
             {
                 NpcsRadioButton.Template = template;
                 ModsRadioButton.Template = template;
+                ModIssuesRadioButton.Template = template;
                 SummaryRadioButton.Template = template;
                 SettingsRadioButton.Template = template;
                 RunRadioButton.Template = template;
