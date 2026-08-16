@@ -788,14 +788,23 @@ public class AssetHandler : OptionalUIModule
 
     /// <summary>
     /// Re-points a copied FaceGen NIF's baked face-tint slot at the tint file this run delivers
-    /// beside it. The engine reads the tint texture's path from the NIF (the CK bakes it in), not
-    /// from the FormID naming convention — so a mesh delivered under a DIFFERENT NPC's FormKey
-    /// (appearance share, SkyPatcher surrogate, flattened Traits template) still names the source
-    /// NPC's tint, a path this run deliberately does not ship (writing another NPC's path is the
-    /// cross-NPC contamination removed in f047216, and "no pass writes another NPC's path" is now
-    /// an invariant). Editing the destination copy is the only fix compatible with that invariant.
-    /// Matching tolerates slash/asset-root spelling differences via regularization; the remap is
-    /// keyed by the exact spelling stored in the NIF. Returns the number of slots rewritten.
+    /// beside it, so a mesh delivered under a DIFFERENT NPC's FormKey (appearance share,
+    /// SkyPatcher surrogate, flattened Traits template) stops naming the source NPC's tint —
+    /// a path this run deliberately does not ship (writing another NPC's path is the cross-NPC
+    /// contamination removed in f047216, and "no pass writes another NPC's path" is an invariant).
+    ///
+    /// <para>This is NIF-consistency HYGIENE, not an engine requirement: the engine loads the
+    /// face tint exclusively from the canonical FormID-derived path and never consults the baked
+    /// slot (proven by in-game A/B 2026-08-15 — docs/FaceTintEngineTest-2026-08.md, which also
+    /// re-audits the original commit's contrary claim; what actually keeps shares correct is the
+    /// FaceGen ladder delivering the tint DDS at the destination's canonical path). The rewrite
+    /// stays because a delivered NIF whose slot names the file shipped beside it is what external
+    /// tools expect (EasyNPC writes the same), and a dangling donor path would otherwise look
+    /// like an error to NIF-level tooling.</para>
+    ///
+    /// <para>Matching tolerates slash/asset-root spelling differences via regularization; the
+    /// remap is keyed by the exact spelling stored in the NIF. Returns the number of slots
+    /// rewritten.</para>
     /// </summary>
     internal static int RewriteCopiedFaceTintPath(string copiedNifPath, string sourceFaceTintSubPath,
         string? destinationFaceTintSubPath, Action<string>? log = null)

@@ -77,6 +77,7 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
                 <Border Grid.Row="0" BorderBrush="LightGray" BorderThickness="0,0,0,1" Margin="0,0,0,5" Padding="5">
@@ -105,6 +106,18 @@
                                   Content="Include outfit-only issues"
                                   VerticalAlignment="Center" Margin="0,2,15,2"
                                   ToolTip="If unchecked, mods and NPCs whose only problems are outfit/headgear-related are hidden, leaving just face and body defects."/>
+                        <CheckBox IsChecked="{Binding ShowNotes, Mode=TwoWay}"
+                                  Content="{Binding ShowNotesLabel}"
+                                  VerticalAlignment="Center" Margin="0,2,15,2"
+                                  ToolTip="Notes are real but subtle findings — secondary texture maps (specular, environment, subsurface) that are missing. Even vanilla meshes reference some of these without shipping them, so they rarely matter in game."/>
+                        <CheckBox IsChecked="{Binding ShowIgnored, Mode=TwoWay}"
+                                  Content="{Binding ShowIgnoredLabel}"
+                                  VerticalAlignment="Center" Margin="0,2,15,2"
+                                  ToolTip="Show issues you have ignored (right-click a results row to ignore/unignore). Ignored issues are excluded from counts, badges and CSV export while hidden."/>
+                        <CheckBox IsChecked="{Binding GroupByFile, Mode=TwoWay}"
+                                  Content="Group by file"
+                                  VerticalAlignment="Center" Margin="0,2,15,2"
+                                  ToolTip="Collapse the results table to one row per distinct problem with an NPC count — shared body/head meshes repeat the same missing file across many NPCs. Clicking a mugshot still shows that NPC's individual rows."/>
                     </WrapPanel>
                 </Border>
 
@@ -126,7 +139,15 @@
                     <ListBox.ItemTemplate>
                         <DataTemplate DataType="{x:Type vm:VM_ModIssueEntry}">
                             <Border BorderBrush="OrangeRed" BorderThickness="1" CornerRadius="3"
-                                    Margin="0,2" Padding="6,4">
+                                    Margin="0,2" Padding="6,4"
+                                    Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=ListBox}}">
+                                <Border.ContextMenu>
+                                    <ContextMenu>
+                                        <MenuItem Header="Rescan this mod (ignore cache)"
+                                                  Command="{Binding PlacementTarget.Tag.RescanModCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                  CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                    </ContextMenu>
+                                </Border.ContextMenu>
                                 <StackPanel>
                                     <Grid>
                                         <Grid.ColumnDefinitions>
@@ -168,6 +189,43 @@
                         </DataTemplate>
                     </ListBox.ItemTemplate>
                 </ListBox>
+
+                <!-- Eligible mods with no scan result yet: absence must not read
+                     as "no issues". -->
+                <Expander Grid.Row="3" Margin="0,4,0,0" IsExpanded="False">
+                    <Expander.Style>
+                        <Style TargetType="Expander">
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding UnscannedModNames.Count}" Value="0">
+                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Expander.Style>
+                    <Expander.Header>
+                        <TextBlock Text="{Binding UnscannedModNames.Count, StringFormat='Not yet scanned ({0})'}"
+                                   FontStyle="Italic" Foreground="Gray"/>
+                    </Expander.Header>
+                    <ScrollViewer MaxHeight="180" VerticalScrollBarVisibility="Auto">
+                        <ItemsControl ItemsSource="{Binding UnscannedModNames}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Margin="4,1">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="{Binding}" Foreground="Gray"
+                                                   TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                                        <Button Grid.Column="1" Content="Scan" Padding="6,0" Margin="5,0,0,0"
+                                                Command="{Binding DataContext.ScanSingleModCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                                CommandParameter="{Binding}"/>
+                                    </Grid>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </Expander>
             </Grid>
 
             <GridSplitter Grid.Column="1" Width="5" HorizontalAlignment="Center" VerticalAlignment="Stretch"
@@ -187,8 +245,11 @@
                         <TextBlock Text="{Binding SelectedEntry.DisplayName, StringFormat='NPCs with issues in: {0}', TargetNullValue='Select a mod from the left panel'}"
                                    FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"
                                    HorizontalAlignment="Left" TextTrimming="CharacterEllipsis"/>
-                        <TextBlock Text="Loading…" FontStyle="Italic" VerticalAlignment="Center" HorizontalAlignment="Right"
-                                   Visibility="{Binding IsLoadingMugshots, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                        <Button Content="Cancel Mugshot Load"
+                                Command="{Binding CancelMugshotLoadCommand}"
+                                VerticalAlignment="Center" HorizontalAlignment="Right"
+                                Padding="5,2"
+                                Visibility="{Binding IsLoadingMugshots, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                     </Grid>
                 </Border>
 
@@ -220,6 +281,51 @@
                                                     <Style.Triggers>
                                                         <DataTrigger Binding="{Binding HasMugshot}" Value="False">
                                                             <Setter Property="Opacity" Value="0.3"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Image.Style>
+                                        </Image>
+
+                                        <!-- Orbiting-dragon spinner while the tile's mugshot generates,
+                                             same as the NPCs/Mods menus. -->
+                                        <Image x:Name="LoadingDragonImage"
+                                               Source="/NPC Plugin Chooser 2;component/Resources/RedDragon.png"
+                                               Visibility="{Binding IsLoading, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center"
+                                               RenderTransformOrigin="0.5,0.5"
+                                               Width="{Binding RelativeSource={RelativeSource AncestorType=Grid}, Path=ActualWidth, Converter={StaticResource PercentageSizingConverter}, ConverterParameter='50'}"
+                                               Height="{Binding RelativeSource={RelativeSource Self}, Path=Width}">
+                                            <Image.Style>
+                                                <Style TargetType="Image">
+                                                    <Setter Property="RenderTransform">
+                                                        <Setter.Value>
+                                                            <TransformGroup>
+                                                                <TranslateTransform Y="0" /> <RotateTransform Angle="0" />
+                                                            </TransformGroup>
+                                                        </Setter.Value>
+                                                    </Setter>
+
+                                                    <Setter Property="local:DynamicRadiusBehavior.ImageWidth" Value="{Binding ImageWidth}" />
+                                                    <Setter Property="local:DynamicRadiusBehavior.ImageHeight" Value="{Binding ImageHeight}" />
+                                                    <Setter Property="local:DynamicRadiusBehavior.RadiusMultiplier" Value="0.25" />
+
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsLoading}" Value="True">
+                                                            <DataTrigger.EnterActions>
+                                                                <BeginStoryboard x:Name="OrbitDragon_BeginStoryboard">
+                                                                    <Storyboard>
+                                                                        <DoubleAnimation
+                                                                            Storyboard.TargetProperty="RenderTransform.Children[1].Angle"
+                                                                            From="0" To="360" Duration="0:0:3"
+                                                                            RepeatBehavior="Forever" />
+                                                                    </Storyboard>
+                                                                </BeginStoryboard>
+                                                            </DataTrigger.EnterActions>
+                                                            <DataTrigger.ExitActions>
+                                                                <StopStoryboard BeginStoryboardName="OrbitDragon_BeginStoryboard"/>
+                                                            </DataTrigger.ExitActions>
                                                         </DataTrigger>
                                                     </Style.Triggers>
                                                 </Style>
@@ -277,13 +383,26 @@
                 <Grid Grid.Row="3">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
                     <TextBlock Grid.Row="0" Text="{Binding IssueTableHeaderText}" FontStyle="Italic"
                                Margin="2,4,2,2" TextTrimming="CharacterEllipsis"/>
+                    <TextBlock Grid.Row="1" Text="{Binding OutfitHintText}" Foreground="Orange"
+                               Margin="2,0,2,2" TextWrapping="Wrap">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding OutfitHintText}" Value="">
+                                        <Setter Property="Visibility" Value="Collapsed"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
                     <!-- Theme resources carry no implicit DataGrid styles, so the
                          grid is themed inline — same recipe as ValidationResultsWindow. -->
-                    <DataGrid Grid.Row="1" ItemsSource="{Binding IssueTableRows}"
+                    <DataGrid Grid.Row="2" ItemsSource="{Binding IssueTableRows}"
                               AutoGenerateColumns="False" IsReadOnly="True"
                               CanUserAddRows="False" CanUserDeleteRows="False"
                               CanUserResizeColumns="True" CanUserSortColumns="True"
@@ -333,16 +452,94 @@
                             <Style TargetType="DataGridRow">
                                 <Setter Property="Background" Value="{DynamicResource SecondaryBackground}"/>
                                 <Setter Property="Foreground" Value="{DynamicResource PrimaryForeground}"/>
+                                <!-- The VM rides in on Tag so the row's context menu
+                                     (outside the visual tree) can reach its commands;
+                                     the row item itself is the CommandParameter. -->
+                                <Setter Property="Tag" Value="{Binding DataContext, RelativeSource={RelativeSource AncestorType=DataGrid}}"/>
+                                <Setter Property="ContextMenu">
+                                    <Setter.Value>
+                                        <ContextMenu>
+                                            <MenuItem Header="Ignore this file for this mod (all NPCs)"
+                                                      Command="{Binding PlacementTarget.Tag.IgnoreFileCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                            <MenuItem Header="Ignore this file in ALL mods"
+                                                      Command="{Binding PlacementTarget.Tag.IgnoreFileAllModsCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                            <MenuItem Header="Ignore exactly this row's issue(s)"
+                                                      Command="{Binding PlacementTarget.Tag.IgnoreExactCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                            <MenuItem Header="Unignore"
+                                                      Command="{Binding PlacementTarget.Tag.UnignoreCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                            <Separator/>
+                                            <MenuItem Header="Copy NPC">
+                                                <MenuItem Header="Name"
+                                                          Command="{Binding PlacementTarget.Tag.CopyNpcNameCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                                <MenuItem Header="EditorID"
+                                                          Command="{Binding PlacementTarget.Tag.CopyNpcEditorIdCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                                <MenuItem Header="FormID (load order)"
+                                                          Command="{Binding PlacementTarget.Tag.CopyNpcFormIdCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                                <MenuItem Header="FormKey"
+                                                          Command="{Binding PlacementTarget.Tag.CopyNpcFormKeyCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                          CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
+                                            </MenuItem>
+                                            <MenuItem Header="Copy selected cells"
+                                                      Command="ApplicationCommands.Copy"
+                                                      InputGestureText="Ctrl+C"/>
+                                        </ContextMenu>
+                                    </Setter.Value>
+                                </Setter>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsNote}" Value="True">
+                                        <Setter Property="Opacity" Value="0.7"/>
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding IsIgnored}" Value="True">
+                                        <Setter Property="Opacity" Value="0.45"/>
+                                        <Setter Property="FontStyle" Value="Italic"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
                             </Style>
                         </DataGrid.RowStyle>
+                        <DataGrid.Resources>
+                            <Style x:Key="WrappingCellText" TargetType="TextBlock"
+                                   BasedOn="{StaticResource {x:Type TextBlock}}">
+                                <Setter Property="TextWrapping" Value="Wrap"/>
+                            </Style>
+                        </DataGrid.Resources>
                         <DataGrid.Columns>
                             <DataGridTextColumn Header="NPC" Binding="{Binding NpcDisplayName}" Width="Auto"/>
+                            <DataGridTextColumn Header="NPCs" Binding="{Binding NpcCount}" Width="Auto"/>
                             <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="Auto"/>
                             <DataGridTextColumn Header="Issue" Binding="{Binding TypeDisplay}" Width="Auto"/>
-                            <DataGridTextColumn Header="Missing / Affected Path" Binding="{Binding AffectedPath}" Width="2*"/>
-                            <DataGridTextColumn Header="Where" Binding="{Binding Location}" Width="*"/>
-                            <DataGridTextColumn Header="Referenced By" Binding="{Binding Referencer}" Width="*"/>
-                            <DataGridTextColumn Header="Details" Binding="{Binding Detail}" Width="2*"/>
+                            <DataGridTextColumn Header="Missing / Affected Path" Binding="{Binding AffectedPath}" Width="2*"
+                                                ElementStyle="{StaticResource WrappingCellText}"/>
+                            <DataGridTextColumn Header="Where" Binding="{Binding Location}" Width="*"
+                                                ElementStyle="{StaticResource WrappingCellText}"/>
+                            <DataGridTextColumn Header="Referenced By" Binding="{Binding Referencer}" Width="*"
+                                                ElementStyle="{StaticResource WrappingCellText}"/>
+                            <DataGridTextColumn Header="Provided By" Binding="{Binding ProvidedBy}" Width="*"
+                                                ElementStyle="{StaticResource WrappingCellText}"/>
+                            <!-- Details can run to dozens of lines (dark-face reason texts); the
+                                 cell caps its height and scrolls internally instead of growing the
+                                 row past the viewport. ClipboardContentBinding keeps Ctrl+C intact. -->
+                            <DataGridTemplateColumn Header="Details" Width="2*"
+                                                    ClipboardContentBinding="{Binding Detail}"
+                                                    SortMemberPath="Detail">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <ScrollViewer MaxHeight="240"
+                                                      VerticalScrollBarVisibility="Auto"
+                                                      HorizontalScrollBarVisibility="Disabled"
+                                                      Focusable="False"
+                                                      PreviewMouseWheel="DetailsCell_PreviewMouseWheel">
+                                            <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" Padding="0,0,4,0"/>
+                                        </ScrollViewer>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
                         </DataGrid.Columns>
                     </DataGrid>
                 </Grid>

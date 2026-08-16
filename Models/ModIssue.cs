@@ -46,6 +46,29 @@ namespace NPC_Plugin_Chooser_2.Models
         /// effectively uninstalled. Emitted once per mod instead of flooding one
         /// issue per NPC asset.</summary>
         ModNotInstalled,
+
+        /// <summary>The mod's records reference head parts from a plugin that is
+        /// neither in the mod's own folders nor resolvable at all — a missing
+        /// hard dependency (Eyes Nouveaux, KS Hairdo's, …). AffectedPath carries
+        /// the absent plugin's filename so one dependency rolls up to one line
+        /// per NPC instead of a wall of dark-face text; without this split, one
+        /// absent plugin produced thousands of DarkFaceMismatch rows (measured:
+        /// 2,929 for one mod).</summary>
+        MissingHeadPartPlugin,
+    }
+
+    /// <summary>
+    /// How visible a detected problem is in game. Mirrors the project's
+    /// warning-severity bar: <see cref="Issue"/> is reserved for defects the
+    /// player can actually see (untextured/invisible meshes, dark faces,
+    /// missing dependencies); <see cref="Note"/> covers real-but-subtle
+    /// findings (secondary texture-slot misses that even vanilla assets have),
+    /// hidden by default behind a toggle.
+    /// </summary>
+    public enum ModIssueSeverity
+    {
+        Issue,
+        Note,
     }
 
     /// <summary>One detected problem. NpcFormKey is FormKey.Null for mod-level
@@ -79,6 +102,53 @@ namespace NPC_Plugin_Chooser_2.Models
         /// assets. Drives which badge the tile shows (Missing Outfit Assets vs
         /// Missing Asset) and the "include outfit-only issues" filter.</summary>
         public bool IsOutfitIssue { get; set; }
+
+        /// <summary>In-game visibility tier; <see cref="ModIssueSeverity.Note"/>
+        /// rows are hidden by default. Serialized in the cache so the split
+        /// survives sessions.</summary>
+        public ModIssueSeverity Severity { get; set; } = ModIssueSeverity.Issue;
+
+        /// <summary>Display name of the installed mod whose folder/BSA supplied
+        /// the referencing NIF (outfit issues mostly come from the outfit mod,
+        /// not the appearance replacer being scanned). Null when the provider is
+        /// the scanned mod itself or could not be attributed.</summary>
+        public string? SourceModName { get; set; }
+    }
+
+    /// <summary>
+    /// One user-suppressed issue, persisted in Settings (NOT the scan cache, so
+    /// ignores survive rescans and cache-version bumps). Two scopes exist:
+    /// file-scope (NpcFormKey null — hides every occurrence of the path in the
+    /// mod) and exact-scope (NpcFormKey set, plus Nif/Shape for NIF-texture
+    /// rows). Paths are compared case-insensitively as stored.
+    /// </summary>
+    public class ModIssueIgnoreEntry
+    {
+        public string ModName { get; set; } = string.Empty;
+
+        /// <summary>Global scope: the entry matches the path in EVERY mod
+        /// (ModName is then informational only — the mod it was created from).
+        /// For files like vanilla's own mouth subsurface maps that recur across
+        /// the whole library.</summary>
+        public bool AllMods { get; set; }
+
+        public ModIssueType Type { get; set; }
+        public string AffectedPath { get; set; } = string.Empty;
+        public FormKey NpcFormKey { get; set; } = FormKey.Null;
+        public string? NifPath { get; set; }
+        public string? ShapeName { get; set; }
+
+        public bool Matches(string modName, ModIssue issue)
+        {
+            if (!AllMods && !ModName.Equals(modName, StringComparison.OrdinalIgnoreCase)) return false;
+            if (Type != issue.Type) return false;
+            if (!AffectedPath.Equals(issue.AffectedPath, StringComparison.OrdinalIgnoreCase)) return false;
+            if (NpcFormKey.IsNull) return true; // file scope
+            if (!NpcFormKey.Equals(issue.NpcFormKey)) return false;
+            if (NifPath != null && !NifPath.Equals(issue.NifPath ?? string.Empty, StringComparison.OrdinalIgnoreCase)) return false;
+            if (ShapeName != null && !ShapeName.Equals(issue.ShapeName ?? string.Empty, StringComparison.OrdinalIgnoreCase)) return false;
+            return true;
+        }
     }
 
     /// <summary>
@@ -127,6 +197,10 @@ namespace NPC_Plugin_Chooser_2.Models
 
         public int ScannedNpcCount { get; set; }
 
+        /// <summary>NPCs whose scan threw and was swallowed — surfaced on the
+        /// mod's row so a silent gap can't read as "clean".</summary>
+        public int FailedNpcCount { get; set; }
+
         public List<ModIssue> Issues { get; set; } = new();
     }
 
@@ -137,7 +211,15 @@ namespace NPC_Plugin_Chooser_2.Models
         /// invalidated globally.</summary>
         // v2: weight siblings gated on the ARMA weight-slider flag; issues carry
         //     the outfit/base split (IsOutfitIssue).
-        public const int CurrentVersion = 2;
+        // v3: slot-aware texture checks (face-tint slot skipped — engine proven
+        //     canonical-only; secondary slots demoted to Notes), Issue/Note
+        //     severity, origin-scoped dark-face resolution, missing-dependency
+        //     rollup (MissingHeadPartPlugin), outfit source attribution.
+        // v4: per-issue context enrichment — texture slot + biped partition +
+        //     resolved-NIF source in Detail, same-type baked-shape pairing and
+        //     record-source-aware remedies in dark-face text, template-terminus
+        //     notes on FaceGen mesh/tint rows, WornArmor/race-skin referencers.
+        public const int CurrentVersion = 4;
 
         public int Version { get; set; } = CurrentVersion;
 

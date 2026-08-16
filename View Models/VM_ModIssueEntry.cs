@@ -14,12 +14,21 @@ namespace NPC_Plugin_Chooser_2.View_Models;
 /// scan-detected issue, with per-type counts and the per-NPC issue grouping the
 /// mugshot panel displays. Plain ReactiveObject constructed directly by
 /// <see cref="VM_ModIssues"/> — no DI registration needed.
+///
+/// <para>Counts and groupings are computed over <see cref="VisibleIssues"/> —
+/// the subset that survives the owner's severity (Show notes) and ignore-list
+/// filters — while <see cref="Result"/> keeps the raw scan output for CSV
+/// export. The owner rebuilds entries whenever those filters change.</para>
 /// </summary>
 public class VM_ModIssueEntry : ReactiveObject
 {
     public string DisplayName { get; }
     public VM_ModSetting SourceVm { get; }
     public ModIssueScanResult Result { get; }
+
+    /// <summary>Issues that pass the owner's severity/ignore filters — the set
+    /// every count, tile and table row on this entry is built from.</summary>
+    public IReadOnlyList<ModIssue> VisibleIssues { get; }
 
     public int TotalIssueCount { get; }
     public int AffectedNpcCount { get; }
@@ -41,21 +50,22 @@ public class VM_ModIssueEntry : ReactiveObject
     public ReactiveCommand<Unit, Unit> OpenInModsTabCommand { get; }
 
     public VM_ModIssueEntry(string displayName, VM_ModSetting sourceVm, ModIssueScanResult result,
-        VM_Mods modsViewModel)
+        IReadOnlyList<ModIssue> visibleIssues, VM_Mods modsViewModel)
     {
         DisplayName = displayName;
         SourceVm = sourceVm;
         Result = result;
+        VisibleIssues = visibleIssues;
 
-        IssuesByNpc = result.Issues
+        IssuesByNpc = visibleIssues
             .Where(i => !i.NpcFormKey.IsNull)
             .GroupBy(i => i.NpcFormKey)
             .ToDictionary(g => g.Key, g => g.ToList());
-        ModLevelIssues = result.Issues.Where(i => i.NpcFormKey.IsNull).ToList();
+        ModLevelIssues = visibleIssues.Where(i => i.NpcFormKey.IsNull).ToList();
 
-        TotalIssueCount = result.Issues.Count;
+        TotalIssueCount = visibleIssues.Count;
         AffectedNpcCount = IssuesByNpc.Count;
-        CountsByType = result.Issues
+        CountsByType = visibleIssues
             .GroupBy(i => i.Type)
             .ToDictionary(g => g.Key, g => g.Count());
         CountsByTypeDisplay = CountsByType
@@ -66,6 +76,10 @@ public class VM_ModIssueEntry : ReactiveObject
         SummaryText = ModLevelIssues.Any(i => i.Type == ModIssueType.ModNotInstalled)
             ? "Mod not installed"
             : $"{TotalIssueCount} issue{(TotalIssueCount == 1 ? "" : "s")} · {AffectedNpcCount} NPC{(AffectedNpcCount == 1 ? "" : "s")}";
+        if (result.FailedNpcCount > 0)
+        {
+            SummaryText += $" · ⚠ {result.FailedNpcCount} NPC{(result.FailedNpcCount == 1 ? "" : "s")} could not be scanned";
+        }
         ScanTimeText = $"Scanned {result.ScanTimeUtc.ToLocalTime():g}";
 
         OpenInModsTabCommand = ReactiveCommand.Create(() => modsViewModel.NavigateToMod(SourceVm));
@@ -81,6 +95,7 @@ public class VM_ModIssueEntry : ReactiveObject
         ModIssueType.MissingAltTexture => "Missing alt texture",
         ModIssueType.MissingNifTexture => "Missing texture",
         ModIssueType.ModNotInstalled => "Mod not installed",
+        ModIssueType.MissingHeadPartPlugin => "Missing required mod",
         _ => type.ToString(),
     };
 
@@ -95,6 +110,7 @@ public class VM_ModIssueEntry : ReactiveObject
             foreach (var issue in group)
             {
                 sb.Append("\n - ").Append(issue.AffectedPath);
+                if (issue.Severity == ModIssueSeverity.Note) sb.Append(" (note)");
                 if (!string.IsNullOrEmpty(issue.ShapeName))
                 {
                     sb.Append(" (shape '").Append(issue.ShapeName).Append('\'');
@@ -107,6 +123,10 @@ public class VM_ModIssueEntry : ReactiveObject
                 else if (!string.IsNullOrEmpty(issue.ReferencingRecord))
                 {
                     sb.Append(" (via ").Append(issue.ReferencingRecord).Append(')');
+                }
+                if (!string.IsNullOrEmpty(issue.SourceModName))
+                {
+                    sb.Append(" [from ").Append(issue.SourceModName).Append(']');
                 }
                 if (issue.Type == ModIssueType.DarkFaceMismatch && !string.IsNullOrEmpty(issue.Detail))
                 {

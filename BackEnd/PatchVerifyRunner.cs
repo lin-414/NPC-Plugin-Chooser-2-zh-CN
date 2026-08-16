@@ -506,7 +506,8 @@ public static class PatchVerifyRunner
         return entries;
     }
 
-    private readonly record struct LoadOrderIndex(int Index, bool IsLight, bool Approximate);
+    // internal: VM_ModIssues reuses the runtime-FormID mapping for its "Copy FormID" action.
+    internal readonly record struct LoadOrderIndex(int Index, bool IsLight, bool Approximate);
 
     /// <summary>
     /// Maps each enabled plugin to the mod index the game will give it, so the bats carry real
@@ -518,7 +519,7 @@ public static class PatchVerifyRunner
     /// the mod is not loaded, the extension is the fallback and the row is marked approximate so
     /// the manifest can say so rather than quietly emitting a wrong ID.</para>
     /// </summary>
-    private static Dictionary<ModKey, LoadOrderIndex> BuildLoadOrderIndices(
+    internal static Dictionary<ModKey, LoadOrderIndex> BuildLoadOrderIndices(
         EnvironmentStateProvider env, StringBuilder log)
     {
         var map = new Dictionary<ModKey, LoadOrderIndex>();

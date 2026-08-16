@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using Mutagen.Bethesda.Plugins;
+using Mutagen.Bethesda.Skyrim;
 using NPC_Plugin_Chooser_2.BackEnd;
 using NPC_Plugin_Chooser_2.BackEnd.CharacterViewerHost;
 using NPC_Plugin_Chooser_2.Models;
@@ -39,6 +40,7 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
     private readonly VM_Mods _modsViewModel;
     private readonly VM_Run _runViewModel;
     private readonly VM_ModsMenuMugshot.Factory _mugshotFactory;
+    private readonly EnvironmentStateProvider _environmentStateProvider;
     private readonly CompositeDisposable _disposables = new();
 
     private readonly List<VM_ModIssueEntry> _allEntries = new();
@@ -49,6 +51,16 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
     private IssueTypeFilterOption? _lastLoadedTypeFilter;
     private bool _lastLoadedIncludeOutfitOnly = true;
     private IDisposable? _tileLoadRepackSubscription;
+
+    /// <summary>The most recent full result set (cache load or scan), kept so
+    /// severity/ignore toggle flips can rebuild the entries without re-reading
+    /// the cache from disk.</summary>
+    private IReadOnlyDictionary<string, ModIssueScanResult> _lastResults =
+        new Dictionary<string, ModIssueScanResult>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Settings.ModIssuesIgnored grouped by mod name for O(entries-per-mod)
+    /// matching instead of a whole-list scan per issue.</summary>
+    private Dictionary<string, List<ModIssueIgnoreEntry>> _ignoreLookup = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Per-load auto-generation state, mirroring VM_Mods'
     /// MugshotGenerationBatch: bounds the parallel renders and keeps
@@ -85,6 +97,24 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
     /// are hidden, leaving just face/body defects.</summary>
     [Reactive] public bool IncludeOutfitOnlyIssues { get; set; } = true;
 
+    /// <summary>Show Note-severity findings — real but subtle in game
+    /// (secondary texture slots that even vanilla meshes reference without
+    /// shipping). Off by default so the headline view stays actionable.</summary>
+    [Reactive] public bool ShowNotes { get; set; }
+
+    /// <summary>Show rows the user has ignored (greyed; Unignore available from
+    /// the row's context menu).</summary>
+    [Reactive] public bool ShowIgnored { get; set; }
+
+    /// <summary>Collapse the results table to one row per distinct problem with
+    /// an NPC count (shared body/head NIFs repeat one missing file across every
+    /// NPC — measured ~9.5× row reduction). Clicking a mugshot tile still shows
+    /// that NPC's individual rows.</summary>
+    [Reactive] public bool GroupByFile { get; set; } = true;
+
+    [Reactive] public string ShowNotesLabel { get; set; } = "Show notes";
+    [Reactive] public string ShowIgnoredLabel { get; set; } = "Show ignored";
+
     // --- Scan state ---
     [Reactive] public bool IsScanning { get; private set; }
     [Reactive] public double ScanProgressValue { get; set; }
@@ -97,6 +127,7 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
     public ReactiveCommand<Unit, Unit> RescanAllCommand { get; }
     public ReactiveCommand<Unit, Unit> CancelScanCommand { get; }
     public ReactiveCommand<Unit, Unit> ExportCsvCommand { get; }
+    public ReactiveCommand<Unit, Unit> CancelMugshotLoadCommand { get; }
 
     // --- Right panel (mugshots) ---
     public ObservableCollection<VM_ModsMenuMugshot> CurrentModNpcMugshots { get; } = new();
@@ -104,12 +135,47 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
 
     // --- Right panel (issue table) ---
 
-    /// <summary>One row of the results table under the mugshots.</summary>
+    /// <summary>One row of the results table under the mugshots. In grouped mode
+    /// one row stands for every NPC sharing a distinct problem (NpcCount > 1)
+    /// and carries all of their issues so the ignore commands can act on the
+    /// whole group.</summary>
     public sealed record IssueRow(string NpcDisplayName, string NpcFormKey, string Category,
-        string TypeDisplay, string AffectedPath, string Location, string Referencer, string Detail);
+        string TypeDisplay, string AffectedPath, string Location, string Referencer,
+        string ProvidedBy, string Detail, int NpcCount, bool IsNote, bool IsIgnored,
+        IReadOnlyList<ModIssue> Issues);
 
     public ObservableCollection<IssueRow> IssueTableRows { get; } = new();
     [Reactive] public string IssueTableHeaderText { get; set; } = string.Empty;
+
+    /// <summary>Non-empty when the current table contains outfit rows: points
+    /// users at the outfit mod ("Provided by") instead of the replacer.</summary>
+    [Reactive] public string OutfitHintText { get; set; } = string.Empty;
+
+    /// <summary>Eligible mods with no cache entry — absence must not read as
+    /// "clean". Shown greyed under the left list with a per-mod Scan action.</summary>
+    public ObservableCollection<string> UnscannedModNames { get; } = new();
+
+    // Row context-menu commands (parameter = the row, via the PlacementTarget.Tag
+    // recipe in the view). File scope hides every occurrence of the path in this
+    // mod; all-mods scope hides it everywhere (vanilla-recurring files like the
+    // mouth subsurface maps); exact scope pins the NPC (and NIF/shape for
+    // texture rows).
+    public ReactiveCommand<IssueRow, Unit> IgnoreFileCommand { get; }
+    public ReactiveCommand<IssueRow, Unit> IgnoreFileAllModsCommand { get; }
+    public ReactiveCommand<IssueRow, Unit> IgnoreExactCommand { get; }
+    public ReactiveCommand<IssueRow, Unit> UnignoreCommand { get; }
+
+    // Copy-to-clipboard commands for the row's NPC (single-NPC rows only).
+    public ReactiveCommand<IssueRow, Unit> CopyNpcNameCommand { get; }
+    public ReactiveCommand<IssueRow, Unit> CopyNpcEditorIdCommand { get; }
+    public ReactiveCommand<IssueRow, Unit> CopyNpcFormIdCommand { get; }
+    public ReactiveCommand<IssueRow, Unit> CopyNpcFormKeyCommand { get; }
+
+    /// <summary>Left-list context menu: rescan just this mod, ignoring its cache entry.</summary>
+    public ReactiveCommand<VM_ModIssueEntry, Unit> RescanModCommand { get; }
+
+    /// <summary>Scan one not-yet-scanned mod from the unscanned list.</summary>
+    public ReactiveCommand<string, Unit> ScanSingleModCommand { get; }
 
     /// <summary>When set (by clicking a mugshot tile), the table shows only that
     /// NPC's issues. Clicking the same tile again clears it.</summary>
@@ -148,7 +214,8 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         Settings settings,
         VM_Mods modsViewModel,
         VM_Run runViewModel,
-        VM_ModsMenuMugshot.Factory mugshotFactory)
+        VM_ModsMenuMugshot.Factory mugshotFactory,
+        EnvironmentStateProvider environmentStateProvider)
     {
         _scanner = scanner;
         _cache = cache;
@@ -156,6 +223,7 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         _modsViewModel = modsViewModel;
         _runViewModel = runViewModel;
         _mugshotFactory = mugshotFactory;
+        _environmentStateProvider = environmentStateProvider;
 
         var filterOptions = new List<IssueTypeFilterOption> { new("All issue types", null) };
         filterOptions.AddRange(Enum.GetValues<ModIssueType>()
@@ -174,7 +242,48 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         ExportCsvCommand = ReactiveCommand.Create(ExportCsv,
             this.WhenAnyValue(x => x.IsScanning, scanning => !scanning));
 
-        foreach (var cmd in new[] { ScanCommand, RescanAllCommand, CancelScanCommand, ExportCsvCommand })
+        RescanModCommand = ReactiveCommand.CreateFromTask<VM_ModIssueEntry>(
+            entry => ScanAsync(ignoreCache: true, onlyMods: new[] { entry.DisplayName }), canScan);
+        ScanSingleModCommand = ReactiveCommand.CreateFromTask<string>(
+            name => ScanAsync(ignoreCache: false, onlyMods: new[] { name }), canScan);
+
+        IgnoreFileCommand = ReactiveCommand.Create<IssueRow>(row => ApplyIgnore(row, exact: false));
+        IgnoreFileAllModsCommand = ReactiveCommand.Create<IssueRow>(row => ApplyIgnore(row, exact: false, allMods: true));
+        IgnoreExactCommand = ReactiveCommand.Create<IssueRow>(row => ApplyIgnore(row, exact: true));
+        UnignoreCommand = ReactiveCommand.Create<IssueRow>(Unignore);
+        CopyNpcNameCommand = ReactiveCommand.Create<IssueRow>(row => CopyNpcField(row, CopyField.Name));
+        CopyNpcEditorIdCommand = ReactiveCommand.Create<IssueRow>(row => CopyNpcField(row, CopyField.EditorId));
+        CopyNpcFormIdCommand = ReactiveCommand.Create<IssueRow>(row => CopyNpcField(row, CopyField.FormId));
+        CopyNpcFormKeyCommand = ReactiveCommand.Create<IssueRow>(row => CopyNpcField(row, CopyField.FormKey));
+        foreach (var cmd in new IReactiveCommand[]
+                     { RescanModCommand, ScanSingleModCommand, IgnoreFileCommand, IgnoreFileAllModsCommand,
+                       IgnoreExactCommand, UnignoreCommand, CopyNpcNameCommand, CopyNpcEditorIdCommand,
+                       CopyNpcFormIdCommand, CopyNpcFormKeyCommand })
+        {
+            cmd.ThrownExceptions
+                .Subscribe(ex => Debug.WriteLine($"VM_ModIssues command error: {ExceptionLogger.GetExceptionStack(ex)}"))
+                .DisposeWith(_disposables);
+        }
+
+        // Severity / ignore toggles change which issues exist at all, so the
+        // entries themselves are rebuilt from the last results (selection is
+        // restored by name inside RebuildEntries).
+        this.WhenAnyValue(x => x.ShowNotes, x => x.ShowIgnored)
+            .Skip(1)
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(_ => RebuildEntries(_lastResults))
+            .DisposeWith(_disposables);
+
+        // Mirrors VM_Mods.CancelMugshotLoadCommand: the load CTS token flows
+        // into both the population task and the generation batch, so one Cancel
+        // stops tile creation and every in-flight/queued render.
+        CancelMugshotLoadCommand = ReactiveCommand.Create(() =>
+        {
+            _mugshotLoadingCts?.Cancel();
+            IsLoadingMugshots = false; // Set UI state immediately for responsiveness
+        });
+
+        foreach (var cmd in new[] { ScanCommand, RescanAllCommand, CancelScanCommand, ExportCsvCommand, CancelMugshotLoadCommand })
         {
             cmd.ThrownExceptions
                 .Subscribe(ex => Debug.WriteLine($"VM_ModIssues command error: {ExceptionLogger.GetExceptionStack(ex)}"))
@@ -240,7 +349,7 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
 
         // Any change affecting the issue table's row set rebuilds it.
         this.WhenAnyValue(x => x.SelectedEntry, x => x.SelectedIssueTypeFilter,
-                x => x.IncludeOutfitOnlyIssues, x => x.TableNpcFilter)
+                x => x.IncludeOutfitOnlyIssues, x => x.TableNpcFilter, x => x.GroupByFile)
             .ObserveOn(RxApp.MainThreadScheduler)
             .Subscribe(_ => RebuildIssueTable())
             .DisposeWith(_disposables);
@@ -300,7 +409,7 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         }
     }
 
-    private async Task ScanAsync(bool ignoreCache)
+    private async Task ScanAsync(bool ignoreCache, IReadOnlyCollection<string>? onlyMods = null)
     {
         _scanCts?.Dispose();
         _scanCts = new CancellationTokenSource();
@@ -323,6 +432,8 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
                 var list = new List<ModIssueScanner.ModScanTarget>();
                 foreach (var model in _settings.ModSettings
                              .Where(ModIssueScanner.IsEligible)
+                             .Where(m => onlyMods == null ||
+                                         onlyMods.Contains(m.DisplayName, StringComparer.OrdinalIgnoreCase))
                              .OrderBy(m => m.DisplayName, StringComparer.OrdinalIgnoreCase))
                 {
                     ct.ThrowIfCancellationRequested();
@@ -368,7 +479,9 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
 
             // Consistency pass over the incremental upserts: recomputes the
             // summary/last-scan text and drops rows for mods removed mid-scan.
-            RebuildEntries(results);
+            // From the cache rather than `results` so a single-mod rescan keeps
+            // every other mod's row.
+            RebuildEntries(_cache.GetAllRaw());
             ScanStatusMessage = "Scan complete.";
         }
         catch (OperationCanceledException)
@@ -393,10 +506,14 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
 
     private void RebuildEntries(IReadOnlyDictionary<string, ModIssueScanResult> results)
     {
+        _lastResults = results;
+        RefreshIgnoreLookup();
         var previousSelection = SelectedEntry?.DisplayName;
 
         _allEntries.Clear();
         int scannedCount = 0;
+        int noteTotal = 0;
+        int ignoredTotal = 0;
         DateTime? newestScan = null;
         foreach (var (displayName, result) in results)
         {
@@ -408,9 +525,26 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
                 m.DisplayName.Equals(displayName, StringComparison.OrdinalIgnoreCase));
             if (vm == null) continue; // Mod removed since the scan.
 
-            _allEntries.Add(new VM_ModIssueEntry(displayName, vm, result, _modsViewModel));
+            var visible = FilterVisible(displayName, result.Issues, ref noteTotal, ref ignoredTotal);
+            if (visible.Count == 0) continue; // everything filtered out (notes/ignored)
+
+            _allEntries.Add(new VM_ModIssueEntry(displayName, vm, result, visible, _modsViewModel));
         }
         _allEntries.Sort((a, b) => string.Compare(a.DisplayName, b.DisplayName, StringComparison.OrdinalIgnoreCase));
+
+        ShowNotesLabel = noteTotal > 0 || ShowNotes ? $"Show notes ({noteTotal})" : "Show notes";
+        ShowIgnoredLabel = ignoredTotal > 0 || ShowIgnored ? $"Show ignored ({ignoredTotal})" : "Show ignored";
+
+        // Eligible mods absent from the results: absence must not read as clean.
+        UnscannedModNames.Clear();
+        foreach (var name in _settings.ModSettings
+                     .Where(ModIssueScanner.IsEligible)
+                     .Select(m => m.DisplayName)
+                     .Where(nm => !results.ContainsKey(nm))
+                     .OrderBy(nm => nm, StringComparer.OrdinalIgnoreCase))
+        {
+            UnscannedModNames.Add(name);
+        }
 
         LastScanText = newestScan.HasValue ? $"Last scan: {newestScan.Value.ToLocalTime():g}" : string.Empty;
         StatusSummaryText = scannedCount == 0
@@ -418,6 +552,10 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
             : _allEntries.Count == 0
                 ? $"Scan complete — no issues found in {scannedCount} scanned mod{(scannedCount == 1 ? "" : "s")}."
                 : $"{_allEntries.Count} of {scannedCount} scanned mods have issues.";
+        if (UnscannedModNames.Count > 0 && scannedCount > 0)
+        {
+            StatusSummaryText += $" · {UnscannedModNames.Count} eligible mod{(UnscannedModNames.Count == 1 ? "" : "s")} not yet scanned (see below).";
+        }
 
         ApplyFilters();
 
@@ -425,6 +563,155 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         {
             SelectedEntry = FilteredModEntries.FirstOrDefault(e =>
                 e.DisplayName.Equals(previousSelection, StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    /// <summary>The severity/ignore display filter: drops ignored issues (unless
+    /// Show ignored) and Note-severity issues (unless Show notes), while
+    /// counting both totals for the toggle labels.</summary>
+    private List<ModIssue> FilterVisible(string modName, List<ModIssue> issues,
+        ref int noteTotal, ref int ignoredTotal)
+    {
+        var visible = new List<ModIssue>(issues.Count);
+        foreach (var issue in issues)
+        {
+            if (IsIgnored(modName, issue))
+            {
+                ignoredTotal++;
+                if (!ShowIgnored) continue;
+            }
+            else if (issue.Severity == ModIssueSeverity.Note)
+            {
+                noteTotal++;
+                if (!ShowNotes) continue;
+            }
+            visible.Add(issue);
+        }
+        return visible;
+    }
+
+    private void RefreshIgnoreLookup()
+    {
+        // Global entries live under the "*" bucket and are consulted for every mod.
+        _ignoreLookup = _settings.ModIssuesIgnored
+            .GroupBy(e => e.AllMods ? "*" : e.ModName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+    }
+
+    private bool IsIgnored(string modName, ModIssue issue)
+        => (_ignoreLookup.TryGetValue(modName, out var entries) &&
+            entries.Any(e => e.Matches(modName, issue))) ||
+           (_ignoreLookup.TryGetValue("*", out var globals) &&
+            globals.Any(e => e.Matches(modName, issue)));
+
+    private void ApplyIgnore(IssueRow? row, bool exact, bool allMods = false)
+    {
+        var entry = SelectedEntry;
+        if (row == null || entry == null || row.Issues.Count == 0) return;
+
+        if (!exact)
+        {
+            // File scope: one entry per (type, path) — covers every NPC (and, with
+            // allMods, every mod).
+            var first = row.Issues[0];
+            var candidate = new ModIssueIgnoreEntry
+            {
+                ModName = entry.DisplayName,
+                AllMods = allMods,
+                Type = first.Type,
+                AffectedPath = first.AffectedPath,
+            };
+            if (!_settings.ModIssuesIgnored.Any(e =>
+                    e.NpcFormKey.IsNull &&
+                    e.AllMods == allMods &&
+                    (allMods || e.ModName.Equals(candidate.ModName, StringComparison.OrdinalIgnoreCase)) &&
+                    e.Type == candidate.Type &&
+                    e.AffectedPath.Equals(candidate.AffectedPath, StringComparison.OrdinalIgnoreCase)))
+            {
+                _settings.ModIssuesIgnored.Add(candidate);
+            }
+        }
+        else
+        {
+            foreach (var issue in row.Issues)
+            {
+                if (IsIgnored(entry.DisplayName, issue)) continue;
+                _settings.ModIssuesIgnored.Add(new ModIssueIgnoreEntry
+                {
+                    ModName = entry.DisplayName,
+                    Type = issue.Type,
+                    AffectedPath = issue.AffectedPath,
+                    NpcFormKey = issue.NpcFormKey,
+                    NifPath = issue.NifPath,
+                    ShapeName = issue.ShapeName,
+                });
+            }
+        }
+
+        RebuildEntries(_lastResults);
+    }
+
+    private void Unignore(IssueRow? row)
+    {
+        var entry = SelectedEntry;
+        if (row == null || entry == null || row.Issues.Count == 0) return;
+
+        _settings.ModIssuesIgnored.RemoveAll(e =>
+            row.Issues.Any(i => e.Matches(entry.DisplayName, i)));
+
+        RebuildEntries(_lastResults);
+    }
+
+    private enum CopyField { Name, EditorId, FormId, FormKey }
+
+    /// <summary>Copies one identity field of the row's NPC to the clipboard.
+    /// Single-NPC rows only (grouped rows carry no single FormKey). EditorID is
+    /// resolved lazily from the live link cache rather than stored in the scan
+    /// cache; FormID is the runtime load-order ID via the same index mapping the
+    /// spawn-bat generator uses (ESL-aware).</summary>
+    private void CopyNpcField(IssueRow? row, CopyField field)
+    {
+        if (row == null || string.IsNullOrEmpty(row.NpcFormKey)) return;
+        if (!FormKey.TryFactory(row.NpcFormKey, out var fk)) return;
+
+        string? text = null;
+        switch (field)
+        {
+            case CopyField.Name:
+                text = row.NpcDisplayName;
+                break;
+
+            case CopyField.FormKey:
+                text = fk.ToString();
+                break;
+
+            case CopyField.EditorId:
+                if (_environmentStateProvider.LinkCache?.TryResolve<INpcGetter>(fk, out var npc) == true)
+                {
+                    text = npc?.EditorID;
+                }
+                break;
+
+            case CopyField.FormId:
+                var indices = PatchVerifyRunner.BuildLoadOrderIndices(
+                    _environmentStateProvider, new System.Text.StringBuilder());
+                if (indices.TryGetValue(fk.ModKey, out var idx))
+                {
+                    text = idx.IsLight
+                        ? $"FE{idx.Index:X3}{fk.ID & 0xFFF:X3}"
+                        : $"{idx.Index:X2}{fk.ID & 0xFFFFFF:X6}";
+                }
+                break;
+        }
+
+        if (string.IsNullOrEmpty(text)) return;
+        try
+        {
+            Clipboard.SetText(text);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"CopyNpcField clipboard error: {ex.Message}");
         }
     }
 
@@ -451,9 +738,13 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         {
             var vm = _modsViewModel.AllModSettings.FirstOrDefault(m =>
                 m.DisplayName.Equals(displayName, StringComparison.OrdinalIgnoreCase));
-            if (vm != null)
+            int noteTotal = 0, ignoredTotal = 0;
+            var visible = vm != null
+                ? FilterVisible(displayName, result.Issues, ref noteTotal, ref ignoredTotal)
+                : new List<ModIssue>();
+            if (vm != null && visible.Count > 0)
             {
-                newEntry = new VM_ModIssueEntry(displayName, vm, result, _modsViewModel);
+                newEntry = new VM_ModIssueEntry(displayName, vm, result, visible, _modsViewModel);
 
                 int allIdx = _allEntries.FindIndex(e =>
                     string.Compare(e.DisplayName, displayName, StringComparison.OrdinalIgnoreCase) > 0);
@@ -494,7 +785,7 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         }
 
         if (!string.IsNullOrWhiteSpace(NpcSearchText) &&
-            !entry.Result.Issues.Any(i =>
+            !entry.VisibleIssues.Any(i =>
                 (i.NpcDisplayName?.Contains(NpcSearchText, StringComparison.OrdinalIgnoreCase) ?? false) ||
                 i.NpcFormKey.ToString().Contains(NpcSearchText, StringComparison.OrdinalIgnoreCase)))
         {
@@ -506,7 +797,7 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
             return false;
         }
 
-        if (!IncludeOutfitOnlyIssues && entry.Result.Issues.All(i => i.IsOutfitIssue))
+        if (!IncludeOutfitOnlyIssues && entry.VisibleIssues.All(i => i.IsOutfitIssue))
         {
             return false;
         }
@@ -774,8 +1065,9 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
     }
 
     /// <summary>Rebuilds the results table under the mugshot panel from the
-    /// selected mod's issues, honoring the issue-type filter, the outfit
-    /// toggle, and the per-NPC tile filter. UI thread.</summary>
+    /// selected mod's visible issues, honoring the issue-type filter, the
+    /// outfit toggle, the per-NPC tile filter, and the grouped/flat toggle.
+    /// UI thread.</summary>
     private void RebuildIssueTable()
     {
         IssueTableRows.Clear();
@@ -784,39 +1076,114 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         if (entry == null)
         {
             IssueTableHeaderText = string.Empty;
+            OutfitHintText = string.Empty;
             return;
         }
 
         var typeFilter = SelectedIssueTypeFilter?.Value;
-        IEnumerable<ModIssue> issues = entry.Result.Issues;
-        if (typeFilter != null) issues = issues.Where(i => i.Type == typeFilter);
-        if (!IncludeOutfitOnlyIssues) issues = issues.Where(i => !i.IsOutfitIssue);
-        if (TableNpcFilter is { } npcFilter) issues = issues.Where(i => i.NpcFormKey.Equals(npcFilter));
+        IEnumerable<ModIssue> filtered = entry.VisibleIssues;
+        if (typeFilter != null) filtered = filtered.Where(i => i.Type == typeFilter);
+        if (!IncludeOutfitOnlyIssues) filtered = filtered.Where(i => !i.IsOutfitIssue);
+        if (TableNpcFilter is { } npcFilter) filtered = filtered.Where(i => i.NpcFormKey.Equals(npcFilter));
+        var issues = filtered.ToList();
 
+        // Grouped mode collapses to one row per distinct problem; a tile filter
+        // means "show me THIS NPC's rows", so it always renders flat.
+        bool grouped = GroupByFile && TableNpcFilter == null;
         string? filteredNpcName = null;
-        foreach (var issue in issues
-                     .OrderBy(i => i.NpcDisplayName, StringComparer.OrdinalIgnoreCase)
-                     .ThenBy(i => i.Type)
-                     .ThenBy(i => i.AffectedPath, StringComparer.OrdinalIgnoreCase))
+        int distinctProblems = 0;
+
+        IssueRow MakeRow(ModIssue issue, IReadOnlyList<ModIssue> groupIssues, int npcCount)
         {
-            filteredNpcName ??= issue.NpcDisplayName;
             string location = issue.ShapeName != null
                 ? $"{issue.ShapeName} in {Path.GetFileName(issue.NifPath ?? string.Empty)}"
                 : issue.NifPath ?? string.Empty;
-            IssueTableRows.Add(new IssueRow(
-                issue.NpcFormKey.IsNull ? "(mod-level)" : issue.NpcDisplayName ?? issue.NpcFormKey.ToString(),
-                issue.NpcFormKey.IsNull ? string.Empty : issue.NpcFormKey.ToString(),
+            bool ignored = IsIgnored(entry.DisplayName, issue);
+            string npcDisplay;
+            string detail;
+            if (npcCount > 1)
+            {
+                var names = groupIssues
+                    .Select(i => i.NpcDisplayName ?? i.NpcFormKey.ToString())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(nm => nm, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                npcDisplay = $"{npcCount} NPCs";
+                var sample = string.Join(", ", names.Take(8));
+                if (names.Count > 8) sample += $", … +{names.Count - 8} more";
+                detail = $"Affects {npcCount} NPCs: {sample}";
+                if (!string.IsNullOrEmpty(issue.Detail)) detail += "\n" + issue.Detail;
+            }
+            else
+            {
+                npcDisplay = issue.NpcFormKey.IsNull
+                    ? "(mod-level)"
+                    : issue.NpcDisplayName ?? issue.NpcFormKey.ToString();
+                detail = issue.Detail ?? string.Empty;
+            }
+
+            return new IssueRow(
+                npcDisplay,
+                npcCount > 1 || issue.NpcFormKey.IsNull ? string.Empty : issue.NpcFormKey.ToString(),
                 issue.IsOutfitIssue ? "Outfit" : "NPC",
                 VM_ModIssueEntry.GetIssueTypeDisplayName(issue.Type),
                 issue.AffectedPath,
-                location,
+                npcCount > 1 && groupIssues.Select(i => i.NifPath).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1
+                    ? $"{groupIssues.Select(i => i.NifPath).Distinct(StringComparer.OrdinalIgnoreCase).Count()} locations"
+                    : location,
                 issue.ReferencingRecord ?? string.Empty,
-                issue.Detail ?? string.Empty));
+                issue.SourceModName ?? string.Empty,
+                detail,
+                npcCount,
+                issue.Severity == ModIssueSeverity.Note,
+                ignored,
+                groupIssues);
         }
 
+        if (grouped)
+        {
+            var groups = issues
+                .GroupBy(i => (i.Severity, i.Type, i.IsOutfitIssue, Path: i.AffectedPath.ToLowerInvariant(),
+                    Source: i.SourceModName ?? string.Empty))
+                .OrderBy(g => g.Key.Severity)
+                .ThenBy(g => g.Key.Type)
+                .ThenBy(g => g.Key.Path, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            distinctProblems = groups.Count;
+            foreach (var g in groups)
+            {
+                var members = g.ToList();
+                int npcCount = members
+                    .Select(i => i.NpcFormKey)
+                    .Where(fk => !fk.IsNull)
+                    .Distinct()
+                    .Count();
+                IssueTableRows.Add(MakeRow(members[0], members, Math.Max(npcCount, 1)));
+            }
+        }
+        else
+        {
+            foreach (var issue in issues
+                         .OrderBy(i => i.Severity)
+                         .ThenBy(i => i.NpcDisplayName, StringComparer.OrdinalIgnoreCase)
+                         .ThenBy(i => i.Type)
+                         .ThenBy(i => i.AffectedPath, StringComparer.OrdinalIgnoreCase))
+            {
+                filteredNpcName ??= issue.NpcDisplayName;
+                IssueTableRows.Add(MakeRow(issue, new[] { issue }, 1));
+            }
+        }
+
+        OutfitHintText = issues.Any(i => i.IsOutfitIssue)
+            ? "Outfit issues usually come from the outfit/armor mod (see 'Provided by'), not from this appearance replacer."
+            : string.Empty;
+
+        int issueCount = issues.Count;
         IssueTableHeaderText = TableNpcFilter != null
-            ? $"{IssueTableRows.Count} issue{(IssueTableRows.Count == 1 ? "" : "s")} for {filteredNpcName ?? "selected NPC"} — click the tile again to show the whole mod"
-            : $"{IssueTableRows.Count} issue{(IssueTableRows.Count == 1 ? "" : "s")} in {entry.DisplayName} — click a mugshot to filter to that NPC";
+            ? $"{issueCount} issue{(issueCount == 1 ? "" : "s")} for {filteredNpcName ?? "selected NPC"} — click the tile again to show the whole mod"
+            : grouped
+                ? $"{distinctProblems} distinct problem{(distinctProblems == 1 ? "" : "s")} ({issueCount} issue{(issueCount == 1 ? "" : "s")}) in {entry.DisplayName} — click a mugshot to filter to that NPC"
+                : $"{issueCount} issue{(issueCount == 1 ? "" : "s")} in {entry.DisplayName} — click a mugshot to filter to that NPC";
     }
 
     // --- CSV export ---
@@ -833,14 +1200,19 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         try
         {
             using var writer = new StreamWriter(dialog.FileName, append: false);
-            writer.WriteLine("Mod,Category,IssueType,NpcFormKey,NpcName,AffectedPath,Shape,Nif,Referencer,Detail");
-            foreach (var entry in _allEntries)
+            // New columns appended at the END so existing spreadsheets/pivots
+            // built on the original schema keep working.
+            writer.WriteLine("Mod,Category,IssueType,NpcFormKey,NpcName,AffectedPath,Shape,Nif,Referencer,Detail,Severity,ProvidedBy,Ignored");
+            foreach (var (modName, result) in _lastResults.OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase))
             {
-                foreach (var issue in entry.Result.Issues)
+                foreach (var issue in result.Issues)
                 {
+                    bool ignored = IsIgnored(modName, issue);
+                    if (ignored && !ShowIgnored) continue; // export mirrors the display rule
+
                     writer.WriteLine(string.Join(",", new[]
                     {
-                        Csv(entry.DisplayName),
+                        Csv(modName),
                         issue.IsOutfitIssue ? "Outfit" : "NPC",
                         Csv(VM_ModIssueEntry.GetIssueTypeDisplayName(issue.Type)),
                         Csv(issue.NpcFormKey.IsNull ? "" : issue.NpcFormKey.ToString()),
@@ -850,6 +1222,9 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
                         Csv(issue.NifPath ?? ""),
                         Csv(issue.ReferencingRecord ?? ""),
                         Csv(issue.Detail ?? ""),
+                        issue.Severity == ModIssueSeverity.Note ? "Note" : "Issue",
+                        Csv(issue.SourceModName ?? ""),
+                        ignored ? "yes" : "",
                     }));
                 }
             }

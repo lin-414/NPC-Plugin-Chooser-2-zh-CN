@@ -278,7 +278,7 @@ public class FaceGenConsistencyAnalyzerResultTests
     }
 
     [Fact]
-    public void BuildReason_SingleMissingBakedShape_MentionsEditorIdFormKeyAndVersionMismatch()
+    public void BuildReason_SingleMissingBakedShape_DescribesSlotDrift_NeverDefiningPluginVersions()
     {
         var r = new FaceGenConsistencyAnalyzer.Result
         {
@@ -288,12 +288,101 @@ public class FaceGenConsistencyAnalyzerResultTests
 
         reason.Should().Contain("'MaleHeadNord'");
         reason.Should().Contain(HpA.ToString());
-        reason.Should().Contain(HpA.ModKey.FileName.ToString());
         reason.Should().Contain("uses one head part that isn't in the FaceGen .nif");
-        reason.Should().Contain("Version mismatch");
-        // No "you can probably ignore this" reassurance — we can't tell whether the game will
-        // tolerate the mismatch, so the message must not imply that it will.
+        // The old text blamed "a different version of <plugin that DEFINES the part>" —
+        // usually a resource master or the base game (frozen for a decade). The single-slot
+        // remedy must describe record-vs-mesh drift without naming that plugin's version.
+        reason.Should().Contain("different part in this slot");
+        reason.Should().NotContain("Version mismatch");
+        // A single-slot miss verifiably rendered WITHOUT dark face in game (Anoriath /
+        // Whiterun Hold Refine, 2026-08-15) — the wording carries that hedge…
+        reason.Should().Contain("does not always show as a dark face");
+        // …but still no "you can probably ignore this" reassurance: the game tolerating one
+        // configuration proves nothing about others.
         reason.Should().NotContain("ignore this");
+    }
+
+    [Fact]
+    public void BuildReason_SingleDiff_SubjectSuppliesRecord_BlamesTheModsOwnPairing()
+    {
+        var r = new FaceGenConsistencyAnalyzer.Result
+        {
+            MissingBakedShapes = new[] { new FaceGenConsistencyAnalyzer.HeadPartRef(HpA, "BrowsMaleHumanoid04") },
+        };
+        var reason = r.BuildReason(scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod,
+            subjectSuppliesRecord: true);
+
+        reason.Should().Contain("ships both the plugin record and the FaceGen .nif");
+        reason.Should().NotContain("Version mismatch");
+    }
+
+    [Fact]
+    public void BuildReason_SingleDiff_MeshOnlyPairing_WithBaseGameRecord_PointsAtExpectedOverhaul()
+    {
+        // Mesh-only mod paired with a base-game record: base-game records don't change, so
+        // the remedy must point at the overhaul the mesh was baked against, not versions.
+        var r = new FaceGenConsistencyAnalyzer.Result
+        {
+            MissingBakedShapes = new[]
+            {
+                new FaceGenConsistencyAnalyzer.HeadPartRef(
+                    FormKey.Factory("0C710A:Skyrim.esm"), "BrowsMaleHumanoid04"),
+            },
+        };
+        var reason = r.BuildReason(scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod,
+            subjectSuppliesRecord: false);
+
+        reason.Should().Contain("no plugin record for this NPC");
+        reason.Should().Contain("base-game records don't change");
+        reason.Should().NotContain("different version of Skyrim.esm");
+    }
+
+    [Fact]
+    public void BuildReason_ForeignPluginRemedies_AreLoadOrderScopeOnly()
+    {
+        // The Mod Issues scanner (SelectedMod scope) resolves only the mod's own
+        // plugins + the record's origin, and reads the mod's NIF from its own
+        // folder — so neither "another plugin renamed the part" nor "another mod
+        // is overwriting the .nif" can CAUSE its mismatches; those causes exist
+        // only where conflict winners resolve (Validate Output / LoadOrder scope).
+        var single = new FaceGenConsistencyAnalyzer.Result
+        {
+            MissingBakedShapes = new[] { new FaceGenConsistencyAnalyzer.HeadPartRef(HpA, "BrowsMaleHumanoid04") },
+        };
+        single.BuildReason(scope: FaceGenConsistencyAnalyzer.ReasonScope.LoadOrder)
+            .Should().Contain("renames it breaks the match");
+        single.BuildReason(scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod, subjectSuppliesRecord: true)
+            .Should().NotContain("check whether another plugin edits that head part");
+        single.BuildReason(scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod, subjectSuppliesRecord: false)
+            .Should().NotContain("check whether another plugin edits that head part");
+
+        var multi = new FaceGenConsistencyAnalyzer.Result
+        {
+            MissingBakedShapes = new[]
+            {
+                new FaceGenConsistencyAnalyzer.HeadPartRef(HpA, "A"),
+                new FaceGenConsistencyAnalyzer.HeadPartRef(HpB, "B"),
+            },
+            OrphanBakedShapes = new[] { "C", "D" },
+        };
+        multi.BuildReason(scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod)
+            .Should().NotContain("overwriting this NPC's FaceGen");
+    }
+
+    [Fact]
+    public void BuildReason_MissingPart_NamesSameTypeBakedCounterpart()
+    {
+        var r = new FaceGenConsistencyAnalyzer.Result
+        {
+            MissingBakedShapes = new[]
+            {
+                new FaceGenConsistencyAnalyzer.HeadPartRef(HpA, "BrowsMaleHumanoid04")
+                    { BakedSameTypeShape = "BrowsMaleHumanoid01" },
+            },
+        };
+        var reason = r.BuildReason();
+
+        reason.Should().Contain("the .nif carries 'BrowsMaleHumanoid01' in that slot instead");
     }
 
     [Fact]

@@ -6,7 +6,9 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CharacterViewer.Rendering;
+using Mutagen.Bethesda;
 using Mutagen.Bethesda.Plugins;
+using Mutagen.Bethesda.Skyrim;
 using NPC_Plugin_Chooser_2.Models;
 
 namespace NPC_Plugin_Chooser_2.BackEnd.CharacterViewerHost;
@@ -38,13 +40,21 @@ public sealed class ModIssueScanner
     private readonly FaceGenConsistencyAnalyzer _faceGenConsistency;
     private readonly ModIssuesCache _cache;
 
+    /// <summary>(folder, mod display name) pairs over every ModSetting folder,
+    /// longest folder first, rebuilt per run. Attributes a resolved asset's
+    /// disk/BSA path to the installed mod that supplies it — outfit meshes
+    /// usually come from an outfit mod, not the appearance mod under scan, and
+    /// the report should say so (<see cref="ModIssue.SourceModName"/>).</summary>
+    private List<(string Folder, string ModName)> _folderOwners = new();
+
     public ModIssueScanner(
         Settings settings,
         NpcMeshResolver resolver,
         GameAssetResolver assetResolver,
         IBsaArchiveProvider bsa,
         FaceGenConsistencyAnalyzer faceGenConsistency,
-        ModIssuesCache cache)
+        ModIssuesCache cache,
+        EnvironmentStateProvider env)
     {
         _settings = settings;
         _resolver = resolver;
@@ -52,7 +62,18 @@ public sealed class ModIssueScanner
         _bsa = bsa;
         _faceGenConsistency = faceGenConsistency;
         _cache = cache;
+        _env = env;
     }
+
+    private readonly EnvironmentStateProvider _env;
+
+    /// <summary>Winning head parts by EditorID, built once per run. Types the
+    /// orphan baked shapes so the analyzer can say which same-slot shape the
+    /// .nif carries in place of a missing one. EditorIDs are effectively
+    /// globally unique and a same-named part has the same Type regardless of
+    /// which override wins, so winning-override resolution is safe here even
+    /// though the consistency check itself is Origin-scoped.</summary>
+    private Dictionary<string, IHeadPartGetter> _headPartsByEditorId = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Progress notification. Units are NPCs, not mods — mods vary from
     /// one NPC to thousands, so a mod-granular bar sits still through the big
@@ -107,8 +128,30 @@ public sealed class ModIssueScanner
         // Parse results shared across mods/NPCs within one run: Skyrim NPCs share
         // body/armor NIFs heavily, and the extraction cache hands back a stable
         // disk path per (bsa, rel), so the resolved path is a safe dedupe key.
-        var nifParseCache = new ConcurrentDictionary<string, Lazy<IReadOnlyList<(string ShapeName, IReadOnlyList<string> TexturePaths, bool DrawnInGame)>>>(
+        var nifParseCache = new ConcurrentDictionary<string, Lazy<IReadOnlyList<NifHandler.NifShapeTextureInfo>>>(
             StringComparer.OrdinalIgnoreCase);
+
+        _folderOwners = _settings.ModSettings
+            .SelectMany(ms => ms.CorrespondingFolderPaths
+                .Where(f => !string.IsNullOrWhiteSpace(f))
+                .Select(f => (Folder: f.TrimEnd('\\', '/'), ModName: ms.DisplayName)))
+            .OrderByDescending(t => t.Folder.Length)
+            .ToList();
+
+        _headPartsByEditorId = await Task.Run(() =>
+        {
+            var map = new Dictionary<string, IHeadPartGetter>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                foreach (var hp in _env.LoadOrder?.PriorityOrder.HeadPart().WinningOverrides()
+                                   ?? Enumerable.Empty<IHeadPartGetter>())
+                {
+                    if (!string.IsNullOrEmpty(hp.EditorID)) map.TryAdd(hp.EditorID!, hp);
+                }
+            }
+            catch { /* typing orphan shapes is best-effort */ }
+            return map;
+        }, ct).ConfigureAwait(false);
 
         int totalNpcs = mods.Sum(t => Weight(t.Model));
         int completedNpcs = 0;
@@ -179,7 +222,7 @@ public sealed class ModIssueScanner
         ModSetting mod,
         ModStateSnapshot? snapshot,
         List<LooseAssetTreeSnapshot> trees,
-        ConcurrentDictionary<string, Lazy<IReadOnlyList<(string ShapeName, IReadOnlyList<string> TexturePaths, bool DrawnInGame)>>> nifParseCache,
+        ConcurrentDictionary<string, Lazy<IReadOnlyList<NifHandler.NifShapeTextureInfo>>> nifParseCache,
         Action<int, int> reportNpcProgress,
         CancellationToken ct)
     {
@@ -217,13 +260,15 @@ public sealed class ModIssueScanner
         // is AsyncLocal (isolated per task flow), and nifly loads are
         // thread-safe. NIF parses dominate the cost and dedupe via the shared cache.
         int completed = 0;
+        int failedNpcs = 0;
         using var gate = new SemaphoreSlim(Math.Max(1, Environment.ProcessorCount - 1));
         var tasks = npcKeys.Select(async npcKey =>
         {
             await gate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                await Task.Run(() => ScanNpc(mod, npcKey, nifParseCache, issues, ct), ct).ConfigureAwait(false);
+                bool ok = await Task.Run(() => ScanNpc(mod, npcKey, nifParseCache, issues, ct), ct).ConfigureAwait(false);
+                if (!ok) Interlocked.Increment(ref failedNpcs);
             }
             finally
             {
@@ -241,14 +286,17 @@ public sealed class ModIssueScanner
             .ThenBy(iss => iss.Type)
             .ThenBy(iss => iss.AffectedPath, StringComparer.OrdinalIgnoreCase));
         result.ScannedNpcCount = npcKeys.Count;
+        result.FailedNpcCount = failedNpcs;
         result.ScanCompleted = true;
         return result;
     }
 
-    private void ScanNpc(
+    /// <summary>Returns false when the NPC's scan threw and was swallowed, so the
+    /// mod's <see cref="ModIssueScanResult.FailedNpcCount"/> can surface the gap.</summary>
+    private bool ScanNpc(
         ModSetting mod,
         FormKey npcKey,
-        ConcurrentDictionary<string, Lazy<IReadOnlyList<(string ShapeName, IReadOnlyList<string> TexturePaths, bool DrawnInGame)>>> nifParseCache,
+        ConcurrentDictionary<string, Lazy<IReadOnlyList<NifHandler.NifShapeTextureInfo>>> nifParseCache,
         ConcurrentBag<ModIssue> issues,
         CancellationToken ct)
     {
@@ -261,7 +309,8 @@ public sealed class ModIssueScanner
 
         void AddIssue(ModIssueType type, string affectedPath, string? nifPath = null,
             string? shapeName = null, string? referencer = null, string? detail = null,
-            bool isOutfit = false)
+            bool isOutfit = false, ModIssueSeverity severity = ModIssueSeverity.Issue,
+            string? sourceMod = null)
         {
             if (!seen.Add($"{type}|{nifPath}|{shapeName}|{affectedPath}")) return;
             issues.Add(new ModIssue
@@ -275,6 +324,8 @@ public sealed class ModIssueScanner
                 ReferencingRecord = referencer,
                 Detail = detail,
                 IsOutfitIssue = isOutfit,
+                Severity = severity,
+                SourceModName = sourceMod,
             });
         }
 
@@ -283,48 +334,67 @@ public sealed class ModIssueScanner
             // Same scope chain the mugshot renderer would use for this (mod, NPC).
             _assetResolver.SetAdditionalScopes(_resolver.BuildResolutionScopes(mod, npcKey));
 
-            var (npc, resolveHeadPart, resolveRace) = _resolver.ResolveNpcForConsistency(npcKey, mod);
-            if (npc == null) return; // Record-level problems are the Validator's domain.
+            var (npc, resolveHeadPart, resolveRace, npcFromModPlugins) =
+                _resolver.ResolveNpcForConsistency(npcKey, mod);
+            if (npc == null) return true; // Record-level problems are the Validator's domain.
 
             var appearanceKey = _resolver.ResolveAppearanceNpcKey(npcKey, mod);
             bool shouldHaveFaceGen = OutputValidator.SubjectShouldHaveOwnFaceGen(npc, resolveRace);
             var (faceGenMeshRel, faceGenTintRel) = Auxilliary.GetFaceGenSubPathStrings(appearanceKey, regularized: true);
 
+            // FaceGen paths belong to the appearance TERMINUS: a Traits-templated NPC has
+            // no face of its own and the whole template group misses the SAME file — say
+            // so, or "5 NPCs missing one .dds" reads like a display bug.
+            string? templateNote = appearanceKey.Equals(npcKey)
+                ? null
+                : $"This NPC inherits its appearance from template {appearanceKey}; the file is the template's, shared by every NPC inheriting it.";
+
             if (shouldHaveFaceGen && !_resolver.FaceGenExists(npcKey, mod))
             {
                 AddIssue(ModIssueType.MissingFaceGenMesh, faceGenMeshRel,
-                    detail: "No FaceGen head mesh anywhere the game would look — this NPC renders with the dark-face/no-head bug.");
+                    detail: "No FaceGen head mesh anywhere the game would look — this NPC renders with the dark-face/no-head bug."
+                            + (templateNote == null ? "" : "\n" + templateNote));
             }
 
             var paths = _resolver.Resolve(npcKey, mod);
-            if (paths == null) return;
+            if (paths == null) return true;
 
             // FaceGen tint DDS. Only meaningful for NPCs that own FaceGen.
             if (shouldHaveFaceGen && !string.IsNullOrWhiteSpace(paths.FaceTintPath) &&
                 ResolveToDisk(paths.FaceTintPath!, allowLoadOrderFallback: false) == null)
             {
                 AddIssue(ModIssueType.MissingFaceGenTint, faceGenTintRel,
-                    detail: "FaceGen tint texture is missing — faces typically render grey/mismatched without it.");
+                    detail: "FaceGen tint texture is missing — faces typically render grey/mismatched without it."
+                            + (templateNote == null ? "" : "\n" + templateNote));
             }
 
             // The NPC's own drawn meshes (skin ARMA world models + FaceGen head).
             // No weight-sibling checks here: ResolvedNpcMeshPaths carries no
             // weight-slider flag, and without it a single-weight skin file is
             // indistinguishable from a genuinely missing counterpart.
+            // Name WHERE the skin meshes come from (the WornArmor record or the race's
+            // skin) so "why is femalebody_1.nif being checked" answers itself.
+            string skinVia = npc.WornArmor.IsNull
+                ? $" via race skin ({npc.Race.FormKey})"
+                : $" via WornArmor {npc.WornArmor.FormKey}";
+
             var nifJobs = new List<NifJob>();
-            CheckMesh(paths.BodyMeshPath, "Skin ARMA (Body)", false, false, false, nifJobs, AddIssue);
-            CheckMesh(paths.HandsMeshPath, "Skin ARMA (Hands)", false, false, false, nifJobs, AddIssue);
-            CheckMesh(paths.FeetMeshPath, "Skin ARMA (Feet)", false, false, false, nifJobs, AddIssue);
-            CheckMesh(paths.HairMeshPath, "Worn hair ARMA", false, false, false, nifJobs, AddIssue);
-            CheckMesh(paths.TailMeshPath, "Tail ARMA", false, false, false, nifJobs, AddIssue);
+            CheckMesh(mod, paths.BodyMeshPath, "Skin ARMA (Body)" + skinVia, false, false, false, nifJobs, AddIssue);
+            CheckMesh(mod, paths.HandsMeshPath, "Skin ARMA (Hands)" + skinVia, false, false, false, nifJobs, AddIssue);
+            CheckMesh(mod, paths.FeetMeshPath, "Skin ARMA (Feet)" + skinVia, false, false, false, nifJobs, AddIssue);
+            CheckMesh(mod, paths.HairMeshPath, "Worn hair ARMA", false, false, false, nifJobs, AddIssue);
+            CheckMesh(mod, paths.TailMeshPath, "Tail ARMA", false, false, false, nifJobs, AddIssue);
 
             // FaceGen head: existence already handled above (FaceGenExists knows
             // the renderer's vanilla-loose-skip rule, which plain resolution
             // doesn't), so only queue the texture walk when it resolves.
-            string? headDisk = ResolveToDisk(paths.HeadMeshPath, allowLoadOrderFallback: false);
+            var headSource = ResolveSource(paths.HeadMeshPath, allowLoadOrderFallback: false);
+            string? headDisk = headSource?.ResolvedDiskPath;
             if (headDisk != null)
             {
-                nifJobs.Add(new NifJob(headDisk, paths.HeadMeshPath!, "FaceGen head", false, IsFaceGen: true));
+                nifJobs.Add(new NifJob(headDisk, paths.HeadMeshPath!, "FaceGen head", false, IsFaceGen: true,
+                    SourceDescription: headSource!.LoosePath ??
+                        (headSource.BsaPath != null ? $"{headSource.BsaPath} :: {headSource.InternalBsaPath}" : headDisk)));
             }
 
             // Full effective outfit (incl. headgear): what the renderer would
@@ -346,7 +416,7 @@ public sealed class ModIssueScanner
                 if (string.IsNullOrWhiteSpace(over.MeshPath)) continue;
                 // Weight siblings only when the ARMA's weight slider is on for
                 // this sex — the engine's own signal that a _0/_1 pair exists.
-                CheckMesh(over.MeshPath, over.Key, over.AllowLoadOrderFallback,
+                CheckMesh(mod, over.MeshPath, over.Key, over.AllowLoadOrderFallback,
                     isOutfit: true, checkWeightSibling: over.HasWeightVariants, nifJobs, AddIssue);
 
                 // AlternateTextures (MODS): the one record-side texture channel the
@@ -357,7 +427,7 @@ public sealed class ModIssueScanner
                     {
                         foreach (var tex in spec.Textures.Values)
                         {
-                            CheckAltTexture(tex, over, spec.ShapeName, AddIssue);
+                            CheckAltTexture(mod, tex, over, spec.ShapeName, AddIssue);
                         }
                     }
                 }
@@ -367,7 +437,7 @@ public sealed class ModIssueScanner
                     {
                         foreach (var tex in slots.Values)
                         {
-                            CheckAltTexture(tex, over, shapeName, AddIssue);
+                            CheckAltTexture(mod, tex, over, shapeName, AddIssue);
                         }
                     }
                 }
@@ -375,15 +445,17 @@ public sealed class ModIssueScanner
 
             // Textures baked inside every rendered NIF — ground truth for what the
             // engine samples. Per-texture verdicts, grouped per shape via ShapeName.
+            // Which SLOT a path occupies decides whether the engine reads it at all
+            // and how visible a miss is — see ClassifyNifTextureSlot.
             foreach (var job in nifJobs)
             {
                 ct.ThrowIfCancellationRequested();
-                IReadOnlyList<(string ShapeName, IReadOnlyList<string> TexturePaths, bool DrawnInGame)> byShape;
+                IReadOnlyList<NifHandler.NifShapeTextureInfo> byShape;
                 try
                 {
                     byShape = nifParseCache.GetOrAdd(job.DiskPath,
-                        dp => new Lazy<IReadOnlyList<(string, IReadOnlyList<string>, bool)>>(
-                            () => NifHandler.GetTexturesByShape(dp),
+                        dp => new Lazy<IReadOnlyList<NifHandler.NifShapeTextureInfo>>(
+                            () => NifHandler.GetShapeTextureDetails(dp),
                             LazyThreadSafetyMode.ExecutionAndPublication)).Value;
                 }
                 catch
@@ -391,47 +463,98 @@ public sealed class ModIssueScanner
                     continue; // Unparseable NIF — the renderer has its own reporting for that.
                 }
 
-                foreach (var (shapeName, texturePaths, drawnInGame) in byShape)
+                foreach (var shape in byShape)
                 {
                     // A shape the engine cannot draw cannot render untextured
                     // (wig mods keep alpha-0 hair shapes whose textures were
                     // never meant to be installed).
-                    if (!drawnInGame) continue;
+                    if (!shape.DrawnInGame) continue;
 
-                    foreach (var tex in texturePaths)
+                    foreach (var slotTex in shape.Slots)
                     {
+                        var tex = slotTex.Path;
                         if (string.IsNullOrWhiteSpace(tex)) continue;
-                        // The face tint is CPU-blended from the FaceGen ladder,
-                        // not sampled from disk by this path.
-                        if (job.IsFaceGen && !string.IsNullOrEmpty(paths.FaceTintPath) &&
-                            (paths.FaceTintPath!.Contains(tex, StringComparison.OrdinalIgnoreCase) ||
-                             tex.Contains(faceGenTintRel, StringComparison.OrdinalIgnoreCase)))
-                        {
-                            continue;
-                        }
                         if (!Auxilliary.TryRegularizePath(tex, out var rel) || string.IsNullOrWhiteSpace(rel)) continue;
+
+                        var severity = ClassifyNifTextureSlot(slotTex.Slot, job.IsFaceGen,
+                            shape.ShaderType, shape.ShaderFlags1, rel);
+                        if (severity == null) continue; // slot the engine never reads
                         if (ResolveToDisk(rel, job.AllowLoadOrderFallback) != null) continue;
+
+                        string shapeDisplay = string.IsNullOrWhiteSpace(shape.ShapeName)
+                            ? "(unnamed shape)"
+                            : shape.ShapeName;
+                        string detail = $"Texture slot {slotTex.Slot} of shape '{shapeDisplay}'.";
+
+                        // Partition slots are only worth mentioning when they imply
+                        // redundancy — another drawn shape covering the same biped
+                        // slot(s) (BodySlide variants, replaced brows/hair) means the
+                        // broken shape may not even be the one that renders. A bare
+                        // slot listing carries no signal on its own.
+                        if (shape.PartitionSlots.Count > 0)
+                        {
+                            var sameSlotShapes = byShape
+                                .Where(o => !ReferenceEquals(o, shape) && o.DrawnInGame &&
+                                            !string.Equals(o.ShapeName, shape.ShapeName, StringComparison.OrdinalIgnoreCase) &&
+                                            o.PartitionSlots.Intersect(shape.PartitionSlots).Any())
+                                .Select(o => string.IsNullOrWhiteSpace(o.ShapeName) ? "(unnamed shape)" : o.ShapeName)
+                                .Distinct(StringComparer.OrdinalIgnoreCase)
+                                .ToList();
+                            if (sameSlotShapes.Count > 0)
+                            {
+                                string others = string.Join("', '", sameSlotShapes.Take(4));
+                                if (sameSlotShapes.Count > 4) others += $"', … +{sameSlotShapes.Count - 4} more";
+                                detail += $" Shape(s) '{others}' occupy the same biped slot(s) " +
+                                          $"({string.Join(", ", shape.PartitionSlots)}).";
+                            }
+                        }
+
+                        if (!string.IsNullOrEmpty(job.SourceDescription))
+                            detail += $"\nReferencing NIF resolved from: {job.SourceDescription}";
 
                         AddIssue(ModIssueType.MissingNifTexture, rel,
                             nifPath: job.GamePath,
-                            shapeName: string.IsNullOrWhiteSpace(shapeName) ? "(unnamed shape)" : shapeName,
+                            shapeName: string.IsNullOrWhiteSpace(shape.ShapeName) ? "(unnamed shape)" : shape.ShapeName,
                             referencer: job.Referencer,
-                            isOutfit: job.IsOutfit);
+                            detail: detail,
+                            isOutfit: job.IsOutfit,
+                            severity: severity.Value,
+                            sourceMod: job.SourceModName);
                     }
                 }
             }
 
-            // Dark-face class: records vs. the baked FaceGen shapes.
+            // Dark-face class: records vs. the baked FaceGen shapes. Resolution is
+            // Origin-scoped (mod plugins → the FormKey's defining plugin), so the
+            // verdict describes THIS mod's own data, independent of the load order.
             if (headDisk != null)
             {
                 try
                 {
-                    var analysis = _faceGenConsistency.Analyze(npc, resolveHeadPart, resolveRace, headDisk);
-                    if (analysis.HasMismatch)
+                    var analysis = _faceGenConsistency.Analyze(npc, resolveHeadPart, resolveRace, headDisk,
+                        edid => _headPartsByEditorId.TryGetValue(edid, out var hp) ? hp : null);
+
+                    // Head parts from a plugin that resolves nowhere = a missing hard
+                    // dependency. One rollup row per absent plugin instead of folding
+                    // it into the dark-face wall of text — one absent plugin used to
+                    // produce thousands of DarkFaceMismatch rows across a mod.
+                    foreach (var group in analysis.UnresolvedHeadParts.GroupBy(fk => fk.ModKey))
+                    {
+                        AddIssue(ModIssueType.MissingHeadPartPlugin, group.Key.FileName.String,
+                            nifPath: paths.HeadMeshPath,
+                            detail: "This NPC's record uses head part(s) " +
+                                    string.Join(", ", group.Select(fk => fk.ToString())) +
+                                    " from a plugin that is not in this mod's folders and could not be resolved. " +
+                                    "The mod likely requires it (check the mod page's requirements); without it these NPCs dark-face in game.");
+                    }
+
+                    if (analysis.MissingBakedShapes.Count > 0 || analysis.NullHeadPartLinks > 0)
                     {
                         AddIssue(ModIssueType.DarkFaceMismatch, faceGenMeshRel,
                             nifPath: paths.HeadMeshPath,
-                            detail: analysis.BuildReason(scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod));
+                            detail: analysis.BuildReason(
+                                scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod,
+                                subjectSuppliesRecord: npcFromModPlugins));
                     }
                 }
                 catch
@@ -440,6 +563,8 @@ public sealed class ModIssueScanner
                     // failure must not fail the scan.
                 }
             }
+
+            return true;
         }
         catch (OperationCanceledException)
         {
@@ -447,7 +572,8 @@ public sealed class ModIssueScanner
         }
         catch
         {
-            // One NPC's failure must not sink the mod's scan.
+            // One NPC's failure must not sink the mod's scan; the caller counts it.
+            return false;
         }
         finally
         {
@@ -456,27 +582,40 @@ public sealed class ModIssueScanner
     }
 
     private sealed record NifJob(string DiskPath, string GamePath, string Referencer,
-        bool AllowLoadOrderFallback, bool IsFaceGen = false, bool IsOutfit = false);
+        bool AllowLoadOrderFallback, bool IsFaceGen = false, bool IsOutfit = false,
+        string? SourceModName = null, string? SourceDescription = null);
 
     private delegate void AddIssueDelegate(ModIssueType type, string affectedPath, string? nifPath = null,
-        string? shapeName = null, string? referencer = null, string? detail = null, bool isOutfit = false);
+        string? shapeName = null, string? referencer = null, string? detail = null, bool isOutfit = false,
+        ModIssueSeverity severity = ModIssueSeverity.Issue, string? sourceMod = null);
 
-    private void CheckMesh(string? gamePath, string referencer, bool allowLoadOrderFallback,
-        bool isOutfit, bool checkWeightSibling,
+    private void CheckMesh(ModSetting scannedMod, string? gamePath, string referencer,
+        bool allowLoadOrderFallback, bool isOutfit, bool checkWeightSibling,
         List<NifJob> nifJobs, AddIssueDelegate addIssue)
     {
         if (string.IsNullOrWhiteSpace(gamePath)) return;
 
-        string? disk = ResolveToDisk(gamePath, allowLoadOrderFallback);
+        var source = ResolveSource(gamePath, allowLoadOrderFallback);
+        string? disk = source?.ResolvedDiskPath;
         if (disk == null)
         {
+            // The mesh itself is missing, so there is no disk path to attribute —
+            // fall back to the referencing record's plugin for "whose mod is this".
             addIssue(ModIssueType.MissingArmaMesh, gamePath, referencer: referencer,
                 detail: "The mesh could not be found in the mod, vanilla archives, or the Data folder — it will not render.",
-                isOutfit: isOutfit);
+                isOutfit: isOutfit,
+                sourceMod: isOutfit ? AttributeProviderByReferencer(referencer, scannedMod) : null);
             return;
         }
 
-        nifJobs.Add(new NifJob(disk, gamePath!, referencer, allowLoadOrderFallback, IsOutfit: isOutfit));
+        // Which installed mod supplies this NIF: outfit meshes usually come from
+        // an outfit/armor mod rather than the appearance mod under scan, and the
+        // report should point users at the right author.
+        string? sourceMod = isOutfit ? AttributeProviderMod(source, scannedMod) : null;
+        string sourceDescription = source!.LoosePath
+            ?? (source.BsaPath != null ? $"{source.BsaPath} :: {source.InternalBsaPath}" : disk);
+        nifJobs.Add(new NifJob(disk, gamePath!, referencer, allowLoadOrderFallback,
+            IsOutfit: isOutfit, SourceModName: sourceMod, SourceDescription: sourceDescription));
 
         // _0/_1 weight sibling: only when the source ARMA's weight slider is
         // enabled — then the engine morphs between both files and a missing
@@ -488,11 +627,11 @@ public sealed class ModIssueScanner
         {
             addIssue(ModIssueType.MissingWeightSibling, sibling, referencer: referencer,
                 detail: $"The weight counterpart of {Path.GetFileName(gamePath)} is missing.",
-                isOutfit: isOutfit);
+                isOutfit: isOutfit, sourceMod: sourceMod);
         }
     }
 
-    private void CheckAltTexture(string texPath, MeshOverride over, string shapeName,
+    private void CheckAltTexture(ModSetting scannedMod, string texPath, MeshOverride over, string shapeName,
         AddIssueDelegate addIssue)
     {
         if (string.IsNullOrWhiteSpace(texPath)) return;
@@ -502,26 +641,134 @@ public sealed class ModIssueScanner
         addIssue(ModIssueType.MissingAltTexture, rel, over.MeshPath,
             string.IsNullOrWhiteSpace(shapeName) ? "(unnamed shape)" : shapeName, over.Key,
             "An AlternateTextures entry points at this texture; the shape it retextures will render untextured.",
-            isOutfit: true);
+            isOutfit: true, sourceMod: AttributeProviderByReferencer(over.Key, scannedMod));
+    }
+
+    /// <summary>
+    /// Which slots the engine actually samples, and how visible a missing file
+    /// there is. Null = the engine never reads this slot, so a missing file is
+    /// not reportable at any tier:
+    /// <list type="bullet">
+    /// <item>Anything under facegendata\facetint, and slot 6 of a FaceGen head:
+    /// the engine loads the face tint ONLY from the canonical FormID-derived
+    /// path (proven in-game 2026-08-15, docs/FaceTintEngineTest-2026-08.md) —
+    /// the baked slot-6 string is never consulted, which is also why authors get
+    /// away with junk strings there. The canonical tint has its own check
+    /// (MissingFaceGenTint).</item>
+    /// <item>Slots 4/5 (environment cubemap/mask) when neither the shader type
+    /// nor the SLSF1 flags enable environment mapping.</item>
+    /// </list>
+    /// Slots 0/1 (diffuse/normal) are Issues — a miss renders visibly broken
+    /// (white/flat mesh). Every other sampled slot is a Note: real but subtle in
+    /// game — vanilla itself ships meshes referencing secondary maps it does not
+    /// include (mouthhuman_s/_sk, teeth_e: 58% of all texture rows measured on a
+    /// live setup). Unknown shader info fails conservative (report as Note).
+    /// </summary>
+    internal static ModIssueSeverity? ClassifyNifTextureSlot(int slot, bool isFaceGenHead,
+        uint shaderType, uint shaderFlags1, string regularizedPath)
+    {
+        const uint Slsf1EnvironmentMapping = 0x00000080;
+        const uint Slsf1EyeEnvironmentMapping = 0x00020000;
+        const uint ShaderTypeEnvMap = 1;
+        const uint ShaderTypeEyeEnvMap = 16;
+
+        if (regularizedPath.Contains(@"facegendata\facetint", StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        switch (slot)
+        {
+            case 0:
+            case 1:
+                return ModIssueSeverity.Issue;
+
+            case 6:
+                return isFaceGenHead ? null : ModIssueSeverity.Note;
+
+            case 4:
+            case 5:
+                bool envActive =
+                    shaderType == ShaderTypeEnvMap ||
+                    shaderType == ShaderTypeEyeEnvMap ||
+                    shaderType == NifHandler.UnknownShaderType ||
+                    (shaderFlags1 & (Slsf1EnvironmentMapping | Slsf1EyeEnvironmentMapping)) != 0;
+                return envActive ? ModIssueSeverity.Note : null;
+
+            default: // 2 glow/subsurface, 3 detail/palette, 7 specular/backlight, 8 spare
+                return ModIssueSeverity.Note;
+        }
     }
 
     /// <summary>Resolves a game path (or passes through an already-rooted disk
     /// path) to an on-disk file via the renderer's scope chain. Null = missing.</summary>
     private string? ResolveToDisk(string? path, bool allowLoadOrderFallback)
+        => ResolveSource(path, allowLoadOrderFallback)?.ResolvedDiskPath;
+
+    /// <summary>Like <see cref="ResolveToDisk"/> but keeps the full
+    /// <see cref="AssetSource"/> so callers can attribute the winning provider
+    /// (loose folder or BSA) to an installed mod. Null = missing/unresolvable.</summary>
+    private AssetSource? ResolveSource(string? path, bool allowLoadOrderFallback)
     {
         if (string.IsNullOrWhiteSpace(path)) return null;
         try
         {
-            if (Path.IsPathRooted(path)) return File.Exists(path) ? path : null;
+            if (Path.IsPathRooted(path))
+            {
+                return File.Exists(path)
+                    ? new AssetSource(AssetOriginKind.Loose, path, path, path, null, null)
+                    : null;
+            }
             using (_assetResolver.PushLoadOrderFallback(allowLoadOrderFallback))
             {
-                return _assetResolver.ResolveAssetSource(path!).ResolvedDiskPath;
+                var source = _assetResolver.ResolveAssetSource(path!);
+                return source.ResolvedDiskPath == null ? null : source;
             }
         }
         catch
         {
             return null;
         }
+    }
+
+    /// <summary>Maps the winning provider's disk location (loose file or BSA —
+    /// both live inside some mod's folder) to the owning ModSetting via
+    /// longest-prefix match. Null when the provider is the scanned mod itself
+    /// (nothing to point at), the game Data folder, or unattributable.</summary>
+    private string? AttributeProviderMod(AssetSource? source, ModSetting scannedMod)
+    {
+        string? path = source?.LoosePath ?? source?.BsaPath;
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        foreach (var (folder, name) in _folderOwners)
+        {
+            if (path.StartsWith(folder, StringComparison.OrdinalIgnoreCase) &&
+                (path.Length == folder.Length || path[folder.Length] == '\\' || path[folder.Length] == '/'))
+            {
+                return name.Equals(scannedMod.DisplayName, StringComparison.OrdinalIgnoreCase)
+                    ? null
+                    : name;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>Fallback attribution when there is no resolved file to map: the
+    /// referencer string carries the source record's plugin
+    /// ("Outfit:&lt;FormID&gt;:&lt;plugin&gt;:&lt;slots&gt;" per the attire walk's Key
+    /// convention); the ModSetting owning that plugin is the mod to look at.</summary>
+    private string? AttributeProviderByReferencer(string? referencer, ModSetting scannedMod)
+    {
+        if (string.IsNullOrWhiteSpace(referencer)) return null;
+        var parts = referencer.Split(':');
+        if (parts.Length < 3) return null;
+        string pluginToken = parts[2].Trim();
+        if (pluginToken.Length == 0) return null;
+
+        var owner = _settings.ModSettings.FirstOrDefault(ms =>
+            ms.CorrespondingModKeys.Any(k =>
+                k.FileName.String.Equals(pluginToken, StringComparison.OrdinalIgnoreCase)));
+        if (owner == null) return null;
+        return owner.DisplayName.Equals(scannedMod.DisplayName, StringComparison.OrdinalIgnoreCase)
+            ? null
+            : owner.DisplayName;
     }
 
     /// <summary>Returns the _0/_1 weight-sibling path of a world-model NIF, or

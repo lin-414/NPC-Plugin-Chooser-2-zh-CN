@@ -385,7 +385,8 @@ public sealed class InternalMugshotGenerator
                 string? headNif = paths.HeadMeshPath;
                 if (!string.IsNullOrEmpty(headNif) && Path.IsPathRooted(headNif) && File.Exists(headNif))
                 {
-                    var (npcForCheck, resolveHeadPart, resolveRace) = _resolver.ResolveNpcForConsistency(npcFormKey, modSetting);
+                    var (npcForCheck, resolveHeadPart, resolveRace, npcFromModPlugins) =
+                        _resolver.ResolveNpcForConsistency(npcFormKey, modSetting);
                     if (npcForCheck != null)
                     {
                         var analysis = _faceGenConsistency.Analyze(npcForCheck, resolveHeadPart, resolveRace, headNif);
@@ -394,7 +395,8 @@ public sealed class InternalMugshotGenerator
                             // Mod-scoped resolution (the tile's own mod first), so the remedies
                             // must talk about that mod's files — not load-order conflict winners.
                             faceGenMismatch = analysis.BuildReason(
-                                scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod);
+                                scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod,
+                                subjectSuppliesRecord: npcFromModPlugins);
                             faceGenMismatchOut?.Add(faceGenMismatch);
                             Trace($"  facegen-mismatch tid={Environment.CurrentManagedThreadId} npc={npcFormKey} missing={analysis.MissingBakedShapes.Count} unresolved={analysis.UnresolvedHeadParts.Count} null={analysis.NullHeadPartLinks} orphans={analysis.OrphanBakedShapes.Count}");
                         }

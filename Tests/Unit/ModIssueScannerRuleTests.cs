@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using Mutagen.Bethesda.Plugins;
+using NPC_Plugin_Chooser_2.BackEnd;
 using NPC_Plugin_Chooser_2.BackEnd.CharacterViewerHost;
 using NPC_Plugin_Chooser_2.Models;
 using NPC_Plugin_Chooser_2.View_Models;
@@ -96,7 +97,7 @@ public class ModIssueScannerRuleTests
 
         // modsViewModel is only used by the command; null is acceptable for
         // aggregation assertions as long as the command isn't executed.
-        var entry = new VM_ModIssueEntry("Test Mod", null!, result, null!);
+        var entry = new VM_ModIssueEntry("Test Mod", null!, result, result.Issues, null!);
 
         Assert.Equal(4, entry.TotalIssueCount);
         Assert.Equal(2, entry.AffectedNpcCount);
@@ -114,8 +115,158 @@ public class ModIssueScannerRuleTests
             ScanCompleted = true,
             Issues = new List<ModIssue> { Issue(ModIssueType.ModNotInstalled, npc: "") },
         };
-        var entry = new VM_ModIssueEntry("Test Mod", null!, result, null!);
+        var entry = new VM_ModIssueEntry("Test Mod", null!, result, result.Issues, null!);
         Assert.Equal("Mod not installed", entry.SummaryText);
+    }
+
+    // --- Slot-aware texture severity (ClassifyNifTextureSlot) ---
+    //
+    // Engine facts pinned here: the face-tint path/slot is engine-managed (the
+    // game loads the tint ONLY from the canonical FormID-derived path — proven
+    // in-game 2026-08-15, docs/FaceTintEngineTest-2026-08.md), environment slots
+    // are sampled only under env-mapping shader config, and only diffuse/normal
+    // misses are visibly broken; the rest are Notes.
+
+    private const uint EnvFlag = 0x00000080;     // SLSF1_Environment_Mapping
+    private const uint EyeEnvFlag = 0x00020000;  // SLSF1_Eye_Environment_Mapping
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void Slots0And1_AreAlwaysIssues(int slot)
+    {
+        Assert.Equal(ModIssueSeverity.Issue,
+            ModIssueScanner.ClassifyNifTextureSlot(slot, isFaceGenHead: false,
+                shaderType: 0, shaderFlags1: 0, regularizedPath: @"textures\a.dds"));
+    }
+
+    [Fact]
+    public void FaceTintPattern_IsNeverReported_AnySlot()
+    {
+        // NIF reused from another NPC/plugin bakes a wrong-plugin tint path
+        // (the NITHI/Beyond Reach class): engine never reads it.
+        Assert.Null(ModIssueScanner.ClassifyNifTextureSlot(6, isFaceGenHead: true,
+            shaderType: 4, shaderFlags1: 0,
+            regularizedPath: @"textures\actors\character\facegendata\facetint\skyrim.esm\000058b0.dds"));
+        // Belt: even in an unexpected slot the pattern is engine-managed.
+        Assert.Null(ModIssueScanner.ClassifyNifTextureSlot(0, isFaceGenHead: false,
+            shaderType: 0, shaderFlags1: 0,
+            regularizedPath: @"textures\facegendata\facetint\dawnguard.esm\00006978.dds"));
+    }
+
+    [Fact]
+    public void Slot6_OnFaceGenHead_IsSkipped_EvenForJunkStrings()
+    {
+        // "moneyistoiletpaper": authors put junk in the tint slot because the
+        // engine ignores it — the scanner must too.
+        Assert.Null(ModIssueScanner.ClassifyNifTextureSlot(6, isFaceGenHead: true,
+            shaderType: 4, shaderFlags1: 0, regularizedPath: "moneyistoiletpaper"));
+        // On a non-FaceGen shape slot 6 is a real (inner-layer) channel: Note.
+        Assert.Equal(ModIssueSeverity.Note,
+            ModIssueScanner.ClassifyNifTextureSlot(6, isFaceGenHead: false,
+                shaderType: 11, shaderFlags1: 0, regularizedPath: @"textures\inner.dds"));
+    }
+
+    [Theory]
+    [InlineData(4)]
+    [InlineData(5)]
+    public void EnvSlots_GatedOnShaderConfig(int slot)
+    {
+        // No env shader type, no env flags → the engine never samples the slot.
+        Assert.Null(ModIssueScanner.ClassifyNifTextureSlot(slot, isFaceGenHead: false,
+            shaderType: 0, shaderFlags1: 0, regularizedPath: @"textures\cubemaps\e.dds"));
+        // Env-map shader type → sampled, subtle → Note.
+        Assert.Equal(ModIssueSeverity.Note,
+            ModIssueScanner.ClassifyNifTextureSlot(slot, isFaceGenHead: false,
+                shaderType: 1, shaderFlags1: 0, regularizedPath: @"textures\cubemaps\e.dds"));
+        // Default shader type with the env flag set → Note.
+        Assert.Equal(ModIssueSeverity.Note,
+            ModIssueScanner.ClassifyNifTextureSlot(slot, isFaceGenHead: false,
+                shaderType: 0, shaderFlags1: EnvFlag, regularizedPath: @"textures\cubemaps\e.dds"));
+        // Eye env-map flag counts too (singular-"Eye" eyeballs).
+        Assert.Equal(ModIssueSeverity.Note,
+            ModIssueScanner.ClassifyNifTextureSlot(slot, isFaceGenHead: false,
+                shaderType: 16, shaderFlags1: EyeEnvFlag, regularizedPath: @"textures\cubemaps\e.dds"));
+        // Unknown shader info fails conservative: report rather than skip.
+        Assert.Equal(ModIssueSeverity.Note,
+            ModIssueScanner.ClassifyNifTextureSlot(slot, isFaceGenHead: false,
+                shaderType: NifHandler.UnknownShaderType, shaderFlags1: 0,
+                regularizedPath: @"textures\cubemaps\e.dds"));
+    }
+
+    [Theory]
+    [InlineData(2)] // glow / subsurface (mouthhuman_sk)
+    [InlineData(3)] // detail / greyscale palette
+    [InlineData(7)] // specular / backlight (mouthhuman_s, femalehead_s)
+    [InlineData(8)] // spare
+    public void SecondarySlots_AreNotes(int slot)
+    {
+        Assert.Equal(ModIssueSeverity.Note,
+            ModIssueScanner.ClassifyNifTextureSlot(slot, isFaceGenHead: false,
+                shaderType: 0, shaderFlags1: 0, regularizedPath: @"textures\sec.dds"));
+    }
+
+    // --- Ignore-entry matching (Settings.ModIssuesIgnored) ---
+
+    [Fact]
+    public void IgnoreEntry_FileScope_MatchesEveryNpcOfThePath()
+    {
+        var entry = new ModIssueIgnoreEntry
+        {
+            ModName = "Test Mod",
+            Type = ModIssueType.MissingNifTexture,
+            AffectedPath = @"textures\missing.dds",
+        };
+
+        Assert.True(entry.Matches("Test Mod", Issue(ModIssueType.MissingNifTexture, npc: "000AAA:Test.esp")));
+        Assert.True(entry.Matches("TEST MOD", Issue(ModIssueType.MissingNifTexture, npc: "000BBB:Test.esp")));
+        Assert.False(entry.Matches("Other Mod", Issue(ModIssueType.MissingNifTexture)));
+        Assert.False(entry.Matches("Test Mod", Issue(ModIssueType.MissingArmaMesh)));
+        Assert.False(entry.Matches("Test Mod",
+            Issue(ModIssueType.MissingNifTexture, path: @"textures\other.dds")));
+    }
+
+    [Fact]
+    public void IgnoreEntry_AllModsScope_IgnoresModName()
+    {
+        var entry = new ModIssueIgnoreEntry
+        {
+            ModName = "Where It Was Created",
+            AllMods = true,
+            Type = ModIssueType.MissingNifTexture,
+            AffectedPath = @"textures\actors\character\mouth\mouthhuman_sk.dds",
+        };
+
+        // The vanilla-recurring-file case: one global entry suppresses the path everywhere.
+        Assert.True(entry.Matches("Mod A",
+            Issue(ModIssueType.MissingNifTexture, path: @"textures\actors\character\mouth\mouthhuman_sk.dds")));
+        Assert.True(entry.Matches("Mod B",
+            Issue(ModIssueType.MissingNifTexture, path: @"textures\actors\character\mouth\mouthhuman_sk.dds")));
+        Assert.False(entry.Matches("Mod A",
+            Issue(ModIssueType.MissingNifTexture, path: @"textures\other.dds")));
+    }
+
+    [Fact]
+    public void IgnoreEntry_ExactScope_PinsNpcNifAndShape()
+    {
+        var entry = new ModIssueIgnoreEntry
+        {
+            ModName = "Test Mod",
+            Type = ModIssueType.MissingNifTexture,
+            AffectedPath = @"textures\missing.dds",
+            NpcFormKey = FormKey.Factory("000AAA:Test.esp"),
+            NifPath = @"meshes\armor\cuirass_1.nif",
+            ShapeName = "Cuirass",
+        };
+
+        Assert.True(entry.Matches("Test Mod", Issue(ModIssueType.MissingNifTexture,
+            npc: "000AAA:Test.esp", shape: "Cuirass", nif: @"meshes\armor\cuirass_1.nif")));
+        // Different NPC, same file: not matched by the exact scope.
+        Assert.False(entry.Matches("Test Mod", Issue(ModIssueType.MissingNifTexture,
+            npc: "000BBB:Test.esp", shape: "Cuirass", nif: @"meshes\armor\cuirass_1.nif")));
+        // Same NPC, different shape.
+        Assert.False(entry.Matches("Test Mod", Issue(ModIssueType.MissingNifTexture,
+            npc: "000AAA:Test.esp", shape: "Boots", nif: @"meshes\armor\cuirass_1.nif")));
     }
 
     [Fact]

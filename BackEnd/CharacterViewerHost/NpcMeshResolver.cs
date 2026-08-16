@@ -257,21 +257,37 @@ public class NpcMeshResolver
     /// rather than the load-order winner (which may be a different mod). Returns
     /// (null, _ => null) when the environment has no link cache.
     /// </summary>
-    public (INpcGetter? Npc, Func<FormKey, IHeadPartGetter?> ResolveHeadPart, Func<FormKey, IRaceGetter?> ResolveRace)
+    public (INpcGetter? Npc, Func<FormKey, IHeadPartGetter?> ResolveHeadPart, Func<FormKey, IRaceGetter?> ResolveRace,
+            bool NpcFromModPlugins)
         ResolveNpcForConsistency(FormKey npcFormKey, ModSetting? modSetting)
     {
         var linkCache = _env.LinkCache;
-        if (linkCache == null) return (null, _ => null, _ => null);
+        if (linkCache == null) return (null, _ => null, _ => null, false);
         // The rendered NIF belongs to the appearance source (a templated NPC renders
         // its template's FaceGen), so compare against THAT record's head parts.
+        // The chain hop itself stays Winner-scoped (which NIF gets compared must match
+        // what the renderer draws); only the record/head-part/race comparison below is
+        // Origin-scoped — see NpcResolutionContext.FallbackMode for why a load-order
+        // winner must not leak into a mod-scoped consistency verdict.
         var appearanceKey = ResolveAppearanceNpcKey(npcFormKey, modSetting);
-        var context = BuildContext(appearanceKey, modSetting);
+        var context = BuildContext(appearanceKey, modSetting,
+            RecordHandler.RecordLookupFallBack.Origin);
         var npc = ResolveRecord<INpcGetter>(appearanceKey.ToLink<INpcGetter>(), linkCache, context);
         Func<FormKey, IHeadPartGetter?> resolveHeadPart =
             fk => ResolveRecord<IHeadPartGetter>(fk.ToLink<IHeadPartGetter>(), linkCache, context);
         Func<FormKey, IRaceGetter?> resolveRace =
             fk => ResolveRecord<IRaceGetter>(fk.ToLink<IRaceGetter>(), linkCache, context);
-        return (npc, resolveHeadPart, resolveRace);
+
+        // Whether the mod's OWN plugins carry the record (vs the origin fallback
+        // supplying it for a mesh-only pairing) — drives whose plugin/nif versions
+        // the analyzer's single-slot remedy blames.
+        bool npcFromModPlugins = npc != null && modSetting != null &&
+            modSetting.CorrespondingModKeys.Count > 0 &&
+            _recordHandler.TryGetRecordFromMods(appearanceKey.ToLink<INpcGetter>(),
+                modSetting.CorrespondingModKeys, context?.FallBackFolderNames ?? new HashSet<string>(),
+                RecordHandler.RecordLookupFallBack.None, out _, reverseOrder: true);
+
+        return (npc, resolveHeadPart, resolveRace, npcFromModPlugins);
     }
 
     /// <summary>
@@ -313,8 +329,12 @@ public class NpcMeshResolver
     /// Builds an <see cref="NpcResolutionContext"/> for the given mod scope.
     /// Returns null when <paramref name="modSetting"/> is null so the
     /// downstream resolver falls through to the LinkCache-only path.
+    /// <paramref name="fallbackMode"/> selects what happens when the mod's own
+    /// plugins lack a record — Winner (render paths) or Origin (consistency
+    /// checks); see <see cref="NpcResolutionContext.FallbackMode"/>.
     /// </summary>
-    private NpcResolutionContext? BuildContext(FormKey targetNpcFormKey, ModSetting? modSetting)
+    private NpcResolutionContext? BuildContext(FormKey targetNpcFormKey, ModSetting? modSetting,
+        RecordHandler.RecordLookupFallBack fallbackMode = RecordHandler.RecordLookupFallBack.Winner)
     {
         if (modSetting == null) return null;
 
@@ -342,6 +362,7 @@ public class NpcMeshResolver
             OriginModKeys = origin?.CorrespondingModKeys ?? (IReadOnlyList<ModKey>)Array.Empty<ModKey>(),
             OriginFolderPaths = origin?.CorrespondingFolderPaths ?? (IReadOnlyList<string>)Array.Empty<string>(),
             DisambiguationModKey = disambiguation,
+            FallbackMode = fallbackMode,
         };
     }
 
@@ -2170,7 +2191,13 @@ public class NpcMeshResolver
             WriteTrace($"[ResolveRecord] type={typeof(T).Name} fk={link.FormKey} {ctxSummary}");
         }
 
-        if (context != null && context.PreferredModKeys.Count > 0)
+        // Origin mode runs the mod-scoped block even with zero PreferredModKeys
+        // (mesh-only mods carry no plugins) so its Origin fallback still applies;
+        // Winner mode keeps the historical shape and falls through to the outer
+        // linkCache below instead.
+        if (context != null &&
+            (context.PreferredModKeys.Count > 0 ||
+             context.FallbackMode == RecordHandler.RecordLookupFallBack.Origin))
         {
             // Disambiguation key wins when the mod's plugin set spans multiple
             // candidates for this NPC (mirrors Patcher.cs:292-298).
@@ -2187,13 +2214,22 @@ public class NpcMeshResolver
             // (last entry wins per NPC2's convention). reverseOrder: true makes
             // TryGetRecordFromMods walk the list backwards.
             if (_recordHandler.TryGetRecordFromMods(link, context.PreferredModKeys, context.FallBackFolderNames,
-                    RecordHandler.RecordLookupFallBack.Winner, out var rec, reverseOrder: true) &&
+                    context.FallbackMode, out var rec, reverseOrder: true) &&
                 rec is T t)
             {
-                if (capturing) WriteTrace("[ResolveRecord] resolved via TryGetRecordFromMods (mod-scoped or Winner fallback)");
+                if (capturing) WriteTrace($"[ResolveRecord] resolved via TryGetRecordFromMods (mod-scoped or {context.FallbackMode} fallback)");
                 return t;
             }
-            if (capturing) WriteTrace("[ResolveRecord] mod-scoped path (incl. Winner fallback) returned no match");
+            if (capturing) WriteTrace($"[ResolveRecord] mod-scoped path (incl. {context.FallbackMode} fallback) returned no match");
+
+            // Origin mode must NOT fall through to the load-order winner below:
+            // the whole point is that a record the mod (and its origin) doesn't
+            // supply stays unresolved instead of borrowing a foreign override.
+            if (context.FallbackMode == RecordHandler.RecordLookupFallBack.Origin)
+            {
+                if (capturing) WriteTrace($"[ResolveRecord] FAILED (Origin mode, no winner fallback) fk={link.FormKey} type={typeof(T).Name}");
+                return null;
+            }
         }
         if (linkCache.TryResolve<T>(link.FormKey, out var lcRec))
         {

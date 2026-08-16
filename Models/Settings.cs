@@ -899,6 +899,11 @@ public class Settings
     // existing Settings.json is harmlessly ignored on load (Newtonsoft defaults to
     // MissingMemberHandling.Ignore), so removing them neither throws nor wipes settings.
 
+    // --- Mod Issues tab ---
+    // User-suppressed scan findings ("Ignore this…" on a results row). Lives here rather than in
+    // ModIssuesCache.json so ignores survive rescans and cache-version bumps.
+    public List<ModIssueIgnoreEntry> ModIssuesIgnored { get; set; } = new();
+
     // --- Troubleshooting / Logging ---
     public bool LogActivity { get; set; } = false;
     public bool LogStartup { get; set; } = false;

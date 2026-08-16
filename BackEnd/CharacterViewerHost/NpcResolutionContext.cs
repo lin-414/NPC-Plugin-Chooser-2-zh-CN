@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using Mutagen.Bethesda.Plugins;
+using NPC_Plugin_Chooser_2.BackEnd;
 
 namespace NPC_Plugin_Chooser_2.BackEnd.CharacterViewerHost;
 
@@ -45,4 +46,22 @@ public sealed class NpcResolutionContext
     /// pins this NPC to a specific plugin within <see cref="PreferredModKeys"/>.
     /// Resolution tries this key first.</summary>
     public ModKey? DisambiguationModKey { get; init; }
+
+    /// <summary>
+    /// Where record resolution goes when the mod's own plugins don't carry the
+    /// record. <see cref="RecordHandler.RecordLookupFallBack.Winner"/> (the
+    /// default) consults the live load order — correct for RENDERING, which
+    /// should show what the game would show. The consistency check
+    /// (<see cref="NpcMeshResolver.ResolveNpcForConsistency"/>) uses
+    /// <see cref="RecordHandler.RecordLookupFallBack.Origin"/> instead: it asks
+    /// "does this mod's FaceGen match this mod's records", so a record the mod
+    /// doesn't carry must come from the FormKey's DEFINING plugin, never from
+    /// whichever unrelated mod happens to win the load order — a foreign winner
+    /// (RS Children overriding child races) otherwise gets compared against the
+    /// scanned mod's own NIF and files a guaranteed false mismatch under the
+    /// scanned mod's name. Origin mode also makes those verdicts independent of
+    /// the live load order (stable inside vs outside MO2).
+    /// </summary>
+    public RecordHandler.RecordLookupFallBack FallbackMode { get; init; } =
+        RecordHandler.RecordLookupFallBack.Winner;
 }
