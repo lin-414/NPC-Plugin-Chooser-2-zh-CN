@@ -219,7 +219,18 @@ namespace NPC_Plugin_Chooser_2.Models
         //     resolved-NIF source in Detail, same-type baked-shape pairing and
         //     record-source-aware remedies in dark-face text, template-terminus
         //     notes on FaceGen mesh/tint rows, WornArmor/race-skin referencers.
-        public const int CurrentVersion = 4;
+        // v5: dark-face recalibration from the 2026-08 Ysolda mutation matrix
+        //     (docs/DarkFaceTriggerInvestigation-2026-08.md): forward misses are
+        //     PROVEN triggers on a clean engine — hedges replaced with the
+        //     verified claim + the FDF-masking explanation; duplicate-slot
+        //     misses (slot satisfied by a baked same-type part) are the one
+        //     verified-tolerated configuration and no longer produce rows.
+        //     Also in v5: Origin resolution walks the vanilla-master family
+        //     winner-first (Sybille/Botox false positive), and the dark-face
+        //     text was compacted per user spec (scope-dependent headline, "has
+        //     X instead", deduped orphan bullets; SelectedMod scope concludes
+        //     with the authoring-issue line instead of a remedy menu).
+        public const int CurrentVersion = 5;
 
         public int Version { get; set; } = CurrentVersion;
 

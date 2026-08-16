@@ -127,6 +127,98 @@ public class FaceGenConsistencyAnalyzerResultTests
     }
 
     [Fact]
+    public void HasMismatch_ToleratedDuplicateSlotMissesOnly_IsFalse()
+    {
+        // The engine tolerates an unbaked part whose slot another baked same-type part
+        // satisfies (matrix variant B6 / Anoriath) — such parts must not flag.
+        var r = new FaceGenConsistencyAnalyzer.Result
+        {
+            ToleratedDuplicateSlotMisses = new[]
+            {
+                new FaceGenConsistencyAnalyzer.HeadPartRef(HpA, "BrowsMaleHumanoid04")
+                    { Type = HeadPart.TypeEnum.Eyebrows },
+            },
+        };
+        r.HasMismatch.Should().BeFalse();
+        r.BuildReason().Should().BeEmpty();
+    }
+
+    // ---- IsDuplicateSlotTolerated (the B6/Anoriath matrix rule) -----------------------------
+
+    private static FaceGenConsistencyAnalyzer.HeadPartRef Part(
+        FormKey fk, string edid, HeadPart.TypeEnum? type) =>
+        new(fk, edid) { Type = type };
+
+    [Fact]
+    public void DuplicateSlot_Tolerated_WhenAnotherSameTypePartIsBaked()
+    {
+        // Anoriath/B6: record carries Brows01 (baked) AND Brows04 (unbaked) → tolerated.
+        var candidate = Part(HpB, "BrowsMaleHumanoid04", HeadPart.TypeEnum.Eyebrows);
+        var all = new[] { Part(HpA, "BrowsMaleHumanoid01", HeadPart.TypeEnum.Eyebrows), candidate };
+
+        FaceGenConsistencyAnalyzer.IsDuplicateSlotTolerated(candidate, all,
+                n => n == "BrowsMaleHumanoid01")
+            .Should().BeTrue();
+    }
+
+    [Fact]
+    public void DuplicateSlot_NotTolerated_WhenSlotHasNoOtherOccupant()
+    {
+        // B1: the only Eyebrows part is unbaked → real forward miss (dark-faced in game).
+        var candidate = Part(HpA, "FemaleBrowsHuman02", HeadPart.TypeEnum.Eyebrows);
+        var all = new[] { candidate, Part(HpB, "FemaleEyesHumanAmber", HeadPart.TypeEnum.Eyes) };
+
+        FaceGenConsistencyAnalyzer.IsDuplicateSlotTolerated(candidate, all,
+                n => n == "FemaleEyesHumanAmber")
+            .Should().BeFalse();
+    }
+
+    [Fact]
+    public void DuplicateSlot_NotTolerated_WhenTheSameTypeSiblingIsAlsoUnbaked()
+    {
+        var candidate = Part(HpA, "BrowsA", HeadPart.TypeEnum.Eyebrows);
+        var all = new[] { candidate, Part(HpB, "BrowsB", HeadPart.TypeEnum.Eyebrows) };
+
+        FaceGenConsistencyAnalyzer.IsDuplicateSlotTolerated(candidate, all, _ => false)
+            .Should().BeFalse();
+    }
+
+    [Fact]
+    public void DuplicateSlot_NotTolerated_ForMiscParts()
+    {
+        // Misc is a grab-bag Type (mouth, hairlines, beard extras): a baked mouth must not
+        // excuse a missing hairline — that cell is untested and the exemption stays narrow.
+        var candidate = Part(HpA, "HairLineFemaleNord01", HeadPart.TypeEnum.Misc);
+        var all = new[] { Part(HpB, "FemaleMouthHumanoidDefault", HeadPart.TypeEnum.Misc), candidate };
+
+        FaceGenConsistencyAnalyzer.IsDuplicateSlotTolerated(candidate, all,
+                n => n == "FemaleMouthHumanoidDefault")
+            .Should().BeFalse();
+    }
+
+    [Fact]
+    public void DuplicateSlot_NotTolerated_WhenTypeUnknown()
+    {
+        var candidate = Part(HpA, "Mystery", null);
+        var all = new[] { candidate, Part(HpB, "Other", null) };
+
+        FaceGenConsistencyAnalyzer.IsDuplicateSlotTolerated(candidate, all, _ => true)
+            .Should().BeFalse();
+    }
+
+    [Fact]
+    public void DuplicateSlot_CandidateDoesNotSatisfyItself()
+    {
+        // The candidate is always a member of the geometry-bearing list (that is how
+        // Analyze calls it) — its own entry must not count as the baked satisfier.
+        var candidate = Part(HpA, "BrowsA", HeadPart.TypeEnum.Eyebrows);
+        var all = new[] { candidate };
+
+        FaceGenConsistencyAnalyzer.IsDuplicateSlotTolerated(candidate, all, _ => true)
+            .Should().BeFalse();
+    }
+
+    [Fact]
     public void HasMismatch_NullHeadPartLinksZero_DoesNotTrigger()
     {
         var r = new FaceGenConsistencyAnalyzer.Result { NullHeadPartLinks = 0 };
@@ -294,25 +386,33 @@ public class FaceGenConsistencyAnalyzerResultTests
         // remedy must describe record-vs-mesh drift without naming that plugin's version.
         reason.Should().Contain("different part in this slot");
         reason.Should().NotContain("Version mismatch");
-        // A single-slot miss verifiably rendered WITHOUT dark face in game (Anoriath /
-        // Whiterun Hold Refine, 2026-08-15) — the wording carries that hedge…
-        reason.Should().Contain("does not always show as a dark face");
-        // …but still no "you can probably ignore this" reassurance: the game tolerating one
-        // configuration proves nothing about others.
+        // The trailing "verified to dark-face / Face Discoloration Fix masks it" note was
+        // accurate but not actionable — documentation, not remedy — and was removed on user
+        // ruling (2026-08-16). The evidence lives in the HasMismatch remarks and the doc.
+        reason.Should().NotContain("Face Discoloration Fix");
+        // Still no "you can probably ignore this" reassurance.
         reason.Should().NotContain("ignore this");
     }
 
     [Fact]
     public void BuildReason_SingleDiff_SubjectSuppliesRecord_BlamesTheModsOwnPairing()
     {
+        // The record-aware single-slot remedies are LoadOrder-scope only now: SelectedMod
+        // scope concludes with the uniform authoring-issue line instead. No slot-pairing
+        // claim ("this one slot") either — the lone orphan opposite a lone miss need not
+        // share its slot Type (observed: a Face-type miss opposite a Brows-type orphan),
+        // and no re-install advice (it cannot fix data the mod itself ships mismatched).
         var r = new FaceGenConsistencyAnalyzer.Result
         {
             MissingBakedShapes = new[] { new FaceGenConsistencyAnalyzer.HeadPartRef(HpA, "BrowsMaleHumanoid04") },
         };
-        var reason = r.BuildReason(scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod,
+        var reason = r.BuildReason(scope: FaceGenConsistencyAnalyzer.ReasonScope.LoadOrder,
             subjectSuppliesRecord: true);
 
         reason.Should().Contain("ships both the plugin record and the FaceGen .nif");
+        reason.Should().Contain("Comments and Bugs sections");
+        reason.Should().NotContain("this one slot");
+        reason.Should().NotContain("Re-install");
         reason.Should().NotContain("Version mismatch");
     }
 
@@ -321,6 +421,7 @@ public class FaceGenConsistencyAnalyzerResultTests
     {
         // Mesh-only mod paired with a base-game record: base-game records don't change, so
         // the remedy must point at the overhaul the mesh was baked against, not versions.
+        // LoadOrder scope — SelectedMod scope concludes with the authoring line instead.
         var r = new FaceGenConsistencyAnalyzer.Result
         {
             MissingBakedShapes = new[]
@@ -329,7 +430,7 @@ public class FaceGenConsistencyAnalyzerResultTests
                     FormKey.Factory("0C710A:Skyrim.esm"), "BrowsMaleHumanoid04"),
             },
         };
-        var reason = r.BuildReason(scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod,
+        var reason = r.BuildReason(scope: FaceGenConsistencyAnalyzer.ReasonScope.LoadOrder,
             subjectSuppliesRecord: false);
 
         reason.Should().Contain("no plugin record for this NPC");
@@ -377,12 +478,76 @@ public class FaceGenConsistencyAnalyzerResultTests
             MissingBakedShapes = new[]
             {
                 new FaceGenConsistencyAnalyzer.HeadPartRef(HpA, "BrowsMaleHumanoid04")
-                    { BakedSameTypeShape = "BrowsMaleHumanoid01" },
+                    { BakedSameTypeShapes = new[] { "BrowsMaleHumanoid01" } },
             },
         };
         var reason = r.BuildReason();
 
-        reason.Should().Contain("the .nif carries 'BrowsMaleHumanoid01' in that slot instead");
+        reason.Should().Contain("the .nif has 'BrowsMaleHumanoid01' instead");
+    }
+
+    [Fact]
+    public void BuildReason_OrphansNamedAsCounterparts_AreNotRepeated()
+    {
+        // "the .nif has 'X' instead" already names X — repeating it in the orphan section
+        // was noise (user feedback 2026-08-16). Only orphans NOT named that way remain,
+        // in bullet format matching the .esp list.
+        var r = new FaceGenConsistencyAnalyzer.Result
+        {
+            MissingBakedShapes = new[]
+            {
+                new FaceGenConsistencyAnalyzer.HeadPartRef(HpA, "HairFemaleOrc02")
+                    { BakedSameTypeShapes = new[] { "HairFemaleOrc04" } },
+            },
+            OrphanBakedShapes = new[] { "HairFemaleOrc04", "SomeExtraShape" },
+        };
+        var reason = r.BuildReason();
+
+        reason.Should().Contain("the .nif has 'HairFemaleOrc04' instead");
+        reason.Should().Contain("\n • SomeExtraShape");
+        // The counterpart appears exactly once — in the "instead" clause, not the orphan list.
+        reason.IndexOf("HairFemaleOrc04", StringComparison.Ordinal)
+            .Should().Be(reason.LastIndexOf("HairFemaleOrc04", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void BuildReason_OrphanSection_OmittedWhenAllOrphansAreCounterparts()
+    {
+        var r = new FaceGenConsistencyAnalyzer.Result
+        {
+            MissingBakedShapes = new[]
+            {
+                new FaceGenConsistencyAnalyzer.HeadPartRef(HpA, "HairFemaleOrc02")
+                    { BakedSameTypeShapes = new[] { "HairFemaleOrc04" } },
+                new FaceGenConsistencyAnalyzer.HeadPartRef(HpB, "HairLineFemaleOrc01")
+                    { BakedSameTypeShapes = new[] { "HairLineFemaleOrc03" } },
+            },
+            OrphanBakedShapes = new[] { "HairFemaleOrc04", "HairLineFemaleOrc03" },
+        };
+
+        r.BuildReason().Should().NotContain("in the .nif but not the .esp");
+    }
+
+    [Fact]
+    public void BuildReason_HeadlineClause_IsScopeAndFidelityDependent()
+    {
+        // "not coming from the same appearance mod" is a load-order inference. SelectedMod
+        // scope resolves only the mod's own data — no other mod is in scope to blame — and
+        // even LoadOrder scope hedges with "may" (mods are sometimes just authored
+        // incorrectly; user feedback 2026-08-16).
+        var r = new FaceGenConsistencyAnalyzer.Result
+        {
+            MissingBakedShapes = new[]
+            {
+                new FaceGenConsistencyAnalyzer.HeadPartRef(HpA, "Hair"),
+                new FaceGenConsistencyAnalyzer.HeadPartRef(HpB, "HairLine"),
+            },
+        };
+
+        r.BuildReason(scope: FaceGenConsistencyAnalyzer.ReasonScope.LoadOrder)
+            .Should().Contain("may not be coming from the same appearance mod");
+        r.BuildReason(scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod)
+            .Should().NotContain("coming from the same appearance mod");
     }
 
     [Fact]
@@ -441,9 +606,12 @@ public class FaceGenConsistencyAnalyzerResultTests
     }
 
     [Fact]
-    public void BuildReason_SelectedModScope_GivesModScopedRemedies()
+    public void BuildReason_SelectedModScope_ConcludesWithModPagePointer_NoRemedyMenu()
     {
-        // The mugshot path resolves head parts mod-scoped, so load-order remedies would be wrong.
+        // Mod-scoped analysis compares the mod's own record against the mod's own mesh — no
+        // deployment, no load order, no other mod is in the verdict. A "Likely cause(s)" menu
+        // is meaningless there: the mod is simply authored incorrectly, and the only pointer
+        // worth giving is the mod page (user ruling 2026-08-16).
         var r = new FaceGenConsistencyAnalyzer.Result
         {
             MissingBakedShapes = new[]
@@ -454,16 +622,24 @@ public class FaceGenConsistencyAnalyzerResultTests
         };
         var reason = r.BuildReason(scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod);
 
-        reason.Should().Contain("The mod's own .esp and .nif don't match");
-        reason.Should().Contain("Run Validate Output");
+        // "This is an authoring issue" is not stated: in a mod scan that is obvious, so
+        // the conclusion is just the mod-page pointer (user wording).
+        reason.Should().Contain("Check the mod page's Comments and Bugs sections for known issues or an updated version.");
+        reason.Should().NotContain("authored incorrectly");
+        reason.Should().NotContain("Likely cause(s)");
+        reason.Should().NotContain("Re-install");
+        reason.Should().NotContain("Validate Output");
         reason.Should().NotContain("load order");
+        reason.Should().NotContain("Mods menu");
     }
 
     [Fact]
-    public void BuildReason_SelectedModScope_AllVanillaParts_PointsAtTheMissingRecord()
+    public void BuildReason_SelectedModScope_AllVanillaParts_MakesNoRecordInference()
     {
-        // Mod-scoped resolution landing on vanilla head parts means the mod supplied the mesh
-        // but no matching NPC record — a version-mismatch remedy would be misleading here.
+        // The scanner KNOWS whether the mod supplies a plugin record (subjectSuppliesRecord)
+        // — inferring "no matching plugin record" from the parts all being vanilla was
+        // wrong-headed, and "check the plugin is assigned / the right source NPC" was
+        // meaningless in this scope (user feedback 2026-08-16, notes 2a–2c).
         var r = new FaceGenConsistencyAnalyzer.Result
         {
             MissingBakedShapes = new[]
@@ -474,8 +650,9 @@ public class FaceGenConsistencyAnalyzerResultTests
         };
         var reason = r.BuildReason(scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod);
 
-        reason.Should().Contain("all vanilla Skyrim ones");
-        reason.Should().Contain("no matching plugin record");
+        reason.Should().NotContain("all vanilla Skyrim ones");
+        reason.Should().NotContain("source NPC");
+        reason.Should().Contain("Check the mod page's Comments and Bugs sections");
     }
 
     // ---- DeliveryFidelity: proven-faithful delivery replaces the conflict remedies ----------
@@ -636,7 +813,7 @@ public class FaceGenConsistencyAnalyzerResultTests
             scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod,
             fidelity: FaceGenConsistencyAnalyzer.DeliveryFidelity.SelectedModOwnData);
 
-        reason.Should().Contain("The mod's own .esp and .nif don't match");
+        reason.Should().Contain("Check the mod page's Comments and Bugs sections");
         reason.Should().NotContain("Not a deployment problem");
     }
 
@@ -734,9 +911,8 @@ public class FaceGenConsistencyAnalyzerResultTests
         { new(HpA, "Brows") };
 
     [Fact]
-    public void BuildReason_OrphanBakedShapes_TruncatesWithPlusNMore()
+    public void BuildReason_OrphanBakedShapes_TruncatesWithAndNMore()
     {
-        // Orphans use a different truncation suffix: ", +N more".
         var orphans = Enumerable.Range(0, 7).Select(i => "Orphan" + i).ToArray();
         var r = new FaceGenConsistencyAnalyzer.Result
         {
@@ -746,23 +922,25 @@ public class FaceGenConsistencyAnalyzerResultTests
 
         var reason = r.BuildReason(maxPerCategory: 2);
 
-        reason.Should().Contain("Orphan0");
-        reason.Should().Contain("Orphan1");
-        reason.Should().Contain(", +5 more."); // the orphan section closes with a period
+        reason.Should().Contain("\n • Orphan0");
+        reason.Should().Contain("\n • Orphan1");
+        reason.Should().Contain("…and 5 more");
+        reason.Should().NotContain("Orphan2");
     }
 
     [Fact]
-    public void BuildReason_OrphanBakedShapes_JoinedByCommas()
+    public void BuildReason_OrphanBakedShapes_AreBulleted()
     {
         var r = new FaceGenConsistencyAnalyzer.Result
         {
             MissingBakedShapes = OneMissing,
             OrphanBakedShapes = new[] { "A", "B", "C" },
         };
-        // Under the default cap (8) all three are shown, comma-separated, no "+N more".
+        // Bullet format matching the .esp list (user feedback 2026-08-16); under the
+        // default cap (8) all three are shown, no "…and N more".
         var reason = r.BuildReason();
-        reason.Should().Contain("A, B, C.");
-        reason.Should().NotContain("+");
+        reason.Should().Contain("\n • A\n • B\n • C");
+        reason.Should().NotContain("more");
     }
 
     [Fact]

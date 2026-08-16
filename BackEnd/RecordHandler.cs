@@ -1668,11 +1668,9 @@ public class RecordHandler
         switch (fallbackMode)
         {
             case RecordLookupFallBack.Origin:
-                if (TryAddPluginToCaches(formLink.FormKey.ModKey, fallBackModFolderNames) &&
-                    _modLinkCaches.TryGetValue(formLink.FormKey.ModKey, out var originCache) && originCache != null &&
-                    originCache.TryResolve(formLink, out fallbackRecord) && fallbackRecord is not null)
+                if (TryGetRecordViaOriginFamily(formLink, fallBackModFolderNames, out fallbackRecord))
                 {
-                    if (capturing) TraceLookup($"  TryGetRecordGetterFromMod[Origin] mk={formLink.FormKey.ModKey.FileName} fk={formLink.FormKey} → resolved");
+                    if (capturing) TraceLookup($"  TryGetRecordGetterFromMod[Origin] fk={formLink.FormKey} → resolved via origin family");
                     record = fallbackRecord;
                     return true;
                 }
@@ -1693,6 +1691,65 @@ public class RecordHandler
                     break;
         }
 
+        record = null;
+        return false;
+    }
+
+    // The vanilla masters in canonical load order. BaseGamePlugins is a HashSet (no
+    // reliable order), so the family walk orders itself off this list; release-specific
+    // extras (e.g. SkyrimVR.esm) are appended after — they load after the five.
+    private static readonly ModKey[] VanillaMasterOrder =
+    {
+        ModKey.FromNameAndExtension("Skyrim.esm"),
+        ModKey.FromNameAndExtension("Update.esm"),
+        ModKey.FromNameAndExtension("Dawnguard.esm"),
+        ModKey.FromNameAndExtension("HearthFires.esm"),
+        ModKey.FromNameAndExtension("Dragonborn.esm"),
+    };
+
+    /// <summary>
+    /// The Origin fallback's resolution target set. For a FormKey defined by a base-game
+    /// master this is the whole vanilla-master FAMILY, winner-first (Dragonborn → … →
+    /// Skyrim), because the DLC are guaranteed present and routinely override earlier
+    /// masters' records — e.g. Dawnguard rewrites the vampire races' default head parts,
+    /// so grading FaceGen against Skyrim.esm's copy of BretonRaceVampire flags mismatches
+    /// the engine never sees (Sybille Stentor / Botox false positive, 2026-08-16). For any
+    /// other FormKey the family is just the origin plugin — third-party plugins stay
+    /// excluded, which is the point of Origin mode (see NpcResolutionContext.FallbackMode).
+    /// Creation Club is deliberately NOT family: not guaranteed installed.
+    /// </summary>
+    private IEnumerable<ModKey> OriginFamilyWinnerFirst(ModKey originKey)
+    {
+        var baseGame = _environmentStateProvider.BaseGamePlugins;
+        if (!baseGame.Contains(originKey))
+        {
+            yield return originKey;
+            yield break;
+        }
+        var ordered = new List<ModKey>(baseGame.Count);
+        foreach (var mk in VanillaMasterOrder)
+            if (baseGame.Contains(mk)) ordered.Add(mk);
+        foreach (var mk in baseGame)
+            if (!ordered.Contains(mk)) ordered.Add(mk);
+        for (int i = ordered.Count - 1; i >= 0; i--)
+        {
+            yield return ordered[i];
+            // Masters loading before the definer cannot carry the record; stop there.
+            if (ordered[i] == originKey) yield break;
+        }
+    }
+
+    private bool TryGetRecordViaOriginFamily(IFormLinkGetter formLink, HashSet<string> fallBackModFolderNames,
+        out IMajorRecordGetter? record)
+    {
+        foreach (var mk in OriginFamilyWinnerFirst(formLink.FormKey.ModKey))
+        {
+            if (TryGetRecordGetterFromMod(formLink, mk, fallBackModFolderNames, RecordLookupFallBack.None, out record) &&
+                record != null)
+            {
+                return true;
+            }
+        }
         record = null;
         return false;
     }
@@ -1731,9 +1788,9 @@ public class RecordHandler
         switch (fallbackMode)
         {
             case RecordLookupFallBack.Origin:
-                if (TryGetRecordGetterFromMod(formLink, formLink.FormKey.ModKey, fallBackModFolderNames, RecordLookupFallBack.None,  out record) && record != null)
+                if (TryGetRecordViaOriginFamily(formLink, fallBackModFolderNames, out record) && record != null)
                 {
-                    if (capturing) TraceLookup($"  → MATCHED via Origin fallback {formLink.FormKey.ModKey.FileName}");
+                    if (capturing) TraceLookup($"  → MATCHED via Origin family fallback ({formLink.FormKey.ModKey.FileName})");
                     return true;
                 }
                 if (capturing) TraceLookup("  → Origin fallback miss");

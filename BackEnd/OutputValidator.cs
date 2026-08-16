@@ -1877,7 +1877,9 @@ public class OutputValidator
 
                 using (ContextualPerformanceTracer.Trace("FaceGenConsistency"))
                     CheckFaceGenHeadPartConsistency(npcFk, subjectFk, subjectStandsInForNpc, subjectPath,
-                        targetMeshRel, displayName, selectedModName, linkCache, result, fidelity);
+                        targetMeshRel, displayName, selectedModName, linkCache, result, fidelity,
+                        analyzeInSourceModContext: () =>
+                            AnalyzeDonorInSourceModContext(donorFk, modSetting, sourcePath));
             }
 
             if (!subjectExists && sourcePath == null)
@@ -2199,11 +2201,20 @@ public class OutputValidator
     /// version, missing master, null/swapped head part, or an author-side .nif/plugin
     /// mismatch — none of which the renderer or patcher can detect.
     /// </summary>
+    /// <param name="analyzeInSourceModContext">Optional cross-check: runs the SAME analysis the
+    /// Mod Issues scanner runs — the donor record + head parts + race resolved in the selected
+    /// mod's OWN context, against the mod's own FaceGen file. On a load-order mismatch this
+    /// discriminates the two possible worlds: the mod itself ships the mismatch (authoring
+    /// issue — deployment remedies are pointless and are skipped), or the mod is internally
+    /// consistent (the mismatch was introduced on the way into the game — the conflict
+    /// remedies apply with certainty). Null (or a null return) leaves the verdict
+    /// undiscriminated, preserving the previous behavior.</param>
     private void CheckFaceGenHeadPartConsistency(
         FormKey npcFk, FormKey subjectFk, bool subjectStandsInForNpc, string nifPath, string relMeshPath,
         string displayName, string selectedModName, ILinkCache<ISkyrimMod, ISkyrimModGetter> linkCache,
         ValidationRunResult result,
-        FaceGenConsistencyAnalyzer.DeliveryFidelity fidelity = FaceGenConsistencyAnalyzer.DeliveryFidelity.Unknown)
+        FaceGenConsistencyAnalyzer.DeliveryFidelity fidelity = FaceGenConsistencyAnalyzer.DeliveryFidelity.Unknown,
+        Func<FaceGenConsistencyAnalyzer.Result?>? analyzeInSourceModContext = null)
     {
         if (!linkCache.TryResolve<INpcGetter>(subjectFk, out var npcGetter))
             return;
@@ -2262,6 +2273,38 @@ public class OutputValidator
         // appearance mod won it. Best-effort — a missing winner just leaves the column blank.
         var winnerModKey = linkCache.ResolveAllContexts<INpc, INpcGetter>(subjectFk).FirstOrDefault()?.ModKey;
 
+        // Cross-check the selected mod in ITS OWN context (see the parameter doc).
+        var sourceAnalysis = analyzeInSourceModContext?.Invoke();
+        if (sourceAnalysis?.HasMismatch == true)
+        {
+            // The mod's own record/mesh pairing carries a mismatch by itself: an authoring
+            // issue. No deployment or ordering remedy can fix data that disagrees inside the
+            // mod, so the row states that instead of offering a conflict-remedy menu.
+            result.Issues.Add(new ValidationIssue
+            {
+                Severity = ValidationSeverity.Warning,
+                Check = ValidationCheckKind.FaceGen,
+                NpcDisplayName = displayName,
+                NpcFormKey = npcFk.ToString(),
+                SelectedMod = selectedModName,
+                Issue = "Checked the selected mod in its own context: the mod itself ships this mismatch.\n" +
+                        sourceAnalysis.BuildReason(scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod),
+                WinningSource = winnerModKey.HasValue
+                    ? $"NPC record from '{winnerModKey.Value.FileName}'"
+                    : string.Empty,
+                Details = relMeshPath,
+            });
+            return;
+        }
+
+        // A clean cross-check turns the conflict remedies from "likely" into "certain": the
+        // mod's own data agrees with itself, so the mismatch was introduced downstream.
+        string crossCheckTail = sourceAnalysis is { HasMismatch: false }
+            ? "\nThe selected mod was also checked in its own context, and its record and FaceGen agree there — " +
+              "so this mismatch was introduced on the way into your game (the generated output, a plugin " +
+              "conflict, or a mod-install-order conflict), not by the mod itself."
+            : string.Empty;
+
         // The faithful-delivery remedies assert "NPC2's output record is winning". The caller
         // proved the mesh half (deployed == the selected mod's file); the record half is proven
         // here. If some other plugin wins the subject after all, the conflict-first remedies are
@@ -2280,12 +2323,64 @@ public class OutputValidator
             NpcDisplayName = displayName,
             NpcFormKey = npcFk.ToString(),
             SelectedMod = selectedModName,
-            Issue = analysis.BuildReason(fidelity: fidelity),
+            Issue = analysis.BuildReason(fidelity: fidelity) + crossCheckTail,
             WinningSource = winnerModKey.HasValue
                 ? $"NPC record from '{winnerModKey.Value.FileName}'"
                 : string.Empty,
             Details = relMeshPath,
         });
+    }
+
+    /// <summary>
+    /// The Mod Issues scanner's analysis, replicated in the validator: the donor record, its
+    /// head parts and race resolved in the selected mod's OWN context (disambiguation pin →
+    /// the mod's plugins, last wins → the origin FAMILY fallback), graded against the mod's
+    /// own FaceGen file. Null when inconclusive (no source mesh, unresolvable donor, parse
+    /// failure) — callers must then fall back to the undiscriminated verdict.
+    /// </summary>
+    private FaceGenConsistencyAnalyzer.Result? AnalyzeDonorInSourceModContext(
+        FormKey donorFk, ModSetting modSetting, string? sourceNifPath)
+    {
+        // The synthetic Base Game / Creation Club entries have no "own context" distinct from
+        // the load order; the VanillaOwnData fidelity path already covers them.
+        if (sourceNifPath == null || modSetting.IsAutoGenerated) return null;
+        try
+        {
+            var folders = new HashSet<string>(
+                modSetting.CorrespondingFolderPaths ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+
+            var donorLink = donorFk.ToLink<INpcGetter>();
+            INpcGetter? donor = null;
+            if (modSetting.NpcPluginDisambiguation.TryGetValue(donorFk, out var disKey) &&
+                _recordHandler.TryGetRecordGetterFromMod(donorLink, disKey, folders,
+                    RecordHandler.RecordLookupFallBack.None, out var disRec) && disRec is INpcGetter pinned)
+            {
+                donor = pinned;
+            }
+            else if (_recordHandler.TryGetRecordFromMods(donorLink, modSetting.CorrespondingModKeys, folders,
+                         RecordHandler.RecordLookupFallBack.Origin, out var rec, reverseOrder: true) &&
+                     rec is INpcGetter scoped)
+            {
+                donor = scoped;
+            }
+            if (donor == null) return null;
+
+            IHeadPartGetter? ResolveHeadPart(FormKey fk) =>
+                _recordHandler.TryGetRecordFromMods(fk.ToLink<IHeadPartGetter>(), modSetting.CorrespondingModKeys,
+                    folders, RecordHandler.RecordLookupFallBack.Origin, out var r, reverseOrder: true) &&
+                r is IHeadPartGetter hp ? hp : null;
+
+            IRaceGetter? ResolveRace(FormKey fk) =>
+                _recordHandler.TryGetRecordFromMods(fk.ToLink<IRaceGetter>(), modSetting.CorrespondingModKeys,
+                    folders, RecordHandler.RecordLookupFallBack.Origin, out var r, reverseOrder: true) &&
+                r is IRaceGetter race ? race : null;
+
+            return _faceGenConsistency.Analyze(donor, ResolveHeadPart, ResolveRace, sourceNifPath);
+        }
+        catch
+        {
+            return null; // the cross-check is best-effort and must never break validation
+        }
     }
 
     private static string? FindLooseInModFolders(ModSetting modSetting, string regularizedRelPath)

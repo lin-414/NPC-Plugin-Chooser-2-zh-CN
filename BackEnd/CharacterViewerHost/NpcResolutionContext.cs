@@ -61,6 +61,12 @@ public sealed class NpcResolutionContext
     /// scanned mod's own NIF and files a guaranteed false mismatch under the
     /// scanned mod's name. Origin mode also makes those verdicts independent of
     /// the live load order (stable inside vs outside MO2).
+    /// <para>For base-game FormKeys "the defining plugin" means the vanilla-master
+    /// FAMILY, winner-first (see RecordHandler.OriginFamilyWinnerFirst): the DLC are
+    /// guaranteed present and canonically override earlier masters — Dawnguard
+    /// rewrites the vampire races' default head parts, so grading a mesh against
+    /// Skyrim.esm's copy alone flags mismatches the engine never sees (the Sybille
+    /// Stentor / Botox false positive). Third-party plugins stay excluded.</para>
     /// </summary>
     public RecordHandler.RecordLookupFallBack FallbackMode { get; init; } =
         RecordHandler.RecordLookupFallBack.Winner;

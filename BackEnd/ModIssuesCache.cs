@@ -116,16 +116,21 @@ namespace NPC_Plugin_Chooser_2.BackEnd
             }
         }
 
-        /// <summary>Drops entries whose mod no longer exists.</summary>
-        public void Prune(IEnumerable<string> liveDisplayNames)
+        /// <summary>Drops entries not in <paramref name="liveDisplayNames"/> (mod removed
+        /// from the settings, or no longer scan-eligible — e.g. its folders were deleted).
+        /// Returns the number of entries removed so the caller can persist when a prune
+        /// was the only change.</summary>
+        public int Prune(IEnumerable<string> liveDisplayNames)
         {
             var live = new HashSet<string>(liveDisplayNames, StringComparer.OrdinalIgnoreCase);
             lock (_gate)
             {
-                foreach (var key in _data.Mods.Keys.Where(k => !live.Contains(k)).ToList())
+                var dead = _data.Mods.Keys.Where(k => !live.Contains(k)).ToList();
+                foreach (var key in dead)
                 {
                     _data.Mods.Remove(key);
                 }
+                return dead.Count;
             }
         }
 

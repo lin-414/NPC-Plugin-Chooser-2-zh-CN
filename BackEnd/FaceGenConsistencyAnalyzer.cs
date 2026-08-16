@@ -25,8 +25,8 @@ namespace NPC_Plugin_Chooser_2.BackEnd;
 /// drives the wording and the remedies in <see cref="Result.BuildReason"/>:</para>
 /// <list type="bullet">
 ///   <item><b>Missing baked shape</b> — a geometry-bearing head part the NPC
-///   resolves to has no shape of that EditorID baked into the .nif (high
-///   confidence; the in-game tint pass fails for it).</item>
+///   resolves to has no shape of that EditorID baked into the .nif (proven
+///   dark-face trigger on an unmodified engine — see <see cref="Result.HasMismatch"/>).</item>
 ///   <item><b>Unresolved link</b> — a non-null head part FormKey does not resolve
 ///   in the current load order (missing plugin/master, or a wrong-version plugin
 ///   that lacks the FormID).</item>
@@ -37,10 +37,10 @@ namespace NPC_Plugin_Chooser_2.BackEnd;
 ///   Parts, and the race's defaults for slot types the NPC does not set), so an
 ///   orphan is real evidence that the .nif and the record came from different
 ///   mods. It does not set <see cref="Result.HasMismatch"/> and is never reported
-///   on its own — the dark-face trigger is the forward direction, and an extra
-///   baked shape has been observed in game without it (see the remarks on
-///   <see cref="Result.HasMismatch"/>). It appears only as corroborating detail
-///   alongside a head part that IS missing.</item>
+///   on its own — the proven dark-face trigger is the forward direction, and an
+///   extra baked shape is clean-engine-verified inert (matrix variant A6 — see the
+///   remarks on <see cref="Result.HasMismatch"/>). It appears only as corroborating
+///   detail alongside a head part that IS missing.</item>
 /// </list>
 /// Caller-agnostic: the head part resolution strategy is supplied as a delegate so
 /// the same analyzer serves both the load-order link cache (Validate Output) and
@@ -114,8 +114,9 @@ public sealed class FaceGenConsistencyAnalyzer
         /// Type that the .nif carries instead (e.g. record asks for BrowsMaleHumanoid04,
         /// the .nif was baked with BrowsMaleHumanoid01). Best-effort — requires the
         /// caller's EditorID→head-part resolver to type the orphan shapes; null when no
-        /// same-type counterpart was identified.</summary>
-        public string? BakedSameTypeShape { get; init; }
+        /// same-type counterpart was identified. A list so <see cref="Result.BuildReason"/>
+        /// can subtract these from the orphan section instead of naming shapes twice.</summary>
+        public IReadOnlyList<string>? BakedSameTypeShapes { get; init; }
     }
 
     /// <summary>How faithfully the deployed record + mesh reproduce the selected mod, when the
@@ -205,6 +206,12 @@ public sealed class FaceGenConsistencyAnalyzer
         /// of that EditorID in the .nif.
         public IReadOnlyList<HeadPartRef> MissingBakedShapes { get; init; } = System.Array.Empty<HeadPartRef>();
 
+        /// <summary>Unbaked record parts the engine TOLERATES because another resolved part of
+        /// the same slot Type IS baked (see <see cref="IsDuplicateSlotTolerated"/>). Excluded
+        /// from <see cref="MissingBakedShapes"/> so they set neither <see cref="HasMismatch"/>
+        /// nor any reported row — engine-inert findings must not warn. Kept for diagnostics.</summary>
+        public IReadOnlyList<HeadPartRef> ToleratedDuplicateSlotMisses { get; init; } = System.Array.Empty<HeadPartRef>();
+
         /// Baked head-part-like shapes with no matching resolved head part (detail only).
         public IReadOnlyList<string> OrphanBakedShapes { get; init; } = System.Array.Empty<string>();
 
@@ -216,22 +223,28 @@ public sealed class FaceGenConsistencyAnalyzer
 
         /// <summary>True when a head part the record needs is unaccounted for. Deliberately
         /// FORWARD-DIRECTION ONLY: orphan baked shapes do not set it.
-        /// <para>Evidence (2026-07-24), since no engine-level documentation of the rule exists:
-        /// a NIF carrying a shape with no matching head part (0_HAIRLINE_Male_Human_CurlyScalp,
-        /// plus a duplicate of another part) rendered with no dark-face bug in game; and the
-        /// established detector for this bug, the "Dark Face Issue Reporter" xEdit script, tests
-        /// only that every HeadPart in the record is present in the NIF. The community sources
-        /// that describe the engine behaviour ("the game regenerates the face but doesn't load
-        /// tint data when the mesh doesn't match the head parts information") never state the
-        /// reverse direction. So an extra baked shape is reported as corroborating detail, not
-        /// as a defect on its own.</para>
-        /// <para>Counter-specimen for the FORWARD direction too (2026-08-15, user-verified in
-        /// game): Anoriath under Whiterun Hold Refine — record uses BrowsMaleHumanoid04, the
-        /// .nif carries only BrowsMaleHumanoid01 — rendered with NO dark face; the head simply
-        /// displays the baked brows. So a single-slot forward miss is not a guaranteed trigger
-        /// either (the exact engine conditions — part type? count? — remain unmapped). The
-        /// check still reports: the record and mesh ARE out of sync, and forward misses are
-        /// the community-established correlate of the bug; the wording hedges accordingly.</para></summary>
+        /// <para>The forward direction is a PROVEN dark-face trigger on an unmodified engine
+        /// (in-game mutation matrix on Ysolda, 2026-08-15,
+        /// docs/DarkFaceTriggerInvestigation-2026-08.md): deleting any single baked shape
+        /// (brows, eyes, hair, mouth, or the head itself) and swapping / removing / adding any
+        /// modeled record part (brows, eyes, hair, a modeled scar) EACH produced the dark face,
+        /// with no SKSE plugins loaded. No part type is exempt, one part suffices, and
+        /// race-default parts count the same as explicit ones. Face Discoloration Fix-class
+        /// plugins force-regenerate tints and mask the symptom entirely, which is why
+        /// mismatched mods are often reported as "renders fine".</para>
+        /// <para>The one CONFIRMED exception (matrix variant B6 + the wild Anoriath/Whiterun
+        /// Hold Refine specimen, whose shipped NIF bakes Brows01 but not the record's second
+        /// Eyebrows part Brows04): a duplicate-slot miss is tolerated when the slot is
+        /// otherwise satisfied by a baked part of the same type. <see cref="Analyze"/> exempts
+        /// exactly that configuration via <see cref="IsDuplicateSlotTolerated"/> — such parts
+        /// land in <see cref="ToleratedDuplicateSlotMisses"/>, not here.</para>
+        /// <para>Reverse direction CONFIRMED inert (matrix variant A6: an extra baked brows
+        /// shape with a real HDPT EditorID, record untouched, rendered normal on the clean
+        /// engine; matches the 2026-07-24 wild specimen and the forward-only "Dark Face Issue
+        /// Reporter" xEdit script). Extras stay corroborating detail, never a defect. B4's
+        /// dark face (record part removed) is thereby attributed to race-default substitution
+        /// — the race's default part fills the vacated slot and is itself unbaked, a forward
+        /// miss — not to the leftover baked shape.</para></summary>
         public bool HasMismatch =>
             MissingBakedShapes.Count > 0 || UnresolvedHeadParts.Count > 0 || NullHeadPartLinks > 0;
 
@@ -310,17 +323,20 @@ public sealed class FaceGenConsistencyAnalyzer
             switch (kind)
             {
                 case MismatchKind.DifferentSource:
-                    sb.Append("FaceGen / plugin mismatch (a common cause of the in-game dark-face bug): ")
+                    sb.Append("FaceGen / plugin mismatch (causes dark-face bug): ")
                       .Append("the FaceGen .nif has a different set of head parts than the NPC's .esp plugin record");
-                    // "Not coming from the same mod" is an inference, and with proven-faithful
-                    // delivery it is a FALSE one (vanilla's own vampires ship exactly this way) —
-                    // the remedies then carry the accurate cause instead.
-                    sb.Append(scope == ReasonScope.LoadOrder && fidelity != DeliveryFidelity.Unknown
-                        ? "."
-                        : ", so the mesh and the record are not coming from the same appearance mod.");
+                    // "Not coming from the same mod" is an inference that only the load-order
+                    // context can even entertain (hedged: it can also just be a mis-authored
+                    // mod). SelectedMod scope resolves nothing but the mod's own data, so no
+                    // other mod is in scope to blame — and with proven-faithful delivery the
+                    // inference is FALSE (vanilla's own vampires ship exactly this way); the
+                    // remedies then carry the accurate cause instead.
+                    sb.Append(scope == ReasonScope.LoadOrder && fidelity == DeliveryFidelity.Unknown
+                        ? ", so the mesh and the record may not be coming from the same appearance mod."
+                        : ".");
                     break;
                 case MismatchKind.SingleHeadPartDifference:
-                    sb.Append("FaceGen / plugin mismatch (a common cause of the in-game dark-face bug): ")
+                    sb.Append("FaceGen / plugin mismatch (causes dark-face bug): ")
                       .Append("the NPC's .esp plugin record uses one head part that isn't in the FaceGen .nif.");
                     break;
                 case MismatchKind.BrokenHeadPartLinks:
@@ -331,36 +347,38 @@ public sealed class FaceGenConsistencyAnalyzer
             }
 
             // ---- Evidence -----------------------------------------------------------------
+            var namedAsCounterpart = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
             if (MissingBakedShapes.Count > 0)
             {
                 sb.Append("\nThe following are in the .esp but not the .nif:");
                 int shown = 0;
                 foreach (var m in MissingBakedShapes)
                 {
-                    if (shown++ >= maxPerCategory) break;
+                    if (m.BakedSameTypeShapes != null)
+                        foreach (var c in m.BakedSameTypeShapes) namedAsCounterpart.Add(c);
+                    if (shown++ >= maxPerCategory) continue;
                     sb.Append("\n • '").Append(m.EditorId).Append("' (").Append(m.FormKey).Append(')');
                     if (m.FromRaceDefaults) sb.Append(" (race default)");
-                    if (m.BakedSameTypeShape != null)
-                        sb.Append(" — the .nif carries '").Append(m.BakedSameTypeShape)
-                          .Append("' in that slot instead");
+                    if (m.BakedSameTypeShapes is { Count: > 0 })
+                        sb.Append(" — the .nif has '")
+                          .Append(string.Join("' / '", m.BakedSameTypeShapes))
+                          .Append("' instead");
                 }
                 if (MissingBakedShapes.Count > maxPerCategory)
                     sb.Append("\n • …and ").Append(MissingBakedShapes.Count - maxPerCategory)
                       .Append(" more head part(s) with no baked shape.");
             }
 
-            if (OrphanBakedShapes.Count > 0)
+            // Orphans already named as an "instead" counterpart above are not repeated.
+            var remainingOrphans = OrphanBakedShapes.Where(o => !namedAsCounterpart.Contains(o)).ToList();
+            if (remainingOrphans.Count > 0)
             {
-                sb.Append("\nThe following are in the .nif but not the .esp: ");
-                int n = System.Math.Min(OrphanBakedShapes.Count, maxPerCategory);
+                sb.Append("\nThe following are in the .nif but not the .esp:");
+                int n = System.Math.Min(remainingOrphans.Count, maxPerCategory);
                 for (int i = 0; i < n; i++)
-                {
-                    if (i > 0) sb.Append(", ");
-                    sb.Append(OrphanBakedShapes[i]);
-                }
-                if (OrphanBakedShapes.Count > maxPerCategory)
-                    sb.Append(", +").Append(OrphanBakedShapes.Count - maxPerCategory).Append(" more");
-                sb.Append('.');
+                    sb.Append("\n • ").Append(remainingOrphans[i]);
+                if (remainingOrphans.Count > maxPerCategory)
+                    sb.Append("\n • …and ").Append(remainingOrphans.Count - maxPerCategory).Append(" more");
             }
 
             if (UnresolvedHeadParts.Count > 0)
@@ -381,6 +399,19 @@ public sealed class FaceGenConsistencyAnalyzer
             if (NullHeadPartLinks > 0)
                 sb.Append("\nThe .esp's head part list also has ").Append(NullHeadPartLinks)
                   .Append(" empty entry(s).");
+
+            // ---- Conclusion / remedies ----------------------------------------------------
+            // SelectedMod scope compares the mod's own record against the mod's own mesh —
+            // there is no deployment, no load order, and no other mod in the verdict, so a
+            // "likely causes" menu is meaningless: the mod's own files disagree, which is an
+            // authoring issue and nothing the user's setup can fix. Saying so is redundant in
+            // a mod scan, so the conclusion is just the pointer (user ruling 2026-08-16).
+            if (scope == ReasonScope.SelectedMod &&
+                kind is MismatchKind.DifferentSource or MismatchKind.SingleHeadPartDifference)
+            {
+                sb.Append("\nCheck the mod page's Comments and Bugs sections for known issues or an updated version.");
+                return sb.ToString();
+            }
 
             // ---- Likely causes / remedies -------------------------------------------------
             var remedies = BuildRemedies(kind, scope, fidelity, subjectSuppliesRecord);
@@ -430,19 +461,8 @@ public sealed class FaceGenConsistencyAnalyzer
                         "have been installed incorrectly. Check its mod page for special installation instructions.");
                     break;
 
-                case MismatchKind.DifferentSource when scope == ReasonScope.SelectedMod:
-                    // Mod-scoped analysis reads the mod's OWN files directly — a mod-manager
-                    // file conflict cannot influence this verdict, so (unlike LoadOrder scope)
-                    // no "another mod is overwriting" cause is offered here.
-                    list.Add(AllMissingAreBaseGame()
-                        ? "This NPC's head parts are all vanilla Skyrim ones, so the mod supplies a FaceGen .nif but no matching plugin record. Check that the mod's plugin is assigned to it in the Mods menu, and that the right source NPC is selected."
-                        : "The mod's own .esp and .nif don't match — its FaceGen was baked against a different set of head parts than its plugin now uses.");
-                    list.Add(
-                        "Re-install the mod (and check its mod page for special installation instructions); " +
-                        "if it needs a different version of another mod, install the matching version.");
-                    list.Add(
-                        "Run Validate Output to see which plugin and which files actually win in your setup.");
-                    break;
+                // No SelectedMod cases: that scope concludes with the authoring-issue line in
+                // BuildReason and never reaches this remedy builder for mismatch kinds.
 
                 case MismatchKind.SingleHeadPartDifference:
                     // Deliberately no "different version of <defining plugin>" phrasing: the
@@ -451,10 +471,15 @@ public sealed class FaceGenConsistencyAnalyzer
                     // version drifted — the record-vs-mesh pairing is what's out of sync.
                     if (subjectSuppliesRecord == true)
                     {
+                        // No slot-pairing claim ("this one slot") — the single orphan opposite a
+                        // single miss need not share its slot Type (observed: a Face-type miss
+                        // opposite a Brows-type orphan), and the same-type case already says so
+                        // in the evidence via the "instead" clause.
                         list.Add(
-                            "This mod ships both the plugin record and the FaceGen .nif, and they disagree for this one slot — " +
+                            "This mod ships both the plugin record and the FaceGen .nif, and they don't match — " +
                             "the .nif was probably exported from a different revision of the mod than the plugin (or the record " +
-                            "was edited without regenerating FaceGen). Re-install or update the mod so both halves match.");
+                            "was edited without regenerating FaceGen). Check the mod page (the Comments and Bugs sections) for " +
+                            "known issues or an updated version.");
                     }
                     else if (subjectSuppliesRecord == false)
                     {
@@ -486,10 +511,9 @@ public sealed class FaceGenConsistencyAnalyzer
                         list.Add(
                             "Or another mod changed that one head part. The game matches head parts to the .nif by name, so a mod that renames it breaks the match — check whether another plugin edits that head part.");
                     }
-                    list.Add(
-                        "Note: a single mismatched slot does not always show as a dark face in game — the head can simply render " +
-                        "the baked part instead (verified in-game with a brows slot) — but the record and mesh are out of sync, " +
-                        "and such mismatches are the established correlate of the dark-face bug in other configurations.");
+                    // No trailing "verified to dark-face / FDF masks it" note: accurate but not
+                    // actionable, so it is documentation, not remedy (user ruling 2026-08-16).
+                    // The evidence lives in the HasMismatch remarks and the investigation doc.
                     break;
 
                 case MismatchKind.BrokenHeadPartLinks:
@@ -710,9 +734,15 @@ public sealed class FaceGenConsistencyAnalyzer
 
         // 3. Forward: geometry-bearing resolved head parts absent from the baked shapes.
         //    Only meaningful when the NIF actually parsed (else every part looks "missing").
-        var missing = nifParsed
+        //    Duplicate-slot misses the engine tolerates (matrix variant B6 / Anoriath) are
+        //    split off so they don't flag — see IsDuplicateSlotTolerated.
+        var unbaked = nifParsed
             ? geometryBearing.Where(r => !baked.Contains(r.EditorId)).ToList()
             : new List<HeadPartRef>();
+        var tolerated = unbaked
+            .Where(r => IsDuplicateSlotTolerated(r, geometryBearing, baked.Contains))
+            .ToList();
+        var missing = tolerated.Count == 0 ? unbaked : unbaked.Except(tolerated).ToList();
 
         // 4. Reverse: baked shapes with no matching resolved head part (excluding the
         //    primary head and obvious scene/utility names). Detail only.
@@ -738,7 +768,7 @@ public sealed class FaceGenConsistencyAnalyzer
                     .Select(o => o.Name)
                     .ToList();
                 if (counterparts.Count > 0)
-                    missing[i] = missing[i] with { BakedSameTypeShape = string.Join("' / '", counterparts) };
+                    missing[i] = missing[i] with { BakedSameTypeShapes = counterparts };
             }
         }
 
@@ -749,11 +779,34 @@ public sealed class FaceGenConsistencyAnalyzer
             BakedShapeCount = baked.Count,
             ResolvedHeadPartCount = resolvedCount,
             MissingBakedShapes = missing,
+            ToleratedDuplicateSlotMisses = tolerated,
             OrphanBakedShapes = orphans,
             UnresolvedHeadParts = unresolved,
             NullHeadPartLinks = nullLinks,
         };
     }
+
+    /// <summary>
+    /// Matrix rule for the one mismatch configuration the engine tolerates (in-game verified
+    /// 2026-08-15, docs/DarkFaceTriggerInvestigation-2026-08.md): a record part with no baked
+    /// shape does NOT dark-face when another resolved part of the SAME slot Type is baked —
+    /// the slot is already satisfied (controlled cell B6: Ysolda + a second Eyebrows part;
+    /// wild specimen: Anoriath under Whiterun Hold Refine, Brows01 baked + Brows04 not).
+    /// <para>Misc is deliberately excluded: it is a grab-bag Type (mouths, hairlines, beard
+    /// extras all carry it), so a baked mouth must never excuse a missing hairline — that
+    /// cell is untested, and an unwarranted exemption would hide a proven trigger class.</para>
+    /// </summary>
+    /// <param name="candidate">The unbaked geometry-bearing part being judged.</param>
+    /// <param name="geometryBearing">Every geometry-bearing part the NPC resolves to
+    /// (explicit + race defaults + extra parts).</param>
+    /// <param name="hasBakedShape">Whether a shape of that EditorID is baked in the .nif.</param>
+    public static bool IsDuplicateSlotTolerated(
+        HeadPartRef candidate,
+        IReadOnlyList<HeadPartRef> geometryBearing,
+        System.Func<string, bool> hasBakedShape) =>
+        candidate.Type is { } slot && slot != HeadPart.TypeEnum.Misc &&
+        geometryBearing.Any(o => o.Type == slot && o.FormKey != candidate.FormKey &&
+                                 hasBakedShape(o.EditorId));
 
     /// <summary>
     /// True when <paramref name="headPart"/> contributes a shape to the baked FaceGen mesh —
