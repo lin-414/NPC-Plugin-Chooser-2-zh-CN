@@ -30,7 +30,8 @@ namespace NPC_Plugin_Chooser_2.View_Models;
 /// panel shows mugshot tiles for only the affected NPCs, annotated with the
 /// specific missing files. Results persist in <see cref="ModIssuesCache"/> and
 /// populate the tab on open without a scan; Scan re-uses valid cache entries,
-/// Rescan All ignores them.
+/// Rescan All ignores them. Both honor the toolbar's searchable scan-target box
+/// (default <see cref="AllModsScanTarget"/> = every eligible mod).
 /// </summary>
 public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
 {
@@ -91,6 +92,25 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
 
     public IReadOnlyList<IssueTypeFilterOption> AvailableIssueTypeFilters { get; }
     [Reactive] public IssueTypeFilterOption SelectedIssueTypeFilter { get; set; }
+
+    // --- Scan target (searchable combo in the scan toolbar) ---
+
+    /// <summary>Sentinel first entry of the scan-target box: scan every eligible mod.</summary>
+    public const string AllModsScanTarget = "ALL";
+
+    /// <summary>Raw text of the editable scan-target ComboBox. Session-local,
+    /// deliberately not persisted so every launch starts back at ALL.</summary>
+    [Reactive] public string ScanTargetText { get; set; } = AllModsScanTarget;
+
+    /// <summary>Dropdown contents: ALL plus the eligible mod names, narrowed to
+    /// substring matches while <see cref="ScanTargetText"/> is a partial search
+    /// string (see <see cref="RebuildScanTargetOptions"/>).</summary>
+    public ObservableCollection<string> ScanTargetOptions { get; } = new();
+
+    /// <summary>Eligible mod display names (sorted), snapshotted so per-keystroke
+    /// filtering doesn't re-probe ~every mod folder on disk. Uses the settings-only
+    /// eligibility half; <see cref="ScanAsync"/> still applies the full predicate.</summary>
+    private List<string> _scanTargetNames = new();
 
     /// <summary>Display toggle (deliberately NOT reset by Ctrl+Shift+C): when
     /// off, mods and NPC tiles whose only problems are outfit/headgear-related
@@ -231,12 +251,15 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         AvailableIssueTypeFilters = filterOptions;
         SelectedIssueTypeFilter = filterOptions[0];
 
+        RefreshScanTargetNames();
+        RebuildScanTargetOptions();
+
         var canScan = Observable.CombineLatest(
             this.WhenAnyValue(x => x.IsScanning),
             runViewModel.WhenAnyValue(r => r.IsRunning),
             (scanning, patching) => !scanning && !patching);
-        ScanCommand = ReactiveCommand.CreateFromTask(() => ScanAsync(ignoreCache: false), canScan);
-        RescanAllCommand = ReactiveCommand.CreateFromTask(() => ScanAsync(ignoreCache: true), canScan);
+        ScanCommand = ReactiveCommand.CreateFromTask(() => ScanFromToolbarAsync(ignoreCache: false), canScan);
+        RescanAllCommand = ReactiveCommand.CreateFromTask(() => ScanFromToolbarAsync(ignoreCache: true), canScan);
         CancelScanCommand = ReactiveCommand.Create(() => { _scanCts?.Cancel(); },
             this.WhenAnyValue(x => x.IsScanning));
         ExportCsvCommand = ReactiveCommand.Create(ExportCsv,
@@ -319,6 +342,15 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
             })
             .DisposeWith(_disposables);
 
+        // Scan-target text → narrowed dropdown. Throttled so the list mutates
+        // between keystrokes rather than on every one.
+        this.WhenAnyValue(x => x.ScanTargetText)
+            .Skip(1)
+            .Throttle(TimeSpan.FromMilliseconds(150), RxApp.MainThreadScheduler)
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(_ => RebuildScanTargetOptions())
+            .DisposeWith(_disposables);
+
         // Filters → left list.
         this.WhenAnyValue(x => x.NameFilterText, x => x.NpcSearchText, x => x.SelectedIssueTypeFilter,
                 x => x.IncludeOutfitOnlyIssues)
@@ -362,6 +394,10 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
     {
         if (_ensureLoadedRan) return;
         _ensureLoadedRan = true;
+
+        // Mods discovered after construction (VM_Mods population) should be
+        // offerable as scan targets by the time the tab is first shown.
+        RefreshScanTargetOptions();
 
         _ = Task.Run(() =>
         {
@@ -407,6 +443,91 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
                 if (entry != null) entry.IsStale = true;
             });
         }
+    }
+
+    // --- Scan target resolution ---
+
+    private void RefreshScanTargetNames() => _scanTargetNames = _settings.ModSettings
+        .Where(ModIssueScanner.IsEligibleBySettings)
+        .Select(m => m.DisplayName)
+        .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+        .ToList();
+
+    /// <summary>True when the text is a completed choice — ALL or an exact mod
+    /// name — rather than a partial search string. The view uses this to avoid
+    /// popping the dropdown open when an item was just picked.</summary>
+    public bool IsResolvedScanTarget(string? text)
+    {
+        text = text?.Trim();
+        return string.IsNullOrEmpty(text)
+               || text.Equals(AllModsScanTarget, StringComparison.OrdinalIgnoreCase)
+               || _scanTargetNames.Any(n => n.Equals(text, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Rebuilds the dropdown: ALL + every eligible mod while the text is
+    /// a resolved choice (so reopening after a pick offers the full list again),
+    /// or just the substring matches while the user is mid-search.</summary>
+    private void RebuildScanTargetOptions()
+    {
+        var text = ScanTargetText?.Trim() ?? string.Empty;
+        var visible = IsResolvedScanTarget(text)
+            ? _scanTargetNames
+            : _scanTargetNames.Where(n => n.Contains(text, StringComparison.OrdinalIgnoreCase)).ToList();
+
+        // Removing the ComboBox's selected item during Clear() can push an empty
+        // string through the two-way Text binding (classic editable-combo filter
+        // trap); snapshot and restore so the user's text survives the rebuild.
+        var keep = ScanTargetText;
+        ScanTargetOptions.Clear();
+        ScanTargetOptions.Add(AllModsScanTarget);
+        foreach (var name in visible) ScanTargetOptions.Add(name);
+        if (!string.Equals(ScanTargetText, keep, StringComparison.Ordinal)) ScanTargetText = keep;
+    }
+
+    /// <summary>Dropdown-open / tab-activation refresh: re-snapshot the eligible
+    /// mod names (mods may have been added or removed) and rebuild the options.</summary>
+    public void RefreshScanTargetOptions()
+    {
+        RefreshScanTargetNames();
+        RebuildScanTargetOptions();
+    }
+
+    /// <summary>Resolves the scan-target text to the mods a toolbar scan covers:
+    /// null = every eligible mod (ALL or empty text); otherwise the exact-named
+    /// mod, or every mod whose name contains the text — the same match rule the
+    /// dropdown displays. An empty list means nothing matches.</summary>
+    internal static IReadOnlyCollection<string>? ResolveScanTarget(
+        string? scanTargetText, IReadOnlyList<string> eligibleModNames)
+    {
+        var text = scanTargetText?.Trim();
+        if (string.IsNullOrEmpty(text) ||
+            text.Equals(AllModsScanTarget, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var exact = eligibleModNames
+            .Where(n => n.Equals(text, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (exact.Count > 0) return exact;
+
+        return eligibleModNames
+            .Where(n => n.Contains(text, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+    }
+
+    /// <summary>Toolbar Scan / Rescan All entry point: applies the scan-target
+    /// box before delegating to <see cref="ScanAsync"/>.</summary>
+    private async Task ScanFromToolbarAsync(bool ignoreCache)
+    {
+        RefreshScanTargetNames();
+        var onlyMods = ResolveScanTarget(ScanTargetText, _scanTargetNames);
+        if (onlyMods is { Count: 0 })
+        {
+            ScanStatusMessage = $"No eligible mod matches '{ScanTargetText?.Trim()}' — nothing scanned.";
+            return;
+        }
+        await ScanAsync(ignoreCache, onlyMods);
     }
 
     private async Task ScanAsync(bool ignoreCache, IReadOnlyCollection<string>? onlyMods = null)

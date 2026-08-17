@@ -141,6 +141,29 @@ namespace NPC_Plugin_Chooser_2.Views
             });
         }
 
+        /// <summary>
+        /// Auto-opens the scan-target dropdown while the user is typing a search
+        /// string, so the narrowing matches are visible without clicking the
+        /// arrow. Guarded to stay closed for programmatic text changes (no
+        /// keyboard focus) and for resolved values — i.e. right after an item
+        /// was picked from the list, which also raises TextChanged.
+        /// </summary>
+        private void ScanTargetComboBox_TextChanged(object sender, TextChangedEventArgs e)
+        {
+            if (ViewModel == null || ScanTargetComboBox.IsDropDownOpen) return;
+            if (!ScanTargetComboBox.IsKeyboardFocusWithin) return;
+
+            var text = ScanTargetComboBox.Text?.Trim() ?? string.Empty;
+            if (text.Length == 0 || ViewModel.IsResolvedScanTarget(text)) return;
+
+            ScanTargetComboBox.IsDropDownOpen = true;
+        }
+
+        /// <summary>Re-snapshot the eligible mods on open so newly added or
+        /// removed mods show up without restarting the tab.</summary>
+        private void ScanTargetComboBox_DropDownOpened(object sender, EventArgs e)
+            => ViewModel?.RefreshScanTargetOptions();
+
         private void ModIssuesView_Loaded(object sender, RoutedEventArgs e)
         {
             if (_isInitialLayout && !_userHasAdjustedSplitter)

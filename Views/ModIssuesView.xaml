@@ -37,10 +37,22 @@
                 </Grid.ColumnDefinitions>
 
                 <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="Scan:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                    <!-- Searchable scan-target picker: type to filter (substring),
+                         pick ALL or a mod. Auto-open-while-typing lives in
+                         code-behind (ScanTargetComboBox_TextChanged). -->
+                    <ComboBox x:Name="ScanTargetComboBox"
+                              MinWidth="150" MaxWidth="280" Margin="0,0,8,0" VerticalAlignment="Center"
+                              IsEditable="True" IsTextSearchEnabled="False" StaysOpenOnEdit="True"
+                              ItemsSource="{Binding ScanTargetOptions}"
+                              Text="{Binding ScanTargetText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                              TextBoxBase.TextChanged="ScanTargetComboBox_TextChanged"
+                              DropDownOpened="ScanTargetComboBox_DropDownOpened"
+                              ToolTip="Which mod to scan. ALL scans every eligible appearance mod.&#x0a;Type to search the list — Scan then covers the exact pick, or every mod matching the typed text."/>
                     <Button Content="Scan" Command="{Binding ScanCommand}" Padding="10,3" Margin="0,0,5,0"
-                            ToolTip="Scan installed appearance mods for missing assets. Mods that haven't changed since the last scan are skipped (cached)."/>
+                            ToolTip="Scan the targeted appearance mods for missing assets (ALL = every installed appearance mod). Mods that haven't changed since the last scan are skipped (cached)."/>
                     <Button Content="Rescan All" Command="{Binding RescanAllCommand}" Padding="10,3" Margin="0,0,5,0"
-                            ToolTip="Scan every mod from scratch, ignoring cached results."/>
+                            ToolTip="Scan the targeted mods from scratch, ignoring cached results."/>
                     <Button Content="Cancel" Command="{Binding CancelScanCommand}" Padding="10,3" Margin="0,0,10,0"
                             Visibility="{Binding IsScanning, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                     <Button Content="Export CSV" Command="{Binding ExportCsvCommand}" Padding="10,3" Margin="0,0,10,0"
