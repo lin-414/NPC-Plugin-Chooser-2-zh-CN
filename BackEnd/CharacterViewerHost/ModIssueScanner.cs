@@ -398,11 +398,16 @@ public sealed class ModIssueScanner
                 : $" via WornArmor {npc.WornArmor.FormKey}";
 
             var nifJobs = new List<NifJob>();
-            CheckMesh(mod, paths.BodyMeshPath, "Skin ARMA (Body)" + skinVia, false, false, false, nifJobs, AddIssue);
-            CheckMesh(mod, paths.HandsMeshPath, "Skin ARMA (Hands)" + skinVia, false, false, false, nifJobs, AddIssue);
-            CheckMesh(mod, paths.FeetMeshPath, "Skin ARMA (Feet)" + skinVia, false, false, false, nifJobs, AddIssue);
-            CheckMesh(mod, paths.HairMeshPath, "Worn hair ARMA", false, false, false, nifJobs, AddIssue);
-            CheckMesh(mod, paths.TailMeshPath, "Tail ARMA", false, false, false, nifJobs, AddIssue);
+            // isSkin: the engine textures every shape reached through the worn-skin
+            // ArmorAddon chain — body/hands/feet AND the race-specific extras like Khajiit/
+            // Argonian tails and worn hair — from the record chain's TextureSet (the ARMA's,
+            // or the race skin's). The paths baked in these NIFs are runtime-superseded,
+            // so their misses demote to Note below. Only FaceGen bakes are final.
+            CheckMesh(mod, paths.BodyMeshPath, "Skin ARMA (Body)" + skinVia, false, false, false, nifJobs, AddIssue, isSkin: true);
+            CheckMesh(mod, paths.HandsMeshPath, "Skin ARMA (Hands)" + skinVia, false, false, false, nifJobs, AddIssue, isSkin: true);
+            CheckMesh(mod, paths.FeetMeshPath, "Skin ARMA (Feet)" + skinVia, false, false, false, nifJobs, AddIssue, isSkin: true);
+            CheckMesh(mod, paths.HairMeshPath, "Worn hair ARMA", false, false, false, nifJobs, AddIssue, isSkin: true);
+            CheckMesh(mod, paths.TailMeshPath, "Tail ARMA", false, false, false, nifJobs, AddIssue, isSkin: true);
 
             // FaceGen head: existence already handled above (FaceGenExists knows
             // the renderer's vanilla-loose-skip rule, which plain resolution
@@ -500,10 +505,22 @@ public sealed class ModIssueScanner
                         if (severity == null) continue; // slot the engine never reads
                         if (ResolveToDisk(rel, job.AllowLoadOrderFallback) != null) continue;
 
+                        // Worn-skin shapes never sample their baked paths in game: the engine
+                        // applies the record chain's TextureSet (the skin ARMA's, or the race
+                        // skin's) over them — only FaceGen bakes are final. A missing baked
+                        // texture here is invisible (Bijin Brelyna: the body NIF bakes Astrid's
+                        // burnt textures and a dead _msn path; in game she wears her WornArmor
+                        // ARMA's textures), so it is a Note, never an Issue.
+                        if (job.IsSkin) severity = ModIssueSeverity.Note;
+
                         string shapeDisplay = string.IsNullOrWhiteSpace(shape.ShapeName)
                             ? "(unnamed shape)"
                             : shape.ShapeName;
                         string detail = $"Texture slot {slotTex.Slot} of shape '{shapeDisplay}'.";
+                        if (job.IsSkin)
+                            detail += " Skin shapes get their textures from the ArmorAddon / race skin " +
+                                      "TextureSet at runtime, so the path baked in the NIF is not what the " +
+                                      "engine samples — this miss is not visible in game.";
 
                         // Partition slots are only worth mentioning when they imply
                         // redundancy — another drawn shape covering the same biped
@@ -569,11 +586,27 @@ public sealed class ModIssueScanner
 
                     if (analysis.MissingBakedShapes.Count > 0 || analysis.NullHeadPartLinks > 0)
                     {
+                        // Traits-inert file (SOGS field specimen): the appearance hop used for
+                        // RENDERING is Winner-scoped and can follow a load-order override that
+                        // strips the vanilla Traits template — but in the mod's OWN context the
+                        // template stands, the raw engine renders the terminus's face, and the
+                        // graded file at this NPC's own path is never loaded. Note, not Issue:
+                        // whether the file ever matters is decided by this app's template
+                        // handling at patch time, and Validate Output checks the real output.
+                        bool traitsInert = appearanceKey.Equals(npcKey) &&
+                                           _resolver.KeepsTraitsTemplateInModScope(npcKey, mod);
                         AddIssue(ModIssueType.DarkFaceMismatch, faceGenMeshRel,
                             nifPath: paths.HeadMeshPath,
-                            detail: analysis.BuildReason(
-                                scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod,
-                                subjectSuppliesRecord: npcFromModPlugins));
+                            severity: traitsInert ? ModIssueSeverity.Note : ModIssueSeverity.Issue,
+                            detail: (traitsInert
+                                        ? "In the mod's own context this NPC keeps the Traits template flag, so the " +
+                                          "unpatched engine renders its template's face and never loads this file — " +
+                                          "the mismatch below cannot show in game unless a patch or another plugin " +
+                                          "removes the template.\n"
+                                        : string.Empty) +
+                                    analysis.BuildReason(
+                                        scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod,
+                                        subjectSuppliesRecord: npcFromModPlugins));
                     }
                 }
                 catch
@@ -602,7 +635,7 @@ public sealed class ModIssueScanner
 
     private sealed record NifJob(string DiskPath, string GamePath, string Referencer,
         bool AllowLoadOrderFallback, bool IsFaceGen = false, bool IsOutfit = false,
-        string? SourceModName = null, string? SourceDescription = null);
+        string? SourceModName = null, string? SourceDescription = null, bool IsSkin = false);
 
     private delegate void AddIssueDelegate(ModIssueType type, string affectedPath, string? nifPath = null,
         string? shapeName = null, string? referencer = null, string? detail = null, bool isOutfit = false,
@@ -610,7 +643,7 @@ public sealed class ModIssueScanner
 
     private void CheckMesh(ModSetting scannedMod, string? gamePath, string referencer,
         bool allowLoadOrderFallback, bool isOutfit, bool checkWeightSibling,
-        List<NifJob> nifJobs, AddIssueDelegate addIssue)
+        List<NifJob> nifJobs, AddIssueDelegate addIssue, bool isSkin = false)
     {
         if (string.IsNullOrWhiteSpace(gamePath)) return;
 
@@ -634,7 +667,8 @@ public sealed class ModIssueScanner
         string sourceDescription = source!.LoosePath
             ?? (source.BsaPath != null ? $"{source.BsaPath} :: {source.InternalBsaPath}" : disk);
         nifJobs.Add(new NifJob(disk, gamePath!, referencer, allowLoadOrderFallback,
-            IsOutfit: isOutfit, SourceModName: sourceMod, SourceDescription: sourceDescription));
+            IsOutfit: isOutfit, SourceModName: sourceMod, SourceDescription: sourceDescription,
+            IsSkin: isSkin));
 
         // _0/_1 weight sibling: only when the source ARMA's weight slider is
         // enabled — then the engine morphs between both files and a missing

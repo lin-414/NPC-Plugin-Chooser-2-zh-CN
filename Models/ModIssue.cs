@@ -230,7 +230,20 @@ namespace NPC_Plugin_Chooser_2.Models
         //     text was compacted per user spec (scope-dependent headline, "has
         //     X instead", deduped orphan bullets; SelectedMod scope concludes
         //     with the authoring-issue line instead of a remedy menu).
-        public const int CurrentVersion = 5;
+        // v6: NIF-baked texture misses on every mesh reached through the worn
+        //     ARMA chain (body/hands/feet/hair/tail) demoted to Note — those
+        //     shapes are textured from the record chain's TextureSet at
+        //     runtime (only FaceGen bakes are final), so the misses are
+        //     invisible in game (Bijin Brelyna false positive). Race defaults
+        //     of OverlayHeadPartList races (vampires) no longer enter the
+        //     dark-face comparison (Bruma Vampire Fledgling false positive —
+        //     in-game verified normal).
+        // v7: refined engine model from the 20-mod spawn matrix + variant A7
+        //     (doc field report 3): singular slots keep only the first-listed
+        //     part, extra parts reconcile by presence not name, and a
+        //     mod-shipped FaceGen at a Traits-templated NPC's own path (mod
+        //     context) demotes to Note — the raw engine never loads it.
+        public const int CurrentVersion = 7;
 
         public int Version { get; set; } = CurrentVersion;
 

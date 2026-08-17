@@ -250,6 +250,27 @@ public class NpcMeshResolver
     }
 
     /// <summary>
+    /// True when the NPC's record — resolved in the MOD's own scope (mod plugins → origin
+    /// family, never the load-order winner) — keeps the Traits template flag. The raw
+    /// engine then renders the template terminus's face and NEVER loads a FaceGen shipped
+    /// at this NPC's own path, so a mod-shipped file there is engine-inert unpatched (SOGS
+    /// field specimen, docs/DarkFaceTriggerInvestigation-2026-08.md field report 3 — the
+    /// Winner-scoped appearance hop used for RENDERING had followed a load-order override
+    /// that stripped the template, so the scanner graded a file the mod's own context
+    /// never shows).
+    /// </summary>
+    public bool KeepsTraitsTemplateInModScope(FormKey npcFormKey, ModSetting? modSetting)
+    {
+        var linkCache = _env.LinkCache;
+        if (linkCache == null) return false;
+        var context = BuildContext(npcFormKey, modSetting, RecordHandler.RecordLookupFallBack.Origin);
+        var npc = ResolveRecord<INpcGetter>(npcFormKey.ToLink<INpcGetter>(), linkCache, context);
+        return npc != null &&
+               npc.Configuration.TemplateFlags.HasFlag(NpcConfiguration.TemplateFlag.Traits) &&
+               !npc.Template.IsNull;
+    }
+
+    /// <summary>
     /// Resolves the NPC and returns a head-part resolver bound to the SAME mod scope
     /// used for mesh resolution (mod plugins first, link cache fallback for shared /
     /// vanilla parts). Used by the FaceGen-vs-records consistency check so the head

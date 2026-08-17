@@ -127,95 +127,80 @@ public class FaceGenConsistencyAnalyzerResultTests
     }
 
     [Fact]
-    public void HasMismatch_ToleratedDuplicateSlotMissesOnly_IsFalse()
+    public void HasMismatch_SurplusAndSatisfiedExtrasOnly_IsFalse()
     {
-        // The engine tolerates an unbaked part whose slot another baked same-type part
-        // satisfies (matrix variant B6 / Anoriath) — such parts must not flag.
+        // Engine-inert findings must not flag: surplus singular-slot parts (the engine
+        // keeps only the first-listed — B6/Anoriath/Khajiit tufts) and unbaked extras
+        // satisfied by presence (Gaiden's renamed hairline).
         var r = new FaceGenConsistencyAnalyzer.Result
         {
-            ToleratedDuplicateSlotMisses = new[]
+            SurplusSlotParts = new[]
             {
                 new FaceGenConsistencyAnalyzer.HeadPartRef(HpA, "BrowsMaleHumanoid04")
                     { Type = HeadPart.TypeEnum.Eyebrows },
+            },
+            PresenceSatisfiedExtras = new[]
+            {
+                new FaceGenConsistencyAnalyzer.HeadPartRef(HpB, "HairLineMaleRedguard3")
+                    { Type = HeadPart.TypeEnum.Misc, FromExtraParts = true },
             },
         };
         r.HasMismatch.Should().BeFalse();
         r.BuildReason().Should().BeEmpty();
     }
 
-    // ---- IsDuplicateSlotTolerated (the B6/Anoriath matrix rule) -----------------------------
-
-    private static FaceGenConsistencyAnalyzer.HeadPartRef Part(
-        FormKey fk, string edid, HeadPart.TypeEnum? type) =>
-        new(fk, edid) { Type = type };
+    // ---- RaceDefaultsParticipateInReconciliation (the overlay-race rule) --------------------
 
     [Fact]
-    public void DuplicateSlot_Tolerated_WhenAnotherSameTypePartIsBaked()
+    public void RaceDefaults_SkippedForOverlayHeadPartListRaces()
     {
-        // Anoriath/B6: record carries Brows01 (baked) AND Brows04 (unbaked) → tolerated.
-        var candidate = Part(HpB, "BrowsMaleHumanoid04", HeadPart.TypeEnum.Eyebrows);
-        var all = new[] { Part(HpA, "BrowsMaleHumanoid01", HeadPart.TypeEnum.Eyebrows), candidate };
+        // Vampire races carry OverlayHeadPartList: their HeadData is a runtime overlay
+        // (the vampirism transform), not slot-fill defaults the baked head must carry.
+        // In-game verified 2026-08-16 (Bruma Vampire Fledgling renders normal despite the
+        // Dawnguard-era default head being absent from her .nif), while the mutation
+        // matrix proved race-default misses on NON-overlay races DO dark-face (A4/A5).
+        var overlay = new Race(FormKey.Factory("088794:Skyrim.esm"), SkyrimRelease.SkyrimSE)
+        {
+            Flags = Race.Flag.FaceGenHead | Race.Flag.OverlayHeadPartList,
+        };
+        var normal = new Race(FormKey.Factory("013746:Skyrim.esm"), SkyrimRelease.SkyrimSE)
+        {
+            Flags = Race.Flag.FaceGenHead,
+        };
 
-        FaceGenConsistencyAnalyzer.IsDuplicateSlotTolerated(candidate, all,
-                n => n == "BrowsMaleHumanoid01")
-            .Should().BeTrue();
+        FaceGenConsistencyAnalyzer.RaceDefaultsParticipateInReconciliation(overlay).Should().BeFalse();
+        FaceGenConsistencyAnalyzer.RaceDefaultsParticipateInReconciliation(normal).Should().BeTrue();
+    }
+
+    // ---- IsSingularSlotType (the first-listed-winner rule) ----------------------------------
+
+    [Theory]
+    [InlineData(HeadPart.TypeEnum.Eyes, true)]
+    [InlineData(HeadPart.TypeEnum.Hair, true)]         // Khajiit ear tufts: second Hair dropped
+    [InlineData(HeadPart.TypeEnum.Face, true)]
+    [InlineData(HeadPart.TypeEnum.Eyebrows, true)]     // Anoriath/B6: first-listed Brows wins
+    [InlineData(HeadPart.TypeEnum.FacialHair, true)]
+    [InlineData(HeadPart.TypeEnum.Scars, false)]       // B5: a second gash was expected → dark
+    [InlineData(HeadPart.TypeEnum.Misc, false)]        // grab-bag: mouth must not excuse others
+    [InlineData(null, false)]
+    public void IsSingularSlotType_MatchesTheFieldEvidence(HeadPart.TypeEnum? type, bool singular)
+    {
+        FaceGenConsistencyAnalyzer.IsSingularSlotType(type).Should().Be(singular);
     }
 
     [Fact]
-    public void DuplicateSlot_NotTolerated_WhenSlotHasNoOtherOccupant()
+    public void BuildReason_ExtraParts_AreAnnotatedInTheEvidenceList()
     {
-        // B1: the only Eyebrows part is unbaked → real forward miss (dark-faced in game).
-        var candidate = Part(HpA, "FemaleBrowsHuman02", HeadPart.TypeEnum.Eyebrows);
-        var all = new[] { candidate, Part(HpB, "FemaleEyesHumanAmber", HeadPart.TypeEnum.Eyes) };
+        var r = new FaceGenConsistencyAnalyzer.Result
+        {
+            MissingBakedShapes = new[]
+            {
+                new FaceGenConsistencyAnalyzer.HeadPartRef(HpA, "HairLineFemaleNord15")
+                    { Type = HeadPart.TypeEnum.Misc, FromExtraParts = true },
+            },
+        };
 
-        FaceGenConsistencyAnalyzer.IsDuplicateSlotTolerated(candidate, all,
-                n => n == "FemaleEyesHumanAmber")
-            .Should().BeFalse();
-    }
-
-    [Fact]
-    public void DuplicateSlot_NotTolerated_WhenTheSameTypeSiblingIsAlsoUnbaked()
-    {
-        var candidate = Part(HpA, "BrowsA", HeadPart.TypeEnum.Eyebrows);
-        var all = new[] { candidate, Part(HpB, "BrowsB", HeadPart.TypeEnum.Eyebrows) };
-
-        FaceGenConsistencyAnalyzer.IsDuplicateSlotTolerated(candidate, all, _ => false)
-            .Should().BeFalse();
-    }
-
-    [Fact]
-    public void DuplicateSlot_NotTolerated_ForMiscParts()
-    {
-        // Misc is a grab-bag Type (mouth, hairlines, beard extras): a baked mouth must not
-        // excuse a missing hairline — that cell is untested and the exemption stays narrow.
-        var candidate = Part(HpA, "HairLineFemaleNord01", HeadPart.TypeEnum.Misc);
-        var all = new[] { Part(HpB, "FemaleMouthHumanoidDefault", HeadPart.TypeEnum.Misc), candidate };
-
-        FaceGenConsistencyAnalyzer.IsDuplicateSlotTolerated(candidate, all,
-                n => n == "FemaleMouthHumanoidDefault")
-            .Should().BeFalse();
-    }
-
-    [Fact]
-    public void DuplicateSlot_NotTolerated_WhenTypeUnknown()
-    {
-        var candidate = Part(HpA, "Mystery", null);
-        var all = new[] { candidate, Part(HpB, "Other", null) };
-
-        FaceGenConsistencyAnalyzer.IsDuplicateSlotTolerated(candidate, all, _ => true)
-            .Should().BeFalse();
-    }
-
-    [Fact]
-    public void DuplicateSlot_CandidateDoesNotSatisfyItself()
-    {
-        // The candidate is always a member of the geometry-bearing list (that is how
-        // Analyze calls it) — its own entry must not count as the baked satisfier.
-        var candidate = Part(HpA, "BrowsA", HeadPart.TypeEnum.Eyebrows);
-        var all = new[] { candidate };
-
-        FaceGenConsistencyAnalyzer.IsDuplicateSlotTolerated(candidate, all, _ => true)
-            .Should().BeFalse();
+        r.BuildReason().Should().Contain("'HairLineFemaleNord15' (" + HpA + ") (extra part)");
     }
 
     [Fact]

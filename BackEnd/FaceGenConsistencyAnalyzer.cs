@@ -110,6 +110,17 @@ public sealed class FaceGenConsistencyAnalyzer
         /// <summary>The part's slot Type as resolved (Brows, Eyes, Hair, …), when known.</summary>
         public HeadPart.TypeEnum? Type { get; init; }
 
+        /// <summary>True when this part entered the effective set through another part's
+        /// ExtraParts list (hairlines, beard underlays) rather than as a top-level part.
+        /// Extras reconcile by PRESENCE, not name — see the remarks on
+        /// <see cref="Result.HasMismatch"/>.</summary>
+        public bool FromExtraParts { get; init; }
+
+        /// <summary>The top-level part this entry belongs to: itself for a top-level part,
+        /// the root ancestor for parts reached via ExtraParts. Groups an extra with its
+        /// siblings for the presence check.</summary>
+        public FormKey AncestorFormKey { get; init; }
+
         /// <summary>For a MISSING baked shape: the orphan baked shape(s) of the SAME slot
         /// Type that the .nif carries instead (e.g. record asks for BrowsMaleHumanoid04,
         /// the .nif was baked with BrowsMaleHumanoid01). Best-effort — requires the
@@ -206,11 +217,15 @@ public sealed class FaceGenConsistencyAnalyzer
         /// of that EditorID in the .nif.
         public IReadOnlyList<HeadPartRef> MissingBakedShapes { get; init; } = System.Array.Empty<HeadPartRef>();
 
-        /// <summary>Unbaked record parts the engine TOLERATES because another resolved part of
-        /// the same slot Type IS baked (see <see cref="IsDuplicateSlotTolerated"/>). Excluded
-        /// from <see cref="MissingBakedShapes"/> so they set neither <see cref="HasMismatch"/>
-        /// nor any reported row — engine-inert findings must not warn. Kept for diagnostics.</summary>
-        public IReadOnlyList<HeadPartRef> ToleratedDuplicateSlotMisses { get; init; } = System.Array.Empty<HeadPartRef>();
+        /// <summary>Top-level parts DROPPED from the expected set by the singular-slot rule:
+        /// the engine (and the CK when baking) keeps only the FIRST-LISTED part of a singular
+        /// slot Type — see <see cref="IsSingularSlotType"/>. Diagnostic only; sets nothing.</summary>
+        public IReadOnlyList<HeadPartRef> SurplusSlotParts { get; init; } = System.Array.Empty<HeadPartRef>();
+
+        /// <summary>Unbaked EXTRA parts satisfied by presence — a sibling extra of the same
+        /// top-level part is baked, or an orphan shape stands in for the renamed extra.
+        /// Engine-inert (extras reconcile by presence, not name); diagnostic only.</summary>
+        public IReadOnlyList<HeadPartRef> PresenceSatisfiedExtras { get; init; } = System.Array.Empty<HeadPartRef>();
 
         /// Baked head-part-like shapes with no matching resolved head part (detail only).
         public IReadOnlyList<string> OrphanBakedShapes { get; init; } = System.Array.Empty<string>();
@@ -232,12 +247,18 @@ public sealed class FaceGenConsistencyAnalyzer
         /// race-default parts count the same as explicit ones. Face Discoloration Fix-class
         /// plugins force-regenerate tints and mask the symptom entirely, which is why
         /// mismatched mods are often reported as "renders fine".</para>
-        /// <para>The one CONFIRMED exception (matrix variant B6 + the wild Anoriath/Whiterun
-        /// Hold Refine specimen, whose shipped NIF bakes Brows01 but not the record's second
-        /// Eyebrows part Brows04): a duplicate-slot miss is tolerated when the slot is
-        /// otherwise satisfied by a baked part of the same type. <see cref="Analyze"/> exempts
-        /// exactly that configuration via <see cref="IsDuplicateSlotTolerated"/> — such parts
-        /// land in <see cref="ToleratedDuplicateSlotMisses"/>, not here.</para>
+        /// <para>Two structural rules narrow the comparison (field report 3 in the doc):
+        /// singular slot types keep only the FIRST-LISTED part — surplus same-type parts are
+        /// dropped, exactly as the CK's own bakes show (<see cref="IsSingularSlotType"/>;
+        /// re-derives the B6/Anoriath tolerances and the vanilla Khajiit ear-tufts state) —
+        /// and EXTRA parts reconcile by PRESENCE, not name (Gaiden Shinji's renamed hairline
+        /// and Brand-Shei's foreign-named hairlines render fine, while matrix variant A7 —
+        /// hairline removed with nothing standing in — dark-faces). Dropped/satisfied parts
+        /// land in <see cref="SurplusSlotParts"/> / <see cref="PresenceSatisfiedExtras"/>,
+        /// not here.</para>
+        /// <para>Race-default parts of <c>OverlayHeadPartList</c> races (the vampire races)
+        /// never enter the comparison at all — their HeadData is a runtime overlay, not a
+        /// slot-fill contract; see <see cref="RaceDefaultsParticipateInReconciliation"/>.</para>
         /// <para>Reverse direction CONFIRMED inert (matrix variant A6: an extra baked brows
         /// shape with a real HDPT EditorID, record untouched, rendered normal on the clean
         /// engine; matches the 2026-07-24 wild specimen and the forward-only "Dark Face Issue
@@ -359,6 +380,7 @@ public sealed class FaceGenConsistencyAnalyzer
                     if (shown++ >= maxPerCategory) continue;
                     sb.Append("\n • '").Append(m.EditorId).Append("' (").Append(m.FormKey).Append(')');
                     if (m.FromRaceDefaults) sb.Append(" (race default)");
+                    if (m.FromExtraParts) sb.Append(" (extra part)");
                     if (m.BakedSameTypeShapes is { Count: > 0 })
                         sb.Append(" — the .nif has '")
                           .Append(string.Join("' / '", m.BakedSameTypeShapes))
@@ -670,7 +692,12 @@ public sealed class FaceGenConsistencyAnalyzer
         int resolvedCount = 0;
         var visited = new HashSet<FormKey>();
 
-        void Walk(IFormLinkGetter<IHeadPartGetter>? link, bool fromRaceDefaults)
+        var surplus = new List<HeadPartRef>();
+
+        // Walk one part (and its extras) into the EXPECTED set. `ancestor` is null for a
+        // top-level part; extras carry their root ancestor so the presence check can group
+        // siblings.
+        void Walk(IFormLinkGetter<IHeadPartGetter>? link, bool fromRaceDefaults, FormKey? ancestor = null)
         {
             if (link is null || link.IsNull) { nullLinks++; return; }
             var fk = link.FormKey;
@@ -683,26 +710,60 @@ public sealed class FaceGenConsistencyAnalyzer
             bool geo = BearsBakedGeometry(hp);
             if (geo && !string.IsNullOrEmpty(hp.EditorID))
                 geometryBearing.Add(new HeadPartRef(fk, hp.EditorID!)
-                    { FromRaceDefaults = fromRaceDefaults, Type = hp.Type });
+                {
+                    FromRaceDefaults = fromRaceDefaults, Type = hp.Type,
+                    FromExtraParts = ancestor != null, AncestorFormKey = ancestor ?? fk,
+                });
 
             if (hp.ExtraParts != null)
-                foreach (var ep in hp.ExtraParts) Walk(ep, fromRaceDefaults);
+                foreach (var ep in hp.ExtraParts) Walk(ep, fromRaceDefaults, ancestor ?? fk);
         }
 
-        // 2a. The NPC's own head parts. Record the slot Types it occupies (keyed by the
-        //     enum's name to stay robust to the getter's nullability) so we can tell which
-        //     race defaults it overrides.
+        // Names-only walk for SURPLUS parts (singular-slot rule): the engine drops them
+        // from the expected set, but their baked shapes must not read as orphans either.
+        void WalkNamesOnly(IFormLinkGetter<IHeadPartGetter>? link)
+        {
+            if (link is null || link.IsNull) return;
+            var fk = link.FormKey;
+            if (!visited.Add(fk)) return;
+            var hp = resolveHeadPart(fk);
+            if (hp is null) { unresolved.Add(fk); return; }
+            resolvedCount++;
+            if (!string.IsNullOrEmpty(hp.EditorID)) resolvedEditorIds.Add(hp.EditorID!);
+            if (hp.ExtraParts != null)
+                foreach (var ep in hp.ExtraParts) WalkNamesOnly(ep);
+        }
+
+        // 2a. The NPC's own head parts, IN RECORD ORDER. Record the slot Types it occupies
+        //     (keyed by the enum's name to stay robust to the getter's nullability) so we
+        //     can tell which race defaults it overrides — surplus parts still occupy their
+        //     slot. For singular slot types only the FIRST-LISTED part enters the expected
+        //     set (see IsSingularSlotType); later same-type parts are dropped, exactly as
+        //     the CK's own bakes show (the vanilla Khajiit ear-tufts specimen).
         var npcSlotTypes = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+        var singularSeen = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
         if (npc.HeadParts != null)
         {
             foreach (var link in npc.HeadParts)
             {
-                if (link != null && !link.IsNull)
+                if (link == null || link.IsNull) { nullLinks++; continue; }
+                var peek = resolveHeadPart(link.FormKey);
+                var slot = peek?.Type.ToString();
+                if (!string.IsNullOrEmpty(slot)) npcSlotTypes.Add(slot!);
+
+                bool isSurplus = peek != null && !string.IsNullOrEmpty(slot) &&
+                                 IsSingularSlotType(peek.Type) && !singularSeen.Add(slot!);
+                if (isSurplus)
                 {
-                    var slot = resolveHeadPart(link.FormKey)?.Type.ToString();
-                    if (!string.IsNullOrEmpty(slot)) npcSlotTypes.Add(slot!);
+                    if (BearsBakedGeometry(peek) && !string.IsNullOrEmpty(peek!.EditorID))
+                        surplus.Add(new HeadPartRef(link.FormKey, peek.EditorID!)
+                            { Type = peek.Type, AncestorFormKey = link.FormKey });
+                    WalkNamesOnly(link);
                 }
-                Walk(link, fromRaceDefaults: false);
+                else
+                {
+                    Walk(link, fromRaceDefaults: false);
+                }
             }
         }
 
@@ -716,7 +777,7 @@ public sealed class FaceGenConsistencyAnalyzer
         //     findings per NPC (measured: Familiar Faces, 2,929 rows from one absent
         //     Eyes Nouveaux.esp). The unresolved links themselves are still reported.
         var race = (unresolved.Count == 0 && !npc.Race.IsNull) ? resolveRace(npc.Race.FormKey) : null;
-        if (race != null)
+        if (race != null && RaceDefaultsParticipateInReconciliation(race))
         {
             var headData = Auxilliary.IsFemale(npc) ? race.HeadData?.Female : race.HeadData?.Male;
             if (headData?.HeadParts != null)
@@ -732,23 +793,36 @@ public sealed class FaceGenConsistencyAnalyzer
             }
         }
 
-        // 3. Forward: geometry-bearing resolved head parts absent from the baked shapes.
-        //    Only meaningful when the NIF actually parsed (else every part looks "missing").
-        //    Duplicate-slot misses the engine tolerates (matrix variant B6 / Anoriath) are
-        //    split off so they don't flag — see IsDuplicateSlotTolerated.
-        var unbaked = nifParsed
-            ? geometryBearing.Where(r => !baked.Contains(r.EditorId)).ToList()
-            : new List<HeadPartRef>();
-        var tolerated = unbaked
-            .Where(r => IsDuplicateSlotTolerated(r, geometryBearing, baked.Contains))
-            .ToList();
-        var missing = tolerated.Count == 0 ? unbaked : unbaked.Except(tolerated).ToList();
-
-        // 4. Reverse: baked shapes with no matching resolved head part (excluding the
-        //    primary head and obvious scene/utility names). Detail only.
+        // 3. Reverse first: baked shapes with no matching resolved head part (excluding the
+        //    primary head and obvious scene/utility names). Detail only — and input to the
+        //    extras presence check below (an orphan can be a RENAMED extra standing in).
         var orphans = nifParsed
             ? baked.Where(b => !resolvedEditorIds.Contains(b) && !IsGenericNode(b, survey.PrimaryHeadShapeName)).ToList()
             : new List<string>();
+
+        // 4. Forward: expected parts absent from the baked shapes. Only meaningful when the
+        //    NIF actually parsed (else every part looks "missing"). Top-level parts match
+        //    by NAME; EXTRA parts match by PRESENCE — an unbaked extra is satisfied when a
+        //    sibling extra of the same top-level part is baked, or when any orphan shape
+        //    stands in for the renamed extra (field report 3: Gaiden Shinji's renamed
+        //    hairline and Brand-Shei's foreign-named hairlines render fine; matrix variant
+        //    A7 — the hairline REMOVED with nothing standing in — dark-faces).
+        var unbaked = nifParsed
+            ? geometryBearing.Where(r => !baked.Contains(r.EditorId)).ToList()
+            : new List<HeadPartRef>();
+        var missing = new List<HeadPartRef>();
+        var satisfiedExtras = new List<HeadPartRef>();
+        foreach (var r in unbaked)
+        {
+            bool satisfied = r.FromExtraParts &&
+                             (orphans.Count > 0 ||
+                              geometryBearing.Any(o => o.FromExtraParts &&
+                                                       o.AncestorFormKey.Equals(r.AncestorFormKey) &&
+                                                       !o.FormKey.Equals(r.FormKey) &&
+                                                       baked.Contains(o.EditorId)));
+            if (satisfied) satisfiedExtras.Add(r);
+            else missing.Add(r);
+        }
 
         // 5. Pair each missing part with the orphan shape(s) of the SAME slot Type the
         //    .nif carries instead — "the record asks for Brows04, the mesh was baked with
@@ -779,7 +853,8 @@ public sealed class FaceGenConsistencyAnalyzer
             BakedShapeCount = baked.Count,
             ResolvedHeadPartCount = resolvedCount,
             MissingBakedShapes = missing,
-            ToleratedDuplicateSlotMisses = tolerated,
+            SurplusSlotParts = surplus,
+            PresenceSatisfiedExtras = satisfiedExtras,
             OrphanBakedShapes = orphans,
             UnresolvedHeadParts = unresolved,
             NullHeadPartLinks = nullLinks,
@@ -787,26 +862,38 @@ public sealed class FaceGenConsistencyAnalyzer
     }
 
     /// <summary>
-    /// Matrix rule for the one mismatch configuration the engine tolerates (in-game verified
-    /// 2026-08-15, docs/DarkFaceTriggerInvestigation-2026-08.md): a record part with no baked
-    /// shape does NOT dark-face when another resolved part of the SAME slot Type is baked —
-    /// the slot is already satisfied (controlled cell B6: Ysolda + a second Eyebrows part;
-    /// wild specimen: Anoriath under Whiterun Hold Refine, Brows01 baked + Brows04 not).
-    /// <para>Misc is deliberately excluded: it is a grab-bag Type (mouths, hairlines, beard
-    /// extras all carry it), so a baked mouth must never excuse a missing hairline — that
-    /// cell is untested, and an unwarranted exemption would hide a proven trigger class.</para>
+    /// Whether a race's default head parts enter the engine's FaceGen reconciliation.
+    /// Races flagged <c>OverlayHeadPartList</c> (the vanilla vampire races) use their
+    /// HeadData as a runtime OVERLAY — applied on top of an actor's own parts by the
+    /// vampirism transform — not as slot-fill defaults the baked head must carry.
+    /// In-game verified 2026-08-16: Bruma's CYREncVampire00Template (NordRaceVampire,
+    /// whose Dawnguard-era default head FemaleHeadNordVampire is absent from the baked
+    /// .nif) renders WITHOUT the dark face, both patched and on plain Bruma — while the
+    /// mutation matrix proved race-default misses on a NON-overlay race (NordRace mouth
+    /// and head, variants A4/A5) DO dark-face. Also explains the long-standing benign
+    /// "MaleEyesHumanVampire01 vs mesh" rows. Explicit record parts are unaffected —
+    /// the EncVampire02BossBretonM incident (explicit demon eyes missing from the mesh)
+    /// dark-faced and must keep flagging.
     /// </summary>
-    /// <param name="candidate">The unbaked geometry-bearing part being judged.</param>
-    /// <param name="geometryBearing">Every geometry-bearing part the NPC resolves to
-    /// (explicit + race defaults + extra parts).</param>
-    /// <param name="hasBakedShape">Whether a shape of that EditorID is baked in the .nif.</param>
-    public static bool IsDuplicateSlotTolerated(
-        HeadPartRef candidate,
-        IReadOnlyList<HeadPartRef> geometryBearing,
-        System.Func<string, bool> hasBakedShape) =>
-        candidate.Type is { } slot && slot != HeadPart.TypeEnum.Misc &&
-        geometryBearing.Any(o => o.Type == slot && o.FormKey != candidate.FormKey &&
-                                 hasBakedShape(o.EditorId));
+    public static bool RaceDefaultsParticipateInReconciliation(IRaceGetter race) =>
+        !race.Flags.HasFlag(Race.Flag.OverlayHeadPartList);
+
+    /// <summary>
+    /// Slot types where an actor can carry only ONE part: the engine (and the CK when it
+    /// bakes) keeps the FIRST-LISTED part of such a type and drops the rest from the
+    /// expected set. Evidence (docs/DarkFaceTriggerInvestigation-2026-08.md, field report 3):
+    /// vanilla's own Khajiit bakes omit the SECOND-listed Hair part (KhajiitMaleEarTufts,
+    /// modeled) because modelless HairKhajiit00 is listed first — and the engine renders
+    /// them fine; the same rule re-derives the Anoriath and B6 tolerances (first-listed
+    /// Eyebrows part was the baked one in both). Scars is proven MULTI (matrix cell B5:
+    /// a second gash was expected and its miss dark-faced). Misc is a grab-bag (mouths,
+    /// hairlines, earrings) — treated as multi so a mouth never excuses another Misc part.
+    /// FacialHair/Face/Eyes singular is the engine's one-per-actor reality; only Eyebrows
+    /// and Hair are directly evidenced.
+    /// </summary>
+    public static bool IsSingularSlotType(HeadPart.TypeEnum? type) => type is
+        HeadPart.TypeEnum.Eyes or HeadPart.TypeEnum.Hair or HeadPart.TypeEnum.Face or
+        HeadPart.TypeEnum.Eyebrows or HeadPart.TypeEnum.FacialHair;
 
     /// <summary>
     /// True when <paramref name="headPart"/> contributes a shape to the baked FaceGen mesh —

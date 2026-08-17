@@ -1103,15 +1103,44 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
             string detail;
             if (npcCount > 1)
             {
-                var names = groupIssues
-                    .Select(i => i.NpcDisplayName ?? i.NpcFormKey.ToString())
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .OrderBy(nm => nm, StringComparer.OrdinalIgnoreCase)
-                    .ToList();
                 npcDisplay = $"{npcCount} NPCs";
-                var sample = string.Join(", ", names.Take(8));
-                if (names.Count > 8) sample += $", … +{names.Count - 8} more";
-                detail = $"Affects {npcCount} NPCs: {sample}";
+
+                static string Sample(IEnumerable<ModIssue> source)
+                {
+                    var names = source
+                        .Select(i => i.NpcDisplayName ?? i.NpcFormKey.ToString())
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .OrderBy(nm => nm, StringComparer.OrdinalIgnoreCase)
+                        .ToList();
+                    var sample = string.Join(", ", names.Take(8));
+                    if (names.Count > 8) sample += $", … +{names.Count - 8} more";
+                    return sample;
+                }
+
+                // A FaceGen path belongs to exactly ONE NPC — the appearance terminus whose
+                // FormKey is encoded in the filename — so several NPCs on one such path are
+                // by construction a Traits-template group. Say so, instead of a flat name
+                // list that reads like 14 independent problems.
+                var templateFk = TryParseFaceGenSubjectKey(issue.AffectedPath);
+                var ownerIssue = templateFk is { } tfk
+                    ? groupIssues.FirstOrDefault(i => i.NpcFormKey.Equals(tfk))
+                    : null;
+                if (templateFk is { } templateKey && ownerIssue != null)
+                {
+                    var users = groupIssues.Where(i => !i.NpcFormKey.Equals(templateKey)).ToList();
+                    detail = $"Affects {ownerIssue.NpcDisplayName ?? templateKey.ToString()} ({templateKey}) " +
+                             $"and the following {npcCount - 1} NPCs that use it as an appearance template: {Sample(users)}";
+                }
+                else if (templateFk is { } sharedKey)
+                {
+                    // The template itself is not among this mod's NPCs; the members all inherit
+                    // from it.
+                    detail = $"Affects {npcCount} NPCs that share the appearance template {sharedKey}: {Sample(groupIssues)}";
+                }
+                else
+                {
+                    detail = $"Affects {npcCount} NPCs: {Sample(groupIssues)}";
+                }
                 if (!string.IsNullOrEmpty(issue.Detail)) detail += "\n" + issue.Detail;
             }
             else
@@ -1145,6 +1174,8 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
             var groups = issues
                 .GroupBy(i => (i.Severity, i.Type, i.IsOutfitIssue, Path: i.AffectedPath.ToLowerInvariant(),
                     Source: i.SourceModName ?? string.Empty))
+                // (grouping key includes the path, so a template group's FaceGen file
+                // collapses to one row; MakeRow decodes the terminus FormKey from it)
                 .OrderBy(g => g.Key.Severity)
                 .ThenBy(g => g.Key.Type)
                 .ThenBy(g => g.Key.Path, StringComparer.OrdinalIgnoreCase)
@@ -1184,6 +1215,26 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
             : grouped
                 ? $"{distinctProblems} distinct problem{(distinctProblems == 1 ? "" : "s")} ({issueCount} issue{(issueCount == 1 ? "" : "s")}) in {entry.DisplayName} — click a mugshot to filter to that NPC"
                 : $"{issueCount} issue{(issueCount == 1 ? "" : "s")} in {entry.DisplayName} — click a mugshot to filter to that NPC";
+    }
+
+    /// <summary>Decodes the NPC FormKey a FaceGen asset path is keyed by
+    /// (…facegeom\&lt;plugin&gt;\&lt;formid8&gt;.nif or …facetint\…\&lt;formid8&gt;.dds — the
+    /// inverse of <see cref="Auxilliary.GetFaceGenSubPathStrings"/>). Null for any
+    /// non-FaceGen path, so callers can use it as a "is this a per-NPC FaceGen
+    /// file" test too.</summary>
+    internal static FormKey? TryParseFaceGenSubjectKey(string? affectedPath)
+    {
+        if (string.IsNullOrWhiteSpace(affectedPath)) return null;
+        var m = System.Text.RegularExpressions.Regex.Match(affectedPath,
+            @"facegendata[\\/](?:facegeom|facetint)[\\/]([^\\/]+)[\\/]([0-9a-fA-F]{8})\.(?:nif|dds)$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (!m.Success) return null;
+        if (!ModKey.TryFromNameAndExtension(m.Groups[1].Value, out var modKey)) return null;
+        if (!uint.TryParse(m.Groups[2].Value, System.Globalization.NumberStyles.HexNumber, null, out var id))
+            return null;
+        // FaceGen filenames zero-pad the local FormID to 8 digits; mask off anything
+        // above the 6-digit record ID (injected-record files carry a 00 prefix).
+        return new FormKey(modKey, id & 0xFFFFFF);
     }
 
     // --- CSV export ---

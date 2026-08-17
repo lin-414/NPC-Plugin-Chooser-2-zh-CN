@@ -293,6 +293,105 @@ RS Children-bleed rationale for Origin mode is preserved. Any future "renders
 fine despite a flagged forward miss" report should FIRST be checked against
 this class: is the graded record the one the engine actually resolves?
 
+### Post-matrix field report 3: 20-mod spawn matrix (2026-08-16/17)
+
+User spawned scanner-flagged NPCs across ~20 mods (first in the full load
+order with the mod prioritized, then re-tested anomalies on the minimal
+TintTest profile). Reconciliation of every anomaly:
+
+- **All full-load-order "renders fine" rows on vanilla-override NPCs were
+  load-order confounds** — Cathedral's four (incl. two race-default-with-
+  substitute rows and the male-record `DLC2EncBandit04MagicDarkElf02F`) ALL
+  dark-face on the minimal profile. This also **refutes the "race-default
+  miss is tolerated when a same-type shape is baked" hypothesis** — AstridEnd
+  and the Afflicted are exactly that shape and they trigger. No new
+  race-default rule; matrix stands.
+- **Hairline/extra-part misses: resolved by variant A7 + specimen forensics
+  (see the refined model below).** A7 (vanilla NIF minus
+  `HairLineFemaleNord15` only) = **DARK FACE** — so extras are NOT simply
+  exempt. But Gaiden Shinji renders fine with his hairline *renamed*
+  (vanilla data quirk: `HairMaleRedguard4`'s ExtraParts POINTS AT
+  `HairLineMaleRedguard3`, while the shipped — and, engine-accepted — bake
+  carries `HairLineMaleRedguard4`), and Brand-Shei renders fine with his
+  hairline record unmatched while the NIF bakes two differently-named
+  hairline shapes. **Extras reconcile by PRESENCE, not name**: a renamed
+  hairline satisfies; a fully absent one (A7) triggers.
+- **SOGS `dunWhiteRiverWatchLvlBanditBoss` = engine-inert file, scanner gap**:
+  the NPC keeps its vanilla **Traits** template (SOGS.esp doesn't override
+  it), so the engine renders the terminus's face and never loads the
+  mod-shipped `000E1F81.nif` the scanner graded (the mugshot resolver
+  deliberately prefers the mod's shipped file — right for the tile, wrong
+  for an engine-behavior verdict). Fix pending: Traits-templated subject +
+  mod ships no record → the file cannot manifest unpatched; demote/reword
+  (NPC2's template handling decides its actual fate; Validate Output checks
+  the real output).
+- **Khajiit ear tufts: explained by singular-slot FIRST-LISTED winner.**
+  `WEAdventurerWarriorDualKhajiitM` carries TWO Hair-type parts —
+  modelless `HairKhajiit00` listed first, modeled `KhajiitMaleEarTufts`
+  after — and **vanilla's own facegen also omits the tufts shape**
+  (extracted + dumped): the CK and the engine both keep only the
+  first-listed part of a singular slot type; the surplus is dropped from
+  the expected set (the first-listed being modelless, nothing is expected).
+  This same rule RE-DERIVES the Anoriath and B6 tolerances (in both, the
+  first-listed Eyebrows part was the baked one) and stays consistent with
+  B5 (Scars is a MULTI slot — two gashes are legal — so the added LeftGash
+  was expected and its miss triggered).
+
+### REFINED ENGINE MODEL (all 16 controlled cells + ~20 field mods reconcile)
+
+1. **Top-level parts reconcile by NAME** (B1–B3, A1–A5, every confirmed
+   dark). Race defaults fill unoccupied singular slots and reconcile by
+   name too (A4/A5, AstridEnd, Afflicted) — except OverlayHeadPartList
+   races, whose defaults never participate (Fledgling).
+2. **Singular slot types keep only the FIRST-LISTED part**; later same-type
+   parts are dropped from the expected set (Anoriath, B6, Khajiit tufts).
+   Scars is multi (B5); which other types are multi is untested.
+3. **Extra parts reconcile by PRESENCE, not name** (Gaiden renamed-hairline
+   fine, Brand-Shei foreign-named hairlines fine, A7 absent-hairline DARK).
+4. Modelless parts never count (vanilla NoGash; `BearsBakedGeometry`).
+
+**ENCODED 2026-08-17 (cache v7, suite 2477 green):** `Analyze` implements
+rules 2–3 directly — `IsSingularSlotType` (Eyes/Hair/Face/Eyebrows/FacialHair
+singular; Scars multi per B5; Misc multi as the grab-bag) drops surplus
+top-level parts into diagnostic `Result.SurplusSlotParts` (names still
+suppress orphan listings), and unbaked extras satisfied by a baked sibling
+extra or any orphan stand-in land in `Result.PresenceSatisfiedExtras`
+(superseding the narrower `IsDuplicateSlotTolerated`, now removed). Missing
+extras that DO flag are annotated "(extra part)". The SOGS class is handled
+in the scanner: when the mod-scope record keeps the Traits flag
+(`NpcMeshResolver.KeepsTraitsTemplateInModScope`) and the appearance hop
+didn't already redirect, the dark-face row demotes to Note with an
+explanation that the raw engine never loads the graded file. All analyzer
+callers (scanner, badges, both validator paths) inherit rules 2–3.
+- **Marcurio Refined / OP zExtended "floating mouth"** = same trigger, worse
+  fallback: the records' entire custom HDPT sets are absent from the baked
+  NIF, so the regen path rebuilds from the HDPT source models — when those
+  can't build, the head has no geometry and only mouth/teeth render. **MoS
+  Refined Patreon freeze-on-spawn**: same total-mismatch class with
+  cross-plugin HDPTs; regen hitting corrupt/physics-dependent part models.
+  Both rows are true positives with different symptoms.
+
+### Post-matrix field report 2: OverlayHeadPartList races (vampires)
+
+Bruma's `CYREncVampire00Template` (Vampire Fledgling, `0792C4:BSHeartland.esm`,
+NordRaceVampire) — flagged for the race-default Face part
+`FemaleHeadNordVampire (006F97:Dawnguard.esm)` missing from the baked NIF —
+**renders WITHOUT dark face**, user-verified both with NPC2 output active and
+on plain Bruma. Not an engine-tolerance surprise and not a resolution-scope
+bug: the discriminator is the race's **`OverlayHeadPartList` flag** (all
+vanilla vampire races carry it; espdump-verified on NordRaceVampire in both
+Skyrim.esm and Dawnguard). An overlay race's HeadData is a runtime overlay
+(the vampirism transform), NOT slot-fill defaults that the baked head must
+carry — so overlay-race defaults never enter the engine's reconciliation.
+The matrix cells that proved race-default misses DO trigger (A4 mouth,
+A5 head) ran on NordRace, which lacks the flag — no contradiction. Explicit
+record parts on vampires still count (the EncVampire02BossBretonM demon-eye
+incident dark-faced and keeps flagging). Encoded as
+`FaceGenConsistencyAnalyzer.RaceDefaultsParticipateInReconciliation`
+(skips the race-default walk for flagged races; all callers inherit). This
+also retires the long-open benign "MaleEyesHumanVampire01 (race default) vs
+MaleEyesHumanVampire (mesh)" residual rows from the Dawnguard incident.
+
 ## Applying the outcome
 
 **Applied 2026-08-15 (round 1):** no per-type severity table is warranted —

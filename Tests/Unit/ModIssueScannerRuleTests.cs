@@ -75,6 +75,27 @@ public class ModIssueScannerRuleTests
         Assert.False(ModIssueScanner.IsEligible(MakeMod(npcs: false, folderPath: folder)));
     }
 
+    // --- FaceGen path → subject FormKey (grouped-row template attribution) ---
+
+    [Theory]
+    [InlineData(@"meshes\actors\character\facegendata\facegeom\bsheartland.esm\000792c4.nif", "0792C4:BSHeartland.esm")]
+    [InlineData(@"meshes\actors\character\FaceGenData\FaceGeom\Skyrim.esm\00013BAB.nif", "013BAB:Skyrim.esm")]
+    [InlineData(@"textures\actors\character\facegendata\facetint\Skyrim.esm\00013BAB.dds", "013BAB:Skyrim.esm")]
+    public void TryParseFaceGenSubjectKey_DecodesPluginAndFormId(string path, string expected)
+    {
+        Assert.Equal(FormKey.Factory(expected), VM_ModIssues.TryParseFaceGenSubjectKey(path));
+    }
+
+    [Theory]
+    [InlineData(@"meshes\actors\character\character assets\femalebody_1.nif")] // not FaceGen
+    [InlineData(@"meshes\actors\character\facegendata\facegeom\Skyrim.esm\notahexid.nif")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void TryParseFaceGenSubjectKey_NonFaceGenPaths_ReturnNull(string? path)
+    {
+        Assert.Null(VM_ModIssues.TryParseFaceGenSubjectKey(path));
+    }
+
     [Fact]
     public void Eligibility_RequiresInstalledContent()
     {
