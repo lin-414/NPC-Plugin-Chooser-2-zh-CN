@@ -467,6 +467,46 @@ public class ModIssueScannerRuleTests
         Assert.Equal("B.esp", split[1].Label);
     }
 
+    // --- DFIR-derived exclusions (cache v11) ---
+
+    [Fact]
+    public void NeverManifested_PlayerAndPresets_AreSkipped()
+    {
+        var mod = TestSupport.MutagenFixtures.NewMod("Test.esp");
+
+        var ordinary = TestSupport.MutagenFixtures.NewNpc(mod);
+        Assert.False(ModIssueScanner.IsNeverManifestedNpc(ordinary.FormKey, ordinary));
+
+        // The Player NPC record (000007:Skyrim.esm) — key-based, record content irrelevant.
+        Assert.True(ModIssueScanner.IsNeverManifestedNpc(
+            FormKey.Factory("000007:Skyrim.esm"), ordinary));
+
+        // Chargen presets render from the record's morph data, never from FaceGen files
+        // (WICO ships FaceGen for every vanilla preset — rows the game cannot display).
+        var preset = TestSupport.MutagenFixtures.NewNpc(mod);
+        preset.Configuration.Flags |= NpcConfiguration.Flag.IsCharGenFacePreset;
+        Assert.True(ModIssueScanner.IsNeverManifestedNpc(preset.FormKey, preset));
+    }
+
+    [Fact]
+    public void GhostKeyword_OnNpcRecord_DetectedForNoteDemotion()
+    {
+        var mod = TestSupport.MutagenFixtures.NewMod("Test.esp");
+
+        var plain = TestSupport.MutagenFixtures.NewNpc(mod);
+        Assert.False(ModIssueScanner.HasGhostKeyword(plain)); // null Keywords list
+
+        var ghost = TestSupport.MutagenFixtures.NewNpc(mod);
+        ghost.Keywords = new Noggog.ExtendedList<IFormLinkGetter<IKeywordGetter>>();
+        ghost.Keywords.Add(Mutagen.Bethesda.FormKeys.SkyrimSE.Skyrim.Keyword.ActorTypeGhost);
+        Assert.True(ModIssueScanner.HasGhostKeyword(ghost));
+
+        var otherKeyword = TestSupport.MutagenFixtures.NewNpc(mod);
+        otherKeyword.Keywords = new Noggog.ExtendedList<IFormLinkGetter<IKeywordGetter>>();
+        otherKeyword.Keywords.Add(Mutagen.Bethesda.FormKeys.SkyrimSE.Skyrim.Keyword.ActorTypeNPC);
+        Assert.False(ModIssueScanner.HasGhostKeyword(otherKeyword));
+    }
+
     [Fact]
     public void BuildNpcIssueText_GroupsByTypeAndNamesShape()
     {

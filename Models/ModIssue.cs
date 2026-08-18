@@ -272,7 +272,16 @@ namespace NPC_Plugin_Chooser_2.Models
         //      specimens (Men of Winter's "_1bit" FacialHair twin, Miggyluv
         //      Hjoromir's Eyebrows lashes) were CK-unbaked and in-game
         //      verified inert; A7's Misc-typed hairline still triggers.
-        public const int CurrentVersion = 10;
+        // v11: DFIR-derived adoptions (doc: external detector review).
+        //      Player + 'Is CharGen Face Preset' NPCs skipped entirely
+        //      (never placed; presets render from morph data, not FaceGen —
+        //      preset-as-Traits-terminus still graded via its inheritors);
+        //      present-but-unparseable FaceGen NIF now emits a dark-face
+        //      row (was silent); ActorTypeGhost NPCs demote tint-symptom
+        //      rows (dark-face, missing tint, broken NIF) to Note — the
+        //      ghost effect usually hides them (user-observed), but mods
+        //      can alter the effect, so Note rather than DFIR's skip.
+        public const int CurrentVersion = 11;
 
         public int Version { get; set; } = CurrentVersion;
 

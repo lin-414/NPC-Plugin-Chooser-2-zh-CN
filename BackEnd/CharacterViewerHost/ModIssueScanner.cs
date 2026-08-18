@@ -367,6 +367,10 @@ public sealed class ModIssueScanner
                 _resolver.ResolveNpcForConsistency(npcKey, mod);
             if (npc == null) return true; // Record-level problems are the Validator's domain.
 
+            // Never-manifested NPCs (Player, chargen presets): nothing they carry can
+            // render in game, so the whole scan is moot for them.
+            if (IsNeverManifestedNpc(npcKey, npc)) return true;
+
             var appearanceKey = _resolver.ResolveAppearanceNpcKey(npcKey, mod);
             bool shouldHaveFaceGen = OutputValidator.SubjectShouldHaveOwnFaceGen(npc, resolveRace);
             var (faceGenMeshRel, faceGenTintRel) = Auxilliary.GetFaceGenSubPathStrings(appearanceKey, regularized: true);
@@ -388,12 +392,18 @@ public sealed class ModIssueScanner
             var paths = _resolver.Resolve(npcKey, mod);
             if (paths == null) return true;
 
+            // Tint-symptom rows (missing tint, dark-face mismatch, unreadable FaceGen)
+            // demote to Note on ghost-keyword NPCs — the ghost effect usually hides them.
+            bool ghostMasked = HasGhostKeyword(npc);
+
             // FaceGen tint DDS. Only meaningful for NPCs that own FaceGen.
             if (shouldHaveFaceGen && !string.IsNullOrWhiteSpace(paths.FaceTintPath) &&
                 ResolveToDisk(paths.FaceTintPath!, allowLoadOrderFallback: false) == null)
             {
                 AddIssue(ModIssueType.MissingFaceGenTint, faceGenTintRel,
-                    detail: "FaceGen tint texture is missing — faces typically render grey/mismatched without it."
+                    severity: ghostMasked ? ModIssueSeverity.Note : ModIssueSeverity.Issue,
+                    detail: (ghostMasked ? GhostNotePrefix : string.Empty)
+                            + "FaceGen tint texture is missing — faces typically render grey/mismatched without it."
                             + (templateNote == null ? "" : "\n" + templateNote));
             }
 
@@ -594,6 +604,24 @@ public sealed class ModIssueScanner
                                 edid => _headPartsByEditorId.TryGetValue(edid, out var hp) ? hp : null)))
                         .ToList();
 
+                    // File present but unreadable: the engine can't parse it either and
+                    // falls back to runtime face regeneration — the dark-face outcome —
+                    // while the forward checks below see an empty bake and would stay
+                    // SILENT (DFIR-review gap: its "broken facegen NIF" class). File-level,
+                    // so emitted once, not per variant.
+                    if (graded.Count > 0 && !graded[0].Analysis.NifParsed)
+                    {
+                        string? nifError = graded[0].Analysis.NifError;
+                        AddIssue(ModIssueType.DarkFaceMismatch, faceGenMeshRel,
+                            nifPath: paths.HeadMeshPath,
+                            severity: ghostMasked ? ModIssueSeverity.Note : ModIssueSeverity.Issue,
+                            detail: (ghostMasked ? GhostNotePrefix : string.Empty) +
+                                    "The FaceGen head mesh exists but could not be parsed" +
+                                    (string.IsNullOrEmpty(nifError) ? "" : $" ({nifError})") +
+                                    " — a broken/corrupt .nif. If the game engine cannot read it either, " +
+                                    "this NPC dark-faces (runtime face regeneration).");
+                    }
+
                     var cleanLabels = graded
                         .Where(g => g.Analysis.MissingBakedShapes.Count == 0 &&
                                     g.Analysis.NullHeadPartLinks == 0 &&
@@ -641,13 +669,16 @@ public sealed class ModIssueScanner
                             AddIssue(ModIssueType.DarkFaceMismatch, faceGenMeshRel,
                                 nifPath: paths.HeadMeshPath,
                                 recordPlugin: variant.Label,
-                                severity: traitsInert ? ModIssueSeverity.Note : ModIssueSeverity.Issue,
+                                severity: traitsInert || ghostMasked
+                                    ? ModIssueSeverity.Note
+                                    : ModIssueSeverity.Issue,
                                 detail: (traitsInert
                                             ? "In the mod's own context this NPC keeps the Traits template flag, so the " +
                                               "unpatched engine renders its template's face and never loads this file — " +
                                               "the mismatch below cannot show in game unless a patch or another plugin " +
                                               "removes the template.\n"
                                             : string.Empty) +
+                                        (ghostMasked ? GhostNotePrefix : string.Empty) +
                                         analysis.BuildReason(
                                             scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod,
                                             subjectSuppliesRecord: variant.SubjectSuppliesRecord) +
@@ -693,6 +724,41 @@ public sealed class ModIssueScanner
     /// resolution stands in) — those rows stay untagged, the pre-v9 presentation.</summary>
     private sealed record RecordVariant(INpcGetter Record, string? Label,
         bool SubjectSuppliesRecord, bool KeepsTraitsTemplate);
+
+    private static readonly FormKey PlayerNpcFormKey =
+        Mutagen.Bethesda.FormKeys.SkyrimSE.Skyrim.Npc.Player.FormKey;
+
+    private static readonly FormKey ActorTypeGhostKeyword =
+        Mutagen.Bethesda.FormKeys.SkyrimSE.Skyrim.Keyword.ActorTypeGhost.FormKey;
+
+    /// <summary>NPCs that never manifest as placed actors — the Player record and
+    /// character-creation presets ('Is CharGen Face Preset'): the race menu builds
+    /// preset faces from the record's MORPH data, not FaceGen files, so nothing a
+    /// preset carries can show in game (same rationale as OutputValidator's preset
+    /// downgrade; DFIR-derived). The scanner skips them entirely — WICO ships
+    /// FaceGen for every vanilla preset and produced dark-face rows the game cannot
+    /// display. A preset serving as another NPC's Traits terminus still surfaces
+    /// through that NPC's appearance hop, which grades the terminus's FaceGen path
+    /// under the inheritor's row.</summary>
+    internal static bool IsNeverManifestedNpc(FormKey npcKey, INpcGetter npc)
+        => npcKey.Equals(PlayerNpcFormKey) ||
+           npc.Configuration.Flags.HasFlag(NpcConfiguration.Flag.IsCharGenFacePreset);
+
+    /// <summary>ActorTypeGhost on the graded record itself (mod scope; race-carried
+    /// keywords deliberately not consulted — DFIR reads the NPC record too). The
+    /// ghost visual effect usually hides face-tint problems (user-observed on sparse
+    /// in-game tests 2026-08-18), but that observation may not generalize — mods can
+    /// alter the ghost effect — so ghost rows demote to Note instead of vanishing
+    /// (DFIR skips ghosts outright; we deliberately do not).</summary>
+    internal static bool HasGhostKeyword(INpcGetter npc)
+        => npc.Keywords?.Any(k => k.FormKey.Equals(ActorTypeGhostKeyword)) == true;
+
+    /// <summary>Prefix for tint-symptom rows (dark-face class, missing tint,
+    /// unreadable FaceGen) demoted because of <see cref="HasGhostKeyword"/>.</summary>
+    private const string GhostNotePrefix =
+        "This NPC carries the ActorTypeGhost keyword: the ghost visual effect usually hides " +
+        "face-tint problems, so this is reported as a note. A mod that changes the ghost " +
+        "effect could still expose it.\n";
 
     private static bool KeepsTraitsTemplate(INpcGetter npc) =>
         npc.Configuration.TemplateFlags.HasFlag(NpcConfiguration.TemplateFlag.Traits) &&

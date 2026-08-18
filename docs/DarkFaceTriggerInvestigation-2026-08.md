@@ -464,19 +464,28 @@ Face/Eyes/Eyebrows/Hair only (first-of-type). Notable deltas:
   surplus same-type top-level parts (would false-positive on
   Anoriath/B6/tufts). No tint-file check. Our model supersedes on all of
   these.
-- **Exclusions we lacked**: `Is CharGen Face Preset` NPCs (chargen-menu
-  data, never placed), the Player record, and NPCs with the
-  `ActorTypeGhost` keyword (presumably the ghost shader masks the tint
-  mismatch — UNVERIFIED, a test-scenario candidate).
+- **Exclusions we lacked — ADOPTED (cache v11, user-approved 2026-08-18)**:
+  `Is CharGen Face Preset` NPCs + the Player record are now skipped
+  entirely (`ModIssueScanner.IsNeverManifestedNpc`; presets render from
+  morph data, never FaceGen — mirrors OutputValidator's preset downgrade;
+  preset-as-Traits-terminus still graded via its inheritors' appearance
+  hop). `ActorTypeGhost` NPCs (`HasGhostKeyword`, NPC record only) demote
+  tint-symptom rows (dark-face, missing tint, broken NIF) to **Note, not
+  DFIR's outright skip** — the user's sparse in-game tests confirm dark
+  face is very hard to see on ghosts, but that may not generalize (mods
+  can alter the ghost effect), so the row stays visible under Show notes.
 - Missing-FaceGen verdicts are gated on the NPC being REFERENCED (placed
   ACHR, Traits-template user, or leveled-list entry) — unreferenced
-  records get no row. Mutagen has no reverse-reference index, so the
-  cheap preset/Player exclusions cover the main class for us.
+  records get no row. NOT adopted: Mutagen has no reverse-reference
+  index; the preset/Player exclusions cover the main class for us.
 - It reads only `BSFaceGenNiNodeSkinned` children as baked shapes (we
   survey all NiShapes — ours can see orphans outside the facegen node,
   detail-only, harmless), and it flags an unparseable/empty facegen NIF
-  as broken — a case our scanner currently passes SILENTLY (gap worth
-  closing: file present but unreadable ⇒ engine regen/dark face).
+  as broken — a case our scanner passed SILENTLY. **ADOPTED (cache v11)**:
+  present-but-unparseable FaceGen now emits a dark-face-class row (the
+  engine can't read it either ⇒ runtime regen). OPEN: OutputValidator's
+  CheckFaceGen has the same NifParsed silence and no ghost demotion —
+  mirror candidates for a later pass.
 
 ### Post-matrix field report 2: OverlayHeadPartList races (vampires)
 
