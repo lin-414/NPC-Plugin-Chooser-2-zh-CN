@@ -2234,6 +2234,44 @@ public class OutputValidator
             return; // a malformed NIF must never abort the validation run
         }
 
+        // Ghost-keyword row NPCs (read like the preset flag below: off the ROW's NPC —
+        // the actor the face renders ON, whoever supplied the subject record) demote
+        // tint-symptom verdicts to Info: the ghost visual effect usually hides them
+        // (user-observed in game, 2026-08-18), but a mod can alter the effect, so the
+        // rows stay visible rather than being skipped. Mirrors the Mod Issues
+        // scanner's Note demotion (cache v11).
+        bool ghostRow = linkCache.TryResolve<INpcGetter>(npcFk, out var rowNpcForGhost) &&
+                        CharacterViewerHost.ModIssueScanner.HasGhostKeyword(rowNpcForGhost);
+        string ghostPrefix = ghostRow
+            ? "This NPC carries the ActorTypeGhost keyword: the ghost visual effect usually hides " +
+              "face-tint problems, so this is reported as info rather than a warning. A mod that " +
+              "changes the ghost effect could still expose it.\n"
+            : string.Empty;
+
+        // File present but unreadable: HasMismatch stays false for an unparsed NIF (no
+        // forward misses are computed), so a corrupt deployed FaceGen used to validate
+        // SILENTLY — the same DFIR-review gap the Mod Issues scanner closed (cache
+        // v11). The engine can't read it either and falls back to runtime face
+        // regeneration, the dark-face outcome.
+        if (!analysis.NifParsed)
+        {
+            result.Issues.Add(new ValidationIssue
+            {
+                Severity = ghostRow ? ValidationSeverity.Info : ValidationSeverity.Warning,
+                Check = ValidationCheckKind.FaceGen,
+                NpcDisplayName = displayName,
+                NpcFormKey = npcFk.ToString(),
+                SelectedMod = selectedModName,
+                Issue = ghostPrefix +
+                        "The deployed FaceGen head mesh exists but could not be parsed" +
+                        (string.IsNullOrEmpty(analysis.NifError) ? "" : $" ({analysis.NifError})") +
+                        " — a broken/corrupt .nif. If the game engine cannot read it either, this NPC " +
+                        "dark-faces (runtime face regeneration).",
+                Details = relMeshPath,
+            });
+            return;
+        }
+
         if (!analysis.HasMismatch) return;
 
         // A character-creation preset never renders as an actor: it has no placed references, and
@@ -2282,12 +2320,13 @@ public class OutputValidator
             // mod, so the row states that instead of offering a conflict-remedy menu.
             result.Issues.Add(new ValidationIssue
             {
-                Severity = ValidationSeverity.Warning,
+                Severity = ghostRow ? ValidationSeverity.Info : ValidationSeverity.Warning,
                 Check = ValidationCheckKind.FaceGen,
                 NpcDisplayName = displayName,
                 NpcFormKey = npcFk.ToString(),
                 SelectedMod = selectedModName,
-                Issue = "Checked the selected mod in its own context: the mod itself ships this mismatch.\n" +
+                Issue = ghostPrefix +
+                        "Checked the selected mod in its own context: the mod itself ships this mismatch.\n" +
                         sourceAnalysis.BuildReason(scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod),
                 WinningSource = winnerModKey.HasValue
                     ? $"NPC record from '{winnerModKey.Value.FileName}'"
@@ -2318,12 +2357,12 @@ public class OutputValidator
 
         result.Issues.Add(new ValidationIssue
         {
-            Severity = ValidationSeverity.Warning,
+            Severity = ghostRow ? ValidationSeverity.Info : ValidationSeverity.Warning,
             Check = ValidationCheckKind.FaceGen,
             NpcDisplayName = displayName,
             NpcFormKey = npcFk.ToString(),
             SelectedMod = selectedModName,
-            Issue = analysis.BuildReason(fidelity: fidelity) + crossCheckTail,
+            Issue = ghostPrefix + analysis.BuildReason(fidelity: fidelity) + crossCheckTail,
             WinningSource = winnerModKey.HasValue
                 ? $"NPC record from '{winnerModKey.Value.FileName}'"
                 : string.Empty,

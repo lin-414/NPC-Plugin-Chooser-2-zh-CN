@@ -483,9 +483,12 @@ Face/Eyes/Eyebrows/Hair only (first-of-type). Notable deltas:
   detail-only, harmless), and it flags an unparseable/empty facegen NIF
   as broken — a case our scanner passed SILENTLY. **ADOPTED (cache v11)**:
   present-but-unparseable FaceGen now emits a dark-face-class row (the
-  engine can't read it either ⇒ runtime regen). OPEN: OutputValidator's
-  CheckFaceGen has the same NifParsed silence and no ghost demotion —
-  mirror candidates for a later pass.
+  engine can't read it either ⇒ runtime regen). OutputValidator brought
+  to parity same day: CheckFaceGenHeadPartConsistency emits the
+  unreadable-NIF row (Warning; Info when the row NPC is a ghost) and
+  demotes all its mismatch rows to Info on ghost-keyword row NPCs —
+  keyword read off the ROW's NPC like the preset flag, since the face
+  renders on that actor regardless of who supplied the subject record.
 
 ### Post-matrix field report 2: OverlayHeadPartList races (vampires)
 
