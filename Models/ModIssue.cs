@@ -265,7 +265,14 @@ namespace NPC_Plugin_Chooser_2.Models
         //     WICO field case: the two plugins carry different head-part
         //     sets for the same NPC and only one matches the shipped bake.
         //     Rows whose sibling plugin grades clean say so (repin remedy).
-        public const int CurrentVersion = 9;
+        // v10: singular-slot rule extended to EXTRAS (the flattened set,
+        //      doc field report 5): an extra whose own singular Type is
+        //      already occupied by an earlier part is dropped from the
+        //      expected set — checks occupancy, never claims it. Both wild
+        //      specimens (Men of Winter's "_1bit" FacialHair twin, Miggyluv
+        //      Hjoromir's Eyebrows lashes) were CK-unbaked and in-game
+        //      verified inert; A7's Misc-typed hairline still triggers.
+        public const int CurrentVersion = 10;
 
         public int Version { get; set; } = CurrentVersion;
 

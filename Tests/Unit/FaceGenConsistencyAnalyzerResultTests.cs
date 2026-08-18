@@ -1267,6 +1267,40 @@ public class FaceGenConsistencyAnalyzerResultTests
         FaceGenConsistencyAnalyzer.ModelPathsEqual(@"a\b.nif", @"a\c.nif").Should().BeFalse();
     }
 
+    // ---- IsSurplusSingularExtra (rule 2 on the flattened set — extras contest slots) ----
+
+    [Fact]
+    public void SurplusSingularExtra_OccupiedSingularSlot_IsSurplus()
+    {
+        var occupied = Baked("FacialHair", "Eyebrows"); // reuse the case-insensitive set helper
+        // Men of Winter's "_1bit" beard twin behind the baked beard (in-game verified inert).
+        FaceGenConsistencyAnalyzer.IsSurplusSingularExtra(HeadPart.TypeEnum.FacialHair, occupied)
+            .Should().BeTrue();
+        // Miggyluv Hjoromir's lashes behind his top-level brows (in-game verified inert).
+        FaceGenConsistencyAnalyzer.IsSurplusSingularExtra(HeadPart.TypeEnum.Eyebrows, occupied)
+            .Should().BeTrue();
+    }
+
+    [Fact]
+    public void SurplusSingularExtra_MiscType_NeverSurplus()
+    {
+        // A7's hairline is typed Misc — the multi grab-bag never loses a slot contest,
+        // so its absence keeps dark-facing. Regression guard for the amendment's scope.
+        FaceGenConsistencyAnalyzer.IsSurplusSingularExtra(HeadPart.TypeEnum.Misc, Baked("Misc"))
+            .Should().BeFalse();
+        FaceGenConsistencyAnalyzer.IsSurplusSingularExtra(HeadPart.TypeEnum.Scars, Baked("Scars"))
+            .Should().BeFalse();
+    }
+
+    [Fact]
+    public void SurplusSingularExtra_UnoccupiedSlotOrNullType_NotSurplus()
+    {
+        FaceGenConsistencyAnalyzer.IsSurplusSingularExtra(HeadPart.TypeEnum.Eyebrows, Baked("Hair"))
+            .Should().BeFalse();
+        FaceGenConsistencyAnalyzer.IsSurplusSingularExtra(null, Baked("Eyebrows"))
+            .Should().BeFalse();
+    }
+
     // NOTE: FaceGenConsistencyAnalyzer.Analyze / GetSurvey / CachedSurvey not covered:
     // they require a real FaceGen .nif parsed by NifMeshBuilder (from CharacterViewer.Rendering)
     // and a constructed CharacterPreviewCache — i.e. live rendering assets unavailable offline.

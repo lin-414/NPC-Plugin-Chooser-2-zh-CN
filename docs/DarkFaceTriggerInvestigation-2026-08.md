@@ -346,11 +346,20 @@ TintTest profile). Reconciliation of every anomaly:
 2. **Singular slot types keep only the FIRST-LISTED part**; later same-type
    parts are dropped from the expected set (Anoriath, B6, Khajiit tufts).
    Scars is multi (B5); which other types are multi is untested.
+   **AMENDED 2026-08-18 (field report 5): the rule applies to the FLATTENED
+   set — EXTRAS contest the singular slots too.** A surplus-singular-typed
+   extra (MoW's FacialHair `_1bit` twin behind the baked beard; Hjoromir's
+   Eyebrows lashes behind his top-level brows) is dropped: the CK bakes
+   neither and the engine expects neither (both in-game verified inert).
+   Encoded check-only — extras consult slot occupancy but never claim it.
 3. **Extra parts reconcile by PRESENCE, not name** (Gaiden renamed-hairline
-   fine, Brand-Shei foreign-named hairlines fine, A7 absent-hairline DARK).
+   fine, Brand-Shei foreign-named hairlines fine, A7 absent-hairline DARK —
+   the hairline is typed **Misc**, the multi grab-bag, so rule 2's dropping
+   never touches it).
    **AMENDED 2026-08-17 (field report 4): an unbaked extra whose MODEL FILE
    equals its baked ancestor's is inert** — the vanilla "_1bit" beard-twin
-   convention (MQ304Ulfric specimen). A hairline is distinct geometry, so A7
+   convention (MQ304Ulfric specimen; now doubly covered by the rule-2
+   extension, kept as a belt). A hairline is distinct geometry, so A7
    stands.
 4. Modelless parts never count (vanilla NoGash; `BearsBakedGeometry`).
 
@@ -408,6 +417,66 @@ now factored + unit-tested): an unbaked extra is also satisfied when its
 `HeadPartRef.ModelPath` captured in the walk). Ancestor unbaked → still
 flags (the top-level row dominates anyway). All analyzer callers (scanner,
 badges, both validator paths) inherit.
+
+### Post-matrix field report 5: surplus-singular EXTRAS — the unifying rule (2026-08-18)
+
+Hjoromir (Miggyluv's 3DNPC replacer, `052FE7:3DNPC.esp`) — the last wild
+member of the solo-extra class — spawn-tested FINE despite his flagged
+`MIG_Hjoromir_Lashes` miss, with every confound excluded (base 3DNPC
+enabled, all six competing replacers disabled, no FDF). User observation:
+"looks like he might not have eyelashes" — the geometry is simply absent,
+no regen. Unlike Ulfric's `_1bit`, the lashes are DISTINCT geometry
+(`LashesMale.nif` vs the parent head's `malehead.nif`), refuting
+shared-model as the general mechanism.
+
+The actual discriminator: **both tolerated extras are surplus parts of a
+singular slot type** — `_1bit` is a second FacialHair behind the beard,
+the lashes are a second Eyebrows behind `MIG_Hjoromir_Brows` — while A7's
+hairline is typed **Misc**, the multi grab-bag, so it never loses a slot
+contest. Rule 2 (first-listed-wins) evidently applies to the FLATTENED
+set, extras included. Corroboration: both mods' own CK bakes omit exactly
+those shapes (the same CK-side dropping the Khajiit-tufts extraction
+showed for surplus top-level parts) — the bakes were CK-canonical, so
+these were never authoring defects at all. Bethesda typing hairlines Misc
+rather than Hair reads as deliberate slot-collision avoidance.
+
+Alternative hypothesis (H-tri): "extras without TRI morph parts don't
+count" (lashes carry no TRIs; A7's hairline has `Hairline15.tri`) also
+fits the wild data but needs the shared-model clause retained for Ulfric
+(his `_1bit` HAS full TRIs). Discriminating cell, if ever wanted: a
+surplus-singular extra WITH TRIs and a distinct model, absent from the
+bake — slot rule says fine, TRI rule says dark.
+
+**ENCODED (cache v10):** `IsSurplusSingularExtra` — inside the walk, an
+extra whose own singular Type is already occupied by an earlier expected
+part goes to `Result.SurplusSlotParts` (FromExtraParts=true) instead of
+the expected set; names still suppress orphan readings. Check-only:
+extras never CLAIM a slot, so top-level behavior is untouched. The v8
+shared-model clause stays as a belt.
+
+### External detector review: Dark Face Issue Reporter 2.8 (xEdit script, 2026-08-18)
+
+User-supplied for gap analysis (not ground truth). Its check: winning
+override, forward-only, EditorID-vs-`BSFaceGenNiNodeSkinned`-children
+name match, modelless parts skipped, race defaults filled for
+Face/Eyes/Eyebrows/Hair only (first-of-type). Notable deltas:
+- It never walks ExtraParts at all (would MISS A7) and still checks
+  surplus same-type top-level parts (would false-positive on
+  Anoriath/B6/tufts). No tint-file check. Our model supersedes on all of
+  these.
+- **Exclusions we lacked**: `Is CharGen Face Preset` NPCs (chargen-menu
+  data, never placed), the Player record, and NPCs with the
+  `ActorTypeGhost` keyword (presumably the ghost shader masks the tint
+  mismatch — UNVERIFIED, a test-scenario candidate).
+- Missing-FaceGen verdicts are gated on the NPC being REFERENCED (placed
+  ACHR, Traits-template user, or leveled-list entry) — unreferenced
+  records get no row. Mutagen has no reverse-reference index, so the
+  cheap preset/Player exclusions cover the main class for us.
+- It reads only `BSFaceGenNiNodeSkinned` children as baked shapes (we
+  survey all NiShapes — ours can see orphans outside the facegen node,
+  detail-only, harmless), and it flags an unparseable/empty facegen NIF
+  as broken — a case our scanner currently passes SILENTLY (gap worth
+  closing: file present but unreadable ⇒ engine regen/dark face).
 
 ### Post-matrix field report 2: OverlayHeadPartList races (vampires)
 

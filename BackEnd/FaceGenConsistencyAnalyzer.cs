@@ -223,9 +223,12 @@ public sealed class FaceGenConsistencyAnalyzer
         /// of that EditorID in the .nif.
         public IReadOnlyList<HeadPartRef> MissingBakedShapes { get; init; } = System.Array.Empty<HeadPartRef>();
 
-        /// <summary>Top-level parts DROPPED from the expected set by the singular-slot rule:
-        /// the engine (and the CK when baking) keeps only the FIRST-LISTED part of a singular
-        /// slot Type — see <see cref="IsSingularSlotType"/>. Diagnostic only; sets nothing.</summary>
+        /// <summary>Parts DROPPED from the expected set by the singular-slot rule: the
+        /// engine (and the CK when baking) keeps only the FIRST-LISTED part of a singular
+        /// slot Type — see <see cref="IsSingularSlotType"/>. Applies to the FLATTENED set:
+        /// top-level parts AND extras whose own singular Type is already occupied
+        /// (<see cref="IsSurplusSingularExtra"/>; entries carry FromExtraParts).
+        /// Diagnostic only; sets nothing.</summary>
         public IReadOnlyList<HeadPartRef> SurplusSlotParts { get; init; } = System.Array.Empty<HeadPartRef>();
 
         /// <summary>Unbaked EXTRA parts satisfied by presence — a sibling extra of the same
@@ -254,16 +257,19 @@ public sealed class FaceGenConsistencyAnalyzer
         /// race-default parts count the same as explicit ones. Face Discoloration Fix-class
         /// plugins force-regenerate tints and mask the symptom entirely, which is why
         /// mismatched mods are often reported as "renders fine".</para>
-        /// <para>Two structural rules narrow the comparison (field report 3 in the doc):
-        /// singular slot types keep only the FIRST-LISTED part — surplus same-type parts are
-        /// dropped, exactly as the CK's own bakes show (<see cref="IsSingularSlotType"/>;
-        /// re-derives the B6/Anoriath tolerances and the vanilla Khajiit ear-tufts state) —
-        /// and EXTRA parts reconcile by PRESENCE, not name (Gaiden Shinji's renamed hairline
-        /// and Brand-Shei's foreign-named hairlines render fine, while matrix variant A7 —
-        /// hairline removed with nothing standing in — dark-faces; an unbaked extra sharing
-        /// its baked ancestor's MODEL FILE — the vanilla "_1bit" beard-twin convention — is
-        /// inert, per the MQ304Ulfric / Men of Winter in-game specimen, 2026-08-17). Dropped/
-        /// satisfied parts land in <see cref="SurplusSlotParts"/> /
+        /// <para>Two structural rules narrow the comparison (field reports 3–5 in the doc):
+        /// singular slot types keep only the FIRST-LISTED part of the FLATTENED set —
+        /// surplus same-type parts are dropped whether top-level or EXTRA, exactly as the
+        /// CK's own bakes show (<see cref="IsSingularSlotType"/> /
+        /// <see cref="IsSurplusSingularExtra"/>; re-derives the B6/Anoriath tolerances, the
+        /// vanilla Khajiit ear-tufts state, and the two in-game-verified inert extras:
+        /// Men of Winter's FacialHair "_1bit" twin and Miggyluv Hjoromir's Eyebrows
+        /// lashes) — and the remaining EXTRA parts reconcile by PRESENCE, not name
+        /// (Gaiden Shinji's renamed hairline and Brand-Shei's foreign-named hairlines
+        /// render fine, while matrix variant A7 — a Misc-typed hairline removed with
+        /// nothing standing in — dark-faces; an unbaked extra sharing its baked ancestor's
+        /// MODEL FILE is additionally exempt, a belt kept from the MQ304Ulfric
+        /// derivation). Dropped/satisfied parts land in <see cref="SurplusSlotParts"/> /
         /// <see cref="PresenceSatisfiedExtras"/>, not here.</para>
         /// <para>Race-default parts of <c>OverlayHeadPartList</c> races (the vampire races)
         /// never enter the comparison at all — their HeadData is a runtime overlay, not a
@@ -703,6 +709,11 @@ public sealed class FaceGenConsistencyAnalyzer
 
         var surplus = new List<HeadPartRef>();
 
+        // Singular slot types already claimed by an earlier top-level part (declared
+        // here, above Walk, because extras consult it mid-walk — see the surplus-extra
+        // branch below; populated by the 2a loop's first-listed contest).
+        var singularSeen = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+
         // Walk one part (and its extras) into the EXPECTED set. `ancestor` is null for a
         // top-level part; extras carry their root ancestor so the presence check can group
         // siblings.
@@ -717,6 +728,27 @@ public sealed class FaceGenConsistencyAnalyzer
             if (!string.IsNullOrEmpty(hp.EditorID)) resolvedEditorIds.Add(hp.EditorID!);
 
             bool geo = BearsBakedGeometry(hp);
+
+            // Extras contest the singular slots too — rule 2 applies to the FLATTENED
+            // set, not just top-level parts: an extra whose own singular Type is
+            // already occupied by an earlier expected part is dropped exactly like
+            // surplus top-level parts. The CK bakes neither and the engine expects
+            // neither (field reports 4/5: Men of Winter's FacialHair "_1bit" twin and
+            // Miggyluv's Eyebrows lashes — both absent from their CK bakes, both
+            // in-game verified inert 2026-08-17/18 — while A7's hairline, typed Misc,
+            // the multi grab-bag, still triggers). Extras CHECK occupancy but never
+            // CLAIM the slot: the evidence covers only the check direction, so
+            // top-level behavior is unchanged.
+            if (ancestor != null && IsSurplusSingularExtra(hp.Type, singularSeen))
+            {
+                if (geo && !string.IsNullOrEmpty(hp.EditorID))
+                    surplus.Add(new HeadPartRef(fk, hp.EditorID!)
+                        { Type = hp.Type, FromExtraParts = true, AncestorFormKey = ancestor.Value });
+                if (hp.ExtraParts != null)
+                    foreach (var ep in hp.ExtraParts) Walk(ep, fromRaceDefaults, ancestor ?? fk);
+                return;
+            }
+
             if (geo && !string.IsNullOrEmpty(hp.EditorID))
                 geometryBearing.Add(new HeadPartRef(fk, hp.EditorID!)
                 {
@@ -751,7 +783,6 @@ public sealed class FaceGenConsistencyAnalyzer
         //     set (see IsSingularSlotType); later same-type parts are dropped, exactly as
         //     the CK's own bakes show (the vanilla Khajiit ear-tufts specimen).
         var npcSlotTypes = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
-        var singularSeen = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
         if (npc.HeadParts != null)
         {
             foreach (var link in npc.HeadParts)
@@ -948,6 +979,20 @@ public sealed class FaceGenConsistencyAnalyzer
     public static bool IsSingularSlotType(HeadPart.TypeEnum? type) => type is
         HeadPart.TypeEnum.Eyes or HeadPart.TypeEnum.Hair or HeadPart.TypeEnum.Face or
         HeadPart.TypeEnum.Eyebrows or HeadPart.TypeEnum.FacialHair;
+
+    /// <summary>The extras half of the singular-slot rule (rule 2 on the FLATTENED
+    /// set): true when an EXTRA part's own Type is singular and that slot is already
+    /// occupied by an earlier expected part — the extra is then dropped, never
+    /// expected in the bake. Field-derived: Men of Winter's "_1bit" FacialHair twin
+    /// (behind the baked beard) and Miggyluv Hjoromir's Eyebrows lashes (behind his
+    /// top-level brows) are both absent from their CK bakes and both in-game verified
+    /// inert (2026-08-17/18), while matrix variant A7's hairline — typed Misc, the
+    /// multi grab-bag — still dark-faces when absent. Callers pass the singular slot
+    /// TYPE NAMES already claimed ("Eyebrows", "FacialHair", …).</summary>
+    internal static bool IsSurplusSingularExtra(HeadPart.TypeEnum? extraType,
+        IReadOnlySet<string> occupiedSingularSlots)
+        => IsSingularSlotType(extraType) &&
+           occupiedSingularSlots.Contains(extraType!.Value.ToString());
 
     /// <summary>
     /// True when <paramref name="headPart"/> contributes a shape to the baked FaceGen mesh —
