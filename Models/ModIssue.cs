@@ -243,7 +243,12 @@ namespace NPC_Plugin_Chooser_2.Models
         //     part, extra parts reconcile by presence not name, and a
         //     mod-shipped FaceGen at a Traits-templated NPC's own path (mod
         //     context) demotes to Note — the raw engine never loads it.
-        public const int CurrentVersion = 7;
+        // v8: extras-presence rule amended (doc field report 4): an unbaked
+        //     extra sharing its baked ancestor's MODEL FILE (the vanilla
+        //     "_1bit" beard-twin convention) is engine-inert and no longer
+        //     produces a row (MQ304Ulfric / Men of Winter false positive,
+        //     in-game verified 2026-08-17).
+        public const int CurrentVersion = 8;
 
         public int Version { get; set; } = CurrentVersion;
 

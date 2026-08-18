@@ -348,6 +348,10 @@ TintTest profile). Reconciliation of every anomaly:
    Scars is multi (B5); which other types are multi is untested.
 3. **Extra parts reconcile by PRESENCE, not name** (Gaiden renamed-hairline
    fine, Brand-Shei foreign-named hairlines fine, A7 absent-hairline DARK).
+   **AMENDED 2026-08-17 (field report 4): an unbaked extra whose MODEL FILE
+   equals its baked ancestor's is inert** — the vanilla "_1bit" beard-twin
+   convention (MQ304Ulfric specimen). A hairline is distinct geometry, so A7
+   stands.
 4. Modelless parts never count (vanilla NoGash; `BearsBakedGeometry`).
 
 **ENCODED 2026-08-17 (cache v7, suite 2477 green):** `Analyze` implements
@@ -370,6 +374,40 @@ callers (scanner, badges, both validator paths) inherit rules 2–3.
   Refined Patreon freeze-on-spawn**: same total-mismatch class with
   cross-plugin HDPTs; regen hitting corrupt/physics-dependent part models.
   Both rows are true positives with different symptoms.
+
+### Post-matrix field report 4: shared-model extras — the "_1bit" beard twin (2026-08-17)
+
+User spawn-tested three scanner-flagged NPCs through a patch run: WICO's
+Marise Aravel + Hert (top-level name mismatches) both DARK — true positives —
+while Men of Winter's `MQ304Ulfric` rendered FINE despite his flagged row.
+His was the only delta of its kind: record-side extra `111BeardUlfric_1bit`
+(`IsExtraPart`, FacialHair) absent from the bake, nothing else. Confound
+exclusion was possible without a minimal-profile rerun: the patched NPC.esp
+kept the extra expectation (merged copy chain intact), the output bake was
+byte-identical to the mod's (no `_1bit` shape), every other Ulfric replacer
+was disabled, and Face Discoloration Fix is not installed — so the exact
+graded pair was live in game.
+
+The discriminator vs A7: `111BeardUlfric_1bit` references the **exact same
+model file** as its parent `111BeardUlfric` (`humanbeardmedium09.nif`, same
+TRIs) — the vanilla `_1bit` hard-alpha beard-twin convention. The twin
+contributes no geometry the parent's baked shape doesn't already carry, and
+the engine evidently doesn't demand a separate baked shape for it. A
+hairline is DISTINCT geometry, which is why A7 (hairline absent, nothing
+standing in) triggers.
+
+Cache-wide scale check: across ~1,000 scanned mods the solo-extra dark-face
+class has exactly THREE rows — the A7 control itself, Miggyluv Hjoromir's
+`MIG_Hjoromir_Lashes` (distinct lash mesh — predicted DARK, untested), and
+Ulfric. Narrow class, surgical fix.
+
+**ENCODED (cache v8): rule 3 gains clause (c)** in
+`FaceGenConsistencyAnalyzer.IsExtraPresenceSatisfied` (the extras predicate,
+now factored + unit-tested): an unbaked extra is also satisfied when its
+`Model.File` equals its baked ancestor's (separator/case-insensitive;
+`HeadPartRef.ModelPath` captured in the walk). Ancestor unbaked → still
+flags (the top-level row dominates anyway). All analyzer callers (scanner,
+badges, both validator paths) inherit.
 
 ### Post-matrix field report 2: OverlayHeadPartList races (vampires)
 

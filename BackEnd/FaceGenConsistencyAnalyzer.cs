@@ -121,6 +121,12 @@ public sealed class FaceGenConsistencyAnalyzer
         /// siblings for the presence check.</summary>
         public FormKey AncestorFormKey { get; init; }
 
+        /// <summary>The part's own model file path (Model.File), when it has one. Fuels the
+        /// shared-model clause of the extras presence check: a vanilla-convention "_1bit"
+        /// twin references the SAME mesh as its parent, so the parent's baked shape already
+        /// carries its geometry — see <see cref="IsExtraPresenceSatisfied"/>.</summary>
+        public string? ModelPath { get; init; }
+
         /// <summary>For a MISSING baked shape: the orphan baked shape(s) of the SAME slot
         /// Type that the .nif carries instead (e.g. record asks for BrowsMaleHumanoid04,
         /// the .nif was baked with BrowsMaleHumanoid01). Best-effort — requires the
@@ -223,7 +229,8 @@ public sealed class FaceGenConsistencyAnalyzer
         public IReadOnlyList<HeadPartRef> SurplusSlotParts { get; init; } = System.Array.Empty<HeadPartRef>();
 
         /// <summary>Unbaked EXTRA parts satisfied by presence — a sibling extra of the same
-        /// top-level part is baked, or an orphan shape stands in for the renamed extra.
+        /// top-level part is baked, an orphan shape stands in for the renamed extra, or the
+        /// extra shares its baked ancestor's model file (the "_1bit" beard-twin convention).
         /// Engine-inert (extras reconcile by presence, not name); diagnostic only.</summary>
         public IReadOnlyList<HeadPartRef> PresenceSatisfiedExtras { get; init; } = System.Array.Empty<HeadPartRef>();
 
@@ -253,9 +260,11 @@ public sealed class FaceGenConsistencyAnalyzer
         /// re-derives the B6/Anoriath tolerances and the vanilla Khajiit ear-tufts state) —
         /// and EXTRA parts reconcile by PRESENCE, not name (Gaiden Shinji's renamed hairline
         /// and Brand-Shei's foreign-named hairlines render fine, while matrix variant A7 —
-        /// hairline removed with nothing standing in — dark-faces). Dropped/satisfied parts
-        /// land in <see cref="SurplusSlotParts"/> / <see cref="PresenceSatisfiedExtras"/>,
-        /// not here.</para>
+        /// hairline removed with nothing standing in — dark-faces; an unbaked extra sharing
+        /// its baked ancestor's MODEL FILE — the vanilla "_1bit" beard-twin convention — is
+        /// inert, per the MQ304Ulfric / Men of Winter in-game specimen, 2026-08-17). Dropped/
+        /// satisfied parts land in <see cref="SurplusSlotParts"/> /
+        /// <see cref="PresenceSatisfiedExtras"/>, not here.</para>
         /// <para>Race-default parts of <c>OverlayHeadPartList</c> races (the vampire races)
         /// never enter the comparison at all — their HeadData is a runtime overlay, not a
         /// slot-fill contract; see <see cref="RaceDefaultsParticipateInReconciliation"/>.</para>
@@ -713,6 +722,7 @@ public sealed class FaceGenConsistencyAnalyzer
                 {
                     FromRaceDefaults = fromRaceDefaults, Type = hp.Type,
                     FromExtraParts = ancestor != null, AncestorFormKey = ancestor ?? fk,
+                    ModelPath = hp.Model?.File.GivenPath,
                 });
 
             if (hp.ExtraParts != null)
@@ -802,11 +812,8 @@ public sealed class FaceGenConsistencyAnalyzer
 
         // 4. Forward: expected parts absent from the baked shapes. Only meaningful when the
         //    NIF actually parsed (else every part looks "missing"). Top-level parts match
-        //    by NAME; EXTRA parts match by PRESENCE — an unbaked extra is satisfied when a
-        //    sibling extra of the same top-level part is baked, or when any orphan shape
-        //    stands in for the renamed extra (field report 3: Gaiden Shinji's renamed
-        //    hairline and Brand-Shei's foreign-named hairlines render fine; matrix variant
-        //    A7 — the hairline REMOVED with nothing standing in — dark-faces).
+        //    by NAME; EXTRA parts match by PRESENCE — see IsExtraPresenceSatisfied for the
+        //    three satisfying clauses and their field/matrix evidence.
         var unbaked = nifParsed
             ? geometryBearing.Where(r => !baked.Contains(r.EditorId)).ToList()
             : new List<HeadPartRef>();
@@ -814,13 +821,8 @@ public sealed class FaceGenConsistencyAnalyzer
         var satisfiedExtras = new List<HeadPartRef>();
         foreach (var r in unbaked)
         {
-            bool satisfied = r.FromExtraParts &&
-                             (orphans.Count > 0 ||
-                              geometryBearing.Any(o => o.FromExtraParts &&
-                                                       o.AncestorFormKey.Equals(r.AncestorFormKey) &&
-                                                       !o.FormKey.Equals(r.FormKey) &&
-                                                       baked.Contains(o.EditorId)));
-            if (satisfied) satisfiedExtras.Add(r);
+            if (IsExtraPresenceSatisfied(r, orphans.Count > 0, geometryBearing, baked))
+                satisfiedExtras.Add(r);
             else missing.Add(r);
         }
 
@@ -859,6 +861,58 @@ public sealed class FaceGenConsistencyAnalyzer
             UnresolvedHeadParts = unresolved,
             NullHeadPartLinks = nullLinks,
         };
+    }
+
+    /// <summary>
+    /// The extras half of reconciliation rule 3 (extras reconcile by PRESENCE, not name),
+    /// applied to one unbaked geometry-bearing part. Satisfied — engine-inert — when the
+    /// part is an EXTRA and (a) any orphan shape stands in for a renamed extra (field
+    /// report 3: Gaiden Shinji's renamed hairline, Brand-Shei's foreign-named hairlines),
+    /// or (b) a sibling extra of the same top-level part is baked, or (c) the extra's
+    /// model file is the SAME as its baked ancestor's — the vanilla "_1bit" beard-twin
+    /// convention, where the extra references the parent's own mesh and so contributes no
+    /// geometry the bake doesn't already carry (MQ304Ulfric / Men of Winter specimen,
+    /// in-game verified 2026-08-17: patched record kept the _1bit expectation, byte-identical
+    /// bake lacked the shape, no competing override or FDF, rendered fine). A hairline is
+    /// DISTINCT geometry, so clause (c) leaves matrix variant A7 (hairline absent with
+    /// nothing standing in = dark face) untouched. Top-level parts are never satisfied
+    /// here — they reconcile by name.
+    /// </summary>
+    internal static bool IsExtraPresenceSatisfied(HeadPartRef part, bool anyOrphans,
+        IReadOnlyList<HeadPartRef> geometryBearing, IReadOnlySet<string> baked)
+    {
+        if (!part.FromExtraParts) return false;
+        if (anyOrphans) return true;
+
+        foreach (var o in geometryBearing)
+        {
+            if (!baked.Contains(o.EditorId)) continue;
+
+            // (b) Baked sibling extra of the same top-level part.
+            if (o.FromExtraParts && o.AncestorFormKey.Equals(part.AncestorFormKey) &&
+                !o.FormKey.Equals(part.FormKey))
+            {
+                return true;
+            }
+
+            // (c) Shared-model twin: the baked ANCESTOR itself uses the same mesh file.
+            if (!o.FromExtraParts && o.FormKey.Equals(part.AncestorFormKey) &&
+                ModelPathsEqual(o.ModelPath, part.ModelPath))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>Model-path equality for the shared-model clause: separator- and
+    /// case-insensitive; null/empty paths never match anything.</summary>
+    internal static bool ModelPathsEqual(string? a, string? b)
+    {
+        if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b)) return false;
+        static string Norm(string s) => s.Trim().Replace('/', '\\');
+        return string.Equals(Norm(a), Norm(b), System.StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

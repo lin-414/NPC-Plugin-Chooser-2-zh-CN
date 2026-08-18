@@ -1153,6 +1153,120 @@ public class FaceGenConsistencyAnalyzerResultTests
         names.Should().BeEquivalentTo(new[] { "GoodEyes" });
     }
 
+    // ---- IsExtraPresenceSatisfied (reconciliation rule 3, incl. the shared-model clause) ----
+
+    private static FaceGenConsistencyAnalyzer.HeadPartRef TopLevel(
+        FormKey fk, string edid, string? model = null)
+        => new(fk, edid) { AncestorFormKey = fk, ModelPath = model };
+
+    private static FaceGenConsistencyAnalyzer.HeadPartRef ExtraOf(
+        FormKey ancestor, FormKey fk, string edid, string? model = null)
+        => new(fk, edid) { FromExtraParts = true, AncestorFormKey = ancestor, ModelPath = model };
+
+    private static IReadOnlySet<string> Baked(params string[] names)
+        => new HashSet<string>(names, System.StringComparer.OrdinalIgnoreCase);
+
+    [Fact]
+    public void ExtraPresence_TopLevelPart_NeverSatisfied()
+    {
+        // Top-level parts reconcile by NAME (rule 1); the presence predicate must not
+        // excuse them even when orphans exist.
+        var hair = TopLevel(HpA, "HairFemaleNord15", @"meshes\hair\hair15.nif");
+        FaceGenConsistencyAnalyzer.IsExtraPresenceSatisfied(
+                hair, anyOrphans: true, new[] { hair }, Baked())
+            .Should().BeFalse();
+    }
+
+    [Fact]
+    public void ExtraPresence_OrphanStandIn_Satisfies()
+    {
+        // Gaiden Shinji / Brand-Shei: a renamed hairline's shape is present under another
+        // name (an orphan), which satisfies the extra.
+        var hair = TopLevel(HpA, "HairMaleRedguard4", @"meshes\hair\hair4.nif");
+        var hairline = ExtraOf(HpA, HpB, "HairLineMaleRedguard3", @"meshes\hair\hairline3.nif");
+        FaceGenConsistencyAnalyzer.IsExtraPresenceSatisfied(
+                hairline, anyOrphans: true, new[] { hair, hairline }, Baked("HairMaleRedguard4"))
+            .Should().BeTrue();
+    }
+
+    [Fact]
+    public void ExtraPresence_BakedSiblingExtra_Satisfies()
+    {
+        var hair = TopLevel(HpA, "Hair", @"meshes\hair\hair.nif");
+        var lineA = ExtraOf(HpA, HpB, "HairLineA", @"meshes\hair\lineA.nif");
+        var lineB = ExtraOf(HpA, HpC, "HairLineB", @"meshes\hair\lineB.nif");
+        FaceGenConsistencyAnalyzer.IsExtraPresenceSatisfied(
+                lineA, anyOrphans: false, new[] { hair, lineA, lineB }, Baked("Hair", "HairLineB"))
+            .Should().BeTrue();
+    }
+
+    [Fact]
+    public void ExtraPresence_DistinctModel_AncestorBaked_StillFlags()
+    {
+        // Matrix variant A7: the hairline is DISTINCT geometry — its ancestor hair being
+        // baked does NOT satisfy it, and its absence dark-faces in game. Regression guard
+        // for the shared-model clause staying narrow.
+        var hair = TopLevel(HpA, "HairFemaleNord15", @"meshes\hair\hair15.nif");
+        var hairline = ExtraOf(HpA, HpB, "HairLineFemaleNord15", @"meshes\hair\hairline15.nif");
+        FaceGenConsistencyAnalyzer.IsExtraPresenceSatisfied(
+                hairline, anyOrphans: false, new[] { hair, hairline }, Baked("HairFemaleNord15"))
+            .Should().BeFalse();
+    }
+
+    [Fact]
+    public void ExtraPresence_SharedModel_AncestorBaked_Satisfies()
+    {
+        // MQ304Ulfric / Men of Winter (in-game verified 2026-08-17): the "_1bit" beard twin
+        // references its parent's own mesh, so the parent's baked shape already carries its
+        // geometry — engine-inert.
+        var beard = TopLevel(HpA, "111BeardUlfric",
+            @"Meshes\actors\character\character assets\beards\humanbeardmedium09.nif");
+        var twin = ExtraOf(HpA, HpB, "111BeardUlfric_1bit",
+            @"Meshes\actors\character\character assets\beards\humanbeardmedium09.nif");
+        FaceGenConsistencyAnalyzer.IsExtraPresenceSatisfied(
+                twin, anyOrphans: false, new[] { beard, twin }, Baked("111BeardUlfric"))
+            .Should().BeTrue();
+    }
+
+    [Fact]
+    public void ExtraPresence_SharedModel_AncestorNotBaked_StillFlags()
+    {
+        // The twin is only carried by its parent's GEOMETRY — an unbaked parent satisfies
+        // nothing (the parent's own top-level row dominates that case anyway).
+        var beard = TopLevel(HpA, "Beard", @"meshes\beards\beard.nif");
+        var twin = ExtraOf(HpA, HpB, "Beard_1bit", @"meshes\beards\beard.nif");
+        FaceGenConsistencyAnalyzer.IsExtraPresenceSatisfied(
+                twin, anyOrphans: false, new[] { beard, twin }, Baked("SomethingElse"))
+            .Should().BeFalse();
+    }
+
+    [Fact]
+    public void ExtraPresence_SharedModel_ToleratesSeparatorAndCaseDrift()
+    {
+        var beard = TopLevel(HpA, "Beard", "meshes/beards/Beard.NIF");
+        var twin = ExtraOf(HpA, HpB, "Beard_1bit", @"Meshes\Beards\beard.nif");
+        FaceGenConsistencyAnalyzer.IsExtraPresenceSatisfied(
+                twin, anyOrphans: false, new[] { beard, twin }, Baked("Beard"))
+            .Should().BeTrue();
+    }
+
+    [Fact]
+    public void ExtraPresence_MissingModelPaths_NeverMatchViaModelClause()
+    {
+        // Null/empty model paths must not read as "equal" — a modelless pairing proves
+        // nothing about shared geometry.
+        var beard = TopLevel(HpA, "Beard", model: null);
+        var twin = ExtraOf(HpA, HpB, "Beard_1bit", model: null);
+        FaceGenConsistencyAnalyzer.IsExtraPresenceSatisfied(
+                twin, anyOrphans: false, new[] { beard, twin }, Baked("Beard"))
+            .Should().BeFalse();
+
+        FaceGenConsistencyAnalyzer.ModelPathsEqual(null, null).Should().BeFalse();
+        FaceGenConsistencyAnalyzer.ModelPathsEqual("", "").Should().BeFalse();
+        FaceGenConsistencyAnalyzer.ModelPathsEqual(@"a\b.nif", @"a\b.nif").Should().BeTrue();
+        FaceGenConsistencyAnalyzer.ModelPathsEqual(@"a\b.nif", @"a\c.nif").Should().BeFalse();
+    }
+
     // NOTE: FaceGenConsistencyAnalyzer.Analyze / GetSurvey / CachedSurvey not covered:
     // they require a real FaceGen .nif parsed by NifMeshBuilder (from CharacterViewer.Rendering)
     // and a constructed CharacterPreviewCache — i.e. live rendering assets unavailable offline.
