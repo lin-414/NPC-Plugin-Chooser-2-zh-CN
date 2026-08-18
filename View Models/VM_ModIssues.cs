@@ -158,9 +158,11 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
     /// <summary>One row of the results table under the mugshots. In grouped mode
     /// one row stands for every NPC sharing a distinct problem (NpcCount > 1)
     /// and carries all of their issues so the ignore commands can act on the
-    /// whole group.</summary>
+    /// whole group. Plugin is the scanned mod's own plugin(s) whose record
+    /// produced a record-graded verdict (multi-plugin mods only; empty
+    /// otherwise).</summary>
     public sealed record IssueRow(string NpcDisplayName, string NpcFormKey, string Category,
-        string TypeDisplay, string AffectedPath, string Location, string Referencer,
+        string TypeDisplay, string Plugin, string AffectedPath, string Location, string Referencer,
         string ProvidedBy, string Detail, int NpcCount, bool IsNote, bool IsIgnored,
         IReadOnlyList<ModIssue> Issues);
 
@@ -1070,6 +1072,12 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
 
                     var vm = _mugshotFactory(imagePath, npcFormKey, displayName, _modsViewModel,
                         isAmbiguous, availableModKeys, currentSource, modSettingVm, token);
+                    // Multi-plugin mods: the caption's top line names the plugin(s)
+                    // whose record verdicts hit this NPC (empty = line hidden).
+                    vm.ScanRecordPluginText = string.Join(" · ", issues
+                        .Select(i => i.RecordPluginName)
+                        .Where(p => !string.IsNullOrEmpty(p))
+                        .Distinct(StringComparer.OrdinalIgnoreCase));
                     var baseIssues = issues.Where(i => !i.IsOutfitIssue).ToList();
                     var outfitIssues = issues.Where(i => i.IsOutfitIssue).ToList();
                     if (baseIssues.Count > 0)
@@ -1277,6 +1285,7 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
                 npcCount > 1 || issue.NpcFormKey.IsNull ? string.Empty : issue.NpcFormKey.ToString(),
                 issue.IsOutfitIssue ? "Outfit" : "NPC",
                 VM_ModIssueEntry.GetIssueTypeDisplayName(issue.Type),
+                issue.RecordPluginName ?? string.Empty,
                 issue.AffectedPath,
                 npcCount > 1 && groupIssues.Select(i => i.NifPath).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1
                     ? $"{groupIssues.Select(i => i.NifPath).Distinct(StringComparer.OrdinalIgnoreCase).Count()} locations"
@@ -1294,9 +1303,11 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         {
             var groups = issues
                 .GroupBy(i => (i.Severity, i.Type, i.IsOutfitIssue, Path: i.AffectedPath.ToLowerInvariant(),
-                    Source: i.SourceModName ?? string.Empty))
+                    Source: i.SourceModName ?? string.Empty, Plugin: i.RecordPluginName ?? string.Empty))
                 // (grouping key includes the path, so a template group's FaceGen file
-                // collapses to one row; MakeRow decodes the terminus FormKey from it)
+                // collapses to one row — MakeRow decodes the terminus FormKey from it —
+                // and the record plugin, so per-plugin verdicts with differing Details
+                // never merge into one row)
                 .OrderBy(g => g.Key.Severity)
                 .ThenBy(g => g.Key.Type)
                 .ThenBy(g => g.Key.Path, StringComparer.OrdinalIgnoreCase)
@@ -1374,7 +1385,7 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
             using var writer = new StreamWriter(dialog.FileName, append: false);
             // New columns appended at the END so existing spreadsheets/pivots
             // built on the original schema keep working.
-            writer.WriteLine("Mod,Category,IssueType,NpcFormKey,NpcName,AffectedPath,Shape,Nif,Referencer,Detail,Severity,ProvidedBy,Ignored");
+            writer.WriteLine("Mod,Category,IssueType,NpcFormKey,NpcName,AffectedPath,Shape,Nif,Referencer,Detail,Severity,ProvidedBy,Ignored,RecordPlugin");
             foreach (var (modName, result) in _lastResults.OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase))
             {
                 foreach (var issue in result.Issues)
@@ -1397,6 +1408,7 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
                         issue.Severity == ModIssueSeverity.Note ? "Note" : "Issue",
                         Csv(issue.SourceModName ?? ""),
                         ignored ? "yes" : "",
+                        Csv(issue.RecordPluginName ?? ""),
                     }));
                 }
             }

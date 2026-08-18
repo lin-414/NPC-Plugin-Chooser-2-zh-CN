@@ -312,6 +312,34 @@ public class NpcMeshResolver
     }
 
     /// <summary>
+    /// Resolves the NPC's record from EACH of the mod's plugins that carries it, in
+    /// CorrespondingModKeys order. The Mod Issues scanner grades the dark-face class per
+    /// plugin so a "scan the mod" verdict cannot silently depend on the user's current
+    /// per-NPC source-plugin pin (the WICO field case, 2026-08-17: the two plugins carry
+    /// wildly different head-part sets for the same NPC — one with zero parts — and only
+    /// one matches the shipped bake). No fallback of any kind: a plugin that doesn't
+    /// carry the record contributes nothing, and an empty result means no mod plugin
+    /// carries it (mesh-only pairing — callers keep the pinned/origin resolution).
+    /// </summary>
+    public IReadOnlyList<(ModKey Plugin, INpcGetter Record)> ResolveNpcRecordPerPlugin(
+        FormKey npcFormKey, ModSetting modSetting)
+    {
+        var results = new List<(ModKey, INpcGetter)>();
+        var folderNames = modSetting.CorrespondingFolderPaths.ToHashSet();
+        var link = npcFormKey.ToLink<INpcGetter>();
+        foreach (var modKey in modSetting.CorrespondingModKeys)
+        {
+            if (_recordHandler.TryGetRecordGetterFromMod(link, modKey, folderNames,
+                    RecordHandler.RecordLookupFallBack.None, out var rec) &&
+                rec is INpcGetter npcRec)
+            {
+                results.Add((modKey, npcRec));
+            }
+        }
+        return results;
+    }
+
+    /// <summary>
     /// Convenience entry point that consults the user's active appearance-mod
     /// selection (via <see cref="NpcConsistencyProvider"/>) and builds a
     /// <see cref="NpcResolutionContext"/> automatically. When no selection is

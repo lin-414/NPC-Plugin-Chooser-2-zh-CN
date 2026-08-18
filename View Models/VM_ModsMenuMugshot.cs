@@ -1058,6 +1058,11 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
     // separately and re-merged after every rebuild of the notification text.
     private string? _scanIssueOverlayText;
 
+    /// <summary>Mod Issues tab only: the scanned mod's plugin(s) whose record
+    /// verdicts hit this NPC, shown as the caption's top line (multi-plugin mods;
+    /// empty hides the line). Set once at tile creation, before display.</summary>
+    [Reactive] public string ScanRecordPluginText { get; set; } = string.Empty;
+
     /// <summary>Overlays scan-detected issue text onto the missing-asset badge.
     /// Persists across the tile's own metadata refreshes and deliberately
     /// ignores the ShowMissingNpcAssetsIcon display gate — on the Mod Issues

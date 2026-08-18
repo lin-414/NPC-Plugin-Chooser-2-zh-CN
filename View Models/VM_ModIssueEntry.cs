@@ -128,6 +128,10 @@ public class VM_ModIssueEntry : ReactiveObject
                 {
                     sb.Append(" [from ").Append(issue.SourceModName).Append(']');
                 }
+                if (!string.IsNullOrEmpty(issue.RecordPluginName))
+                {
+                    sb.Append(" [record: ").Append(issue.RecordPluginName).Append(']');
+                }
                 if (issue.Type == ModIssueType.DarkFaceMismatch && !string.IsNullOrEmpty(issue.Detail))
                 {
                     sb.Append("\n   ").Append(issue.Detail.Replace("\n", "\n   "));

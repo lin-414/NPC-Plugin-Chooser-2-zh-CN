@@ -335,9 +335,12 @@ public sealed class ModIssueScanner
         void AddIssue(ModIssueType type, string affectedPath, string? nifPath = null,
             string? shapeName = null, string? referencer = null, string? detail = null,
             bool isOutfit = false, ModIssueSeverity severity = ModIssueSeverity.Issue,
-            string? sourceMod = null)
+            string? sourceMod = null, string? recordPlugin = null)
         {
-            if (!seen.Add($"{type}|{nifPath}|{shapeName}|{affectedPath}")) return;
+            // recordPlugin joins the dedupe key: per-plugin dark-face verdicts share
+            // one AffectedPath (the FaceGen NIF), and the second variant's row must
+            // not be swallowed as a duplicate of the first.
+            if (!seen.Add($"{type}|{nifPath}|{shapeName}|{affectedPath}|{recordPlugin}")) return;
             issues.Add(new ModIssue
             {
                 Type = type,
@@ -351,6 +354,7 @@ public sealed class ModIssueScanner
                 IsOutfitIssue = isOutfit,
                 Severity = severity,
                 SourceModName = sourceMod,
+                RecordPluginName = recordPlugin,
             });
         }
 
@@ -569,50 +573,86 @@ public sealed class ModIssueScanner
             // Dark-face class: records vs. the baked FaceGen shapes. Resolution is
             // Origin-scoped (mod plugins → the FormKey's defining plugin), so the
             // verdict describes THIS mod's own data, independent of the load order.
+            // Multi-plugin mods grade PER PLUGIN record — the WICO field case
+            // (2026-08-17): the two plugins carry different head-part sets for the
+            // same NPC and only one matches the shipped bake, so a single verdict
+            // would silently follow the user's per-NPC source-plugin pin. Head
+            // parts/races still resolve through the shared mod-wide scope: the
+            // record is the variable under test, not the part definitions.
             if (headDisk != null)
             {
                 try
                 {
-                    var analysis = _faceGenConsistency.Analyze(npc, resolveHeadPart, resolveRace, headDisk,
-                        edid => _headPartsByEditorId.TryGetValue(edid, out var hp) ? hp : null);
+                    var variants = BuildRecordVariants(npc, appearanceKey, mod, npcFromModPlugins);
 
-                    // Head parts from a plugin that resolves nowhere = a missing hard
-                    // dependency. One rollup row per absent plugin instead of folding
-                    // it into the dark-face wall of text — one absent plugin used to
-                    // produce thousands of DarkFaceMismatch rows across a mod.
-                    foreach (var group in analysis.UnresolvedHeadParts.GroupBy(fk => fk.ModKey))
-                    {
-                        AddIssue(ModIssueType.MissingHeadPartPlugin, group.Key.FileName.String,
-                            nifPath: paths.HeadMeshPath,
-                            detail: "This NPC's record uses head part(s) " +
-                                    string.Join(", ", group.Select(fk => fk.ToString())) +
-                                    " from a plugin that is not in this mod's folders and could not be resolved. " +
-                                    "The mod likely requires it (check the mod page's requirements); without it these NPCs dark-face in game.");
-                    }
+                    // Analyze every variant up front so a broken plugin's row can
+                    // point at a sibling plugin that grades clean (the repin remedy
+                    // the user otherwise discovers by hand).
+                    var graded = variants
+                        .Select(v => (Variant: v,
+                            Analysis: _faceGenConsistency.Analyze(v.Record, resolveHeadPart, resolveRace, headDisk,
+                                edid => _headPartsByEditorId.TryGetValue(edid, out var hp) ? hp : null)))
+                        .ToList();
 
-                    if (analysis.MissingBakedShapes.Count > 0 || analysis.NullHeadPartLinks > 0)
+                    var cleanLabels = graded
+                        .Where(g => g.Analysis.MissingBakedShapes.Count == 0 &&
+                                    g.Analysis.NullHeadPartLinks == 0 &&
+                                    g.Analysis.UnresolvedHeadParts.Count == 0)
+                        .Select(g => g.Variant.Label)
+                        .Where(l => !string.IsNullOrEmpty(l))
+                        .ToList();
+
+                    foreach (var (variant, analysis) in graded)
                     {
-                        // Traits-inert file (SOGS field specimen): the appearance hop used for
-                        // RENDERING is Winner-scoped and can follow a load-order override that
-                        // strips the vanilla Traits template — but in the mod's OWN context the
-                        // template stands, the raw engine renders the terminus's face, and the
-                        // graded file at this NPC's own path is never loaded. Note, not Issue:
-                        // whether the file ever matters is decided by this app's template
-                        // handling at patch time, and Validate Output checks the real output.
-                        bool traitsInert = appearanceKey.Equals(npcKey) &&
-                                           _resolver.KeepsTraitsTemplateInModScope(npcKey, mod);
-                        AddIssue(ModIssueType.DarkFaceMismatch, faceGenMeshRel,
-                            nifPath: paths.HeadMeshPath,
-                            severity: traitsInert ? ModIssueSeverity.Note : ModIssueSeverity.Issue,
-                            detail: (traitsInert
-                                        ? "In the mod's own context this NPC keeps the Traits template flag, so the " +
-                                          "unpatched engine renders its template's face and never loads this file — " +
-                                          "the mismatch below cannot show in game unless a patch or another plugin " +
-                                          "removes the template.\n"
-                                        : string.Empty) +
-                                    analysis.BuildReason(
-                                        scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod,
-                                        subjectSuppliesRecord: npcFromModPlugins));
+                        // Head parts from a plugin that resolves nowhere = a missing hard
+                        // dependency. One rollup row per absent plugin instead of folding
+                        // it into the dark-face wall of text — one absent plugin used to
+                        // produce thousands of DarkFaceMismatch rows across a mod.
+                        foreach (var group in analysis.UnresolvedHeadParts.GroupBy(fk => fk.ModKey))
+                        {
+                            AddIssue(ModIssueType.MissingHeadPartPlugin, group.Key.FileName.String,
+                                nifPath: paths.HeadMeshPath,
+                                recordPlugin: variant.Label,
+                                detail: "This NPC's record uses head part(s) " +
+                                        string.Join(", ", group.Select(fk => fk.ToString())) +
+                                        " from a plugin that is not in this mod's folders and could not be resolved. " +
+                                        "The mod likely requires it (check the mod page's requirements); without it these NPCs dark-face in game.");
+                        }
+
+                        if (analysis.MissingBakedShapes.Count > 0 || analysis.NullHeadPartLinks > 0)
+                        {
+                            // Traits-inert file (SOGS field specimen): the appearance hop used for
+                            // RENDERING is Winner-scoped and can follow a load-order override that
+                            // strips the vanilla Traits template — but in the mod's OWN context the
+                            // template stands, the raw engine renders the terminus's face, and the
+                            // graded file at this NPC's own path is never loaded. Note, not Issue:
+                            // whether the file ever matters is decided by this app's template
+                            // handling at patch time, and Validate Output checks the real output.
+                            // Evaluated per VARIANT: one plugin can keep the template while
+                            // another strips it.
+                            bool traitsInert = appearanceKey.Equals(npcKey) && variant.KeepsTraitsTemplate;
+
+                            string repinRemedy = variant.Label != null && cleanLabels.Count > 0
+                                ? $"\nPlugin '{string.Join("', '", cleanLabels)}' in this same mod does not have " +
+                                  "this problem for this NPC — selecting it as the NPC's source plugin (right-click " +
+                                  "the NPC's mugshot in the Mods tab) avoids the bug."
+                                : string.Empty;
+
+                            AddIssue(ModIssueType.DarkFaceMismatch, faceGenMeshRel,
+                                nifPath: paths.HeadMeshPath,
+                                recordPlugin: variant.Label,
+                                severity: traitsInert ? ModIssueSeverity.Note : ModIssueSeverity.Issue,
+                                detail: (traitsInert
+                                            ? "In the mod's own context this NPC keeps the Traits template flag, so the " +
+                                              "unpatched engine renders its template's face and never loads this file — " +
+                                              "the mismatch below cannot show in game unless a patch or another plugin " +
+                                              "removes the template.\n"
+                                            : string.Empty) +
+                                        analysis.BuildReason(
+                                            scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod,
+                                            subjectSuppliesRecord: variant.SubjectSuppliesRecord) +
+                                        repinRemedy);
+                        }
                     }
                 }
                 catch
@@ -645,7 +685,85 @@ public sealed class ModIssueScanner
 
     private delegate void AddIssueDelegate(ModIssueType type, string affectedPath, string? nifPath = null,
         string? shapeName = null, string? referencer = null, string? detail = null, bool isOutfit = false,
-        ModIssueSeverity severity = ModIssueSeverity.Issue, string? sourceMod = null);
+        ModIssueSeverity severity = ModIssueSeverity.Issue, string? sourceMod = null, string? recordPlugin = null);
+
+    /// <summary>One dark-face grading target: a record and the plugin(s) within the
+    /// scanned mod that carry it. Label is null for the single-variant case (a
+    /// single-plugin mod, or no mod plugin carries the record and the pinned/origin
+    /// resolution stands in) — those rows stay untagged, the pre-v9 presentation.</summary>
+    private sealed record RecordVariant(INpcGetter Record, string? Label,
+        bool SubjectSuppliesRecord, bool KeepsTraitsTemplate);
+
+    private static bool KeepsTraitsTemplate(INpcGetter npc) =>
+        npc.Configuration.TemplateFlags.HasFlag(NpcConfiguration.TemplateFlag.Traits) &&
+        !npc.Template.IsNull;
+
+    /// <summary>The dark-face grading targets for one NPC. Multi-plugin mods yield
+    /// one variant per DISTINCT record signature among the plugins carrying the
+    /// record (identical records collapse, labeled with every carrier); otherwise
+    /// the already-resolved pinned/origin record is the single unlabeled variant.</summary>
+    private List<RecordVariant> BuildRecordVariants(INpcGetter pinnedNpc, FormKey appearanceKey,
+        ModSetting mod, bool pinnedFromModPlugins)
+    {
+        if (mod.CorrespondingModKeys.Count > 1)
+        {
+            var perPlugin = _resolver.ResolveNpcRecordPerPlugin(appearanceKey, mod);
+            if (perPlugin.Count > 0)
+            {
+                return GroupPluginRecordsBySignature(perPlugin)
+                    .Select(g => new RecordVariant(g.Record, g.Label,
+                        SubjectSuppliesRecord: true, KeepsTraitsTemplate(g.Record)))
+                    .ToList();
+            }
+        }
+
+        return new List<RecordVariant>
+        {
+            new(pinnedNpc, Label: null, pinnedFromModPlugins, KeepsTraitsTemplate(pinnedNpc)),
+        };
+    }
+
+    /// <summary>Collapses per-plugin records to one entry per distinct dark-face
+    /// signature, preserving plugin order; the label joins every carrier's filename
+    /// ("A.esp, B.esp") so identical records produce one row instead of N.</summary>
+    internal static List<(INpcGetter Record, string Label)> GroupPluginRecordsBySignature(
+        IReadOnlyList<(ModKey Plugin, INpcGetter Record)> perPlugin)
+    {
+        var order = new List<string>();
+        var groups = new Dictionary<string, (INpcGetter Record, List<string> Plugins)>(StringComparer.Ordinal);
+        foreach (var (plugin, record) in perPlugin)
+        {
+            var sig = NpcDarkFaceSignature(record);
+            if (groups.TryGetValue(sig, out var existing))
+            {
+                existing.Plugins.Add(plugin.FileName.String);
+            }
+            else
+            {
+                groups[sig] = (record, new List<string> { plugin.FileName.String });
+                order.Add(sig);
+            }
+        }
+        return order
+            .Select(sig => (groups[sig].Record, string.Join(", ", groups[sig].Plugins)))
+            .ToList();
+    }
+
+    /// <summary>Equality key for per-plugin dark-face grading: two plugin records
+    /// with the same signature produce the same verdict, so they collapse to one
+    /// labeled row. Covers exactly the analyzer's record-side inputs: head parts IN
+    /// ORDER (the singular-slot rule is first-listed-wins), race, sex, and the
+    /// Traits-template state (the inert demotion).</summary>
+    internal static string NpcDarkFaceSignature(INpcGetter npc)
+    {
+        var parts = npc.HeadParts != null
+            ? string.Join("|", npc.HeadParts.Select(hp => hp.FormKey.ToString()))
+            : string.Empty;
+        return parts +
+               "§" + npc.Race.FormKey +
+               "§" + (Auxilliary.IsFemale(npc) ? 'F' : 'M') +
+               "§" + (KeepsTraitsTemplate(npc) ? 'T' : '-');
+    }
 
     private void CheckMesh(ModSetting scannedMod, string? gamePath, string referencer,
         bool allowLoadOrderFallback, bool isOutfit, bool checkWeightSibling,

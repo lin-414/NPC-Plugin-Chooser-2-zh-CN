@@ -346,8 +346,27 @@
 
                                         <Border VerticalAlignment="Bottom" HorizontalAlignment="Stretch" Padding="3,1"
                                                 Background="{DynamicResource MugshotCaptionBackground}">
-                                            <TextBlock Text="{Binding NpcDisplayName}" Foreground="{DynamicResource MugshotCaptionForeground}"
-                                                       FontSize="10" TextTrimming="CharacterEllipsis" HorizontalAlignment="Center"/>
+                                            <StackPanel>
+                                                <!-- Multi-plugin mods: which of the mod's plugins the
+                                                     record verdict(s) came from; hidden when empty. -->
+                                                <TextBlock Text="{Binding ScanRecordPluginText}"
+                                                           ToolTip="{Binding ScanRecordPluginText}"
+                                                           Foreground="{DynamicResource MugshotCaptionForeground}"
+                                                           FontSize="9" FontStyle="Italic"
+                                                           TextTrimming="CharacterEllipsis" HorizontalAlignment="Center">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding ScanRecordPluginText}" Value="">
+                                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
+                                                <TextBlock Text="{Binding NpcDisplayName}" Foreground="{DynamicResource MugshotCaptionForeground}"
+                                                           FontSize="10" TextTrimming="CharacterEllipsis" HorizontalAlignment="Center"/>
+                                            </StackPanel>
                                         </Border>
 
                                         <!-- Missing Asset Indicator (Top-Center): on this tab the tooltip
@@ -526,6 +545,10 @@
                             <DataGridTextColumn Header="NPCs" Binding="{Binding NpcCount}" Width="Auto"/>
                             <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="Auto"/>
                             <DataGridTextColumn Header="Issue" Binding="{Binding TypeDisplay}" Width="Auto"/>
+                            <!-- Which of the scanned mod's plugins the record verdict came
+                                 from (multi-plugin mods only; empty elsewhere). -->
+                            <DataGridTextColumn Header="Plugin" Binding="{Binding Plugin}" Width="Auto"
+                                                ElementStyle="{StaticResource WrappingCellText}"/>
                             <DataGridTextColumn Header="Missing / Affected Path" Binding="{Binding AffectedPath}" Width="2*"
                                                 ElementStyle="{StaticResource WrappingCellText}"/>
                             <DataGridTextColumn Header="Where" Binding="{Binding Location}" Width="*"

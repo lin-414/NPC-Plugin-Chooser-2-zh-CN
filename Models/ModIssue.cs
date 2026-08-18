@@ -113,6 +113,16 @@ namespace NPC_Plugin_Chooser_2.Models
         /// not the appearance replacer being scanned). Null when the provider is
         /// the scanned mod itself or could not be attributed.</summary>
         public string? SourceModName { get; set; }
+
+        /// <summary>For record-graded issues (the dark-face class) in MULTI-plugin
+        /// mods: the plugin filename(s) WITHIN the scanned mod whose record produced
+        /// this verdict — plugins with identical records collapse to one row labeled
+        /// with every carrier ("A.esp, B.esp"). Null for single-plugin mods, for
+        /// file-side issues (which don't depend on the record), and for records
+        /// supplied by the origin fallback — those rows render untagged, exactly the
+        /// pre-v9 presentation. Distinct from <see cref="SourceModName"/>, which
+        /// attributes a foreign INSTALLED mod ("Provided by").</summary>
+        public string? RecordPluginName { get; set; }
     }
 
     /// <summary>
@@ -248,7 +258,14 @@ namespace NPC_Plugin_Chooser_2.Models
         //     "_1bit" beard-twin convention) is engine-inert and no longer
         //     produces a row (MQ304Ulfric / Men of Winter false positive,
         //     in-game verified 2026-08-17).
-        public const int CurrentVersion = 8;
+        // v9: multi-plugin mods grade the dark-face class PER PLUGIN record
+        //     (identical records collapse to one row labeled with every
+        //     carrier; ModIssue.RecordPluginName), so the verdict no longer
+        //     silently follows the user's per-NPC source-plugin pin — the
+        //     WICO field case: the two plugins carry different head-part
+        //     sets for the same NPC and only one matches the shipped bake.
+        //     Rows whose sibling plugin grades clean say so (repin remedy).
+        public const int CurrentVersion = 9;
 
         public int Version { get; set; } = CurrentVersion;
 
