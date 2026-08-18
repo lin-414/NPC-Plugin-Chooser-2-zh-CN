@@ -1,0 +1,101 @@
+﻿<Window x:Class="NPC_Plugin_Chooser_2.Views.MasterSelectionWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:themes="clr-namespace:NPC_Plugin_Chooser_2.Themes"
+        xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
+        mc:Ignorable="d"
+        Title="{l:Loc selectMastersToAnalyze}"
+        Height="450" Width="500"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="CanResizeWithGrip"
+        Style="{StaticResource ThemedWindowStyle}">
+
+    <i:Interaction.Behaviors>
+        <themes:TitleBarThemingBehavior />
+    </i:Interaction.Behaviors>
+
+    <Grid Margin="15">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" 
+                   Text="{l:Loc analyzingMastersFor}" 
+                   FontWeight="SemiBold"
+                   Margin="0,0,0,5"/>
+        
+        <TextBlock Grid.Row="1" 
+                   x:Name="TargetPluginTextBlock"
+                   Text="{l:Loc pluginName}"
+                   Foreground="{DynamicResource PrimaryForeground}"
+                   FontWeight="Bold"
+                   TextWrapping="Wrap"
+                   Margin="0,0,0,15"/>
+
+        <GroupBox Grid.Row="2" Header="{l:Loc selectMastersToAnalyze}" Margin="0,0,0,10">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                
+                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="5,5,5,5">
+                    <Button Content="{l:Loc selectAll}" 
+                            x:Name="SelectAllButton"
+                            Click="SelectAllButton_Click"
+                            Padding="10,3" 
+                            Margin="0,0,5,0"/>
+                    <Button Content="{l:Loc selectNone}" 
+                            x:Name="SelectNoneButton"
+                            Click="SelectNoneButton_Click"
+                            Padding="10,3"/>
+                </StackPanel>
+                
+                <ListBox Grid.Row="1" 
+                         x:Name="MastersListBox"
+                         SelectionMode="Multiple"
+                         ScrollViewer.VerticalScrollBarVisibility="Auto">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <CheckBox Content="{Binding FileName}" 
+                                      IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                      Margin="5,3"/>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </Grid>
+        </GroupBox>
+
+        <TextBlock Grid.Row="3" 
+                   x:Name="StatusTextBlock"
+                   Text="{l:Loc selectTheMastersYou}"
+                   TextWrapping="Wrap"
+                   Foreground="{DynamicResource DisabledForeground}"
+                   Margin="0,0,0,10"/>
+
+        <StackPanel Grid.Row="4" 
+                    Orientation="Horizontal" 
+                    HorizontalAlignment="Right">
+            <Button Content="{l:Loc analyze}" 
+                    x:Name="AnalyzeButton"
+                    Click="AnalyzeButton_Click"
+                    IsDefault="True"
+                    MinWidth="80" 
+                    Padding="15,5" 
+                    Margin="0,0,10,0"/>
+            <Button Content="{l:Loc cancel}" 
+                    x:Name="CancelButton"
+                    Click="CancelButton_Click"
+                    IsCancel="True"
+                    MinWidth="80" 
+                    Padding="15,5"/>
+        </StackPanel>
+    </Grid>
+</Window>

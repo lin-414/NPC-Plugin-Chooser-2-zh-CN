@@ -1,0 +1,941 @@
+﻿using System.IO;
+using Mutagen.Bethesda;
+using Mutagen.Bethesda.Archives;
+using Mutagen.Bethesda.Plugins;
+using Mutagen.Bethesda.Skyrim;
+using Noggog;
+using NPC_Plugin_Chooser_2.Models;
+using NPC_Plugin_Chooser_2.View_Models;
+
+namespace NPC_Plugin_Chooser_2.BackEnd;
+
+public class BsaHandler : OptionalUIModule
+{
+    private Dictionary<ModKey, Dictionary<string, HashSet<string>>> _bsaContents = new();
+    private readonly object _bsaContentsLock = new();
+
+    /// <summary>
+    /// Cache entry for an open <see cref="IArchiveReader"/>. <see cref="RefCount"/>
+    /// tracks how many logical "openers" hold the reader so that
+    /// <see cref="UnloadReadersInFolders"/> only disposes when the last opener
+    /// releases. Without this, <see cref="PortraitCreator.FindNpcNifPath"/>'s
+    /// open/extract/unload sequence could yank a reader that an in-flight
+    /// preview render still needs, producing a stochastic BSA-CACHE-MISS on
+    /// the next extraction (head NIF missing, etc.).
+    /// </summary>
+    private sealed class ReaderEntry
+    {
+        public IArchiveReader Reader = null!;
+        public int RefCount;
+    }
+
+    private Dictionary<string, ReaderEntry> _openBsaArchiveReaders =
+        new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _readersLock = new();
+
+    private readonly EnvironmentStateProvider _environmentStateProvider;
+
+    public BsaHandler(EnvironmentStateProvider environmentStateProvider)
+    {
+        _environmentStateProvider = environmentStateProvider;
+    }
+
+    /// <summary>
+    /// Hard-wipe: dispose every cached reader and clear the cache regardless of
+    /// outstanding refcounts. Intended for app shutdown ONLY. Never call this
+    /// mid-session: the CharacterViewer BSA adapter opens its readers once at
+    /// startup and latches (<c>EnsureAllArchivesOpened</c> never re-runs), so a
+    /// mid-session wipe leaves every renderer BSA extraction failing with
+    /// BSA-CACHE-MISS — and the renderer's asset resolver caches those failures
+    /// as NotFound for the rest of the session (headless mugshots/previews).
+    /// Callers that opened readers themselves should release exactly what they
+    /// opened via <see cref="ReleaseReaders"/> (paths returned by
+    /// <see cref="OpenBsaReadersFor"/>) or <see cref="UnloadReadersInFolders"/>.
+    /// </summary>
+    public void UnloadAllBsaReaders()
+    {
+        lock (_readersLock)
+        {
+            foreach (var entry in _openBsaArchiveReaders.Values)
+            {
+                (entry.Reader as IDisposable)?.Dispose();
+            }
+            _openBsaArchiveReaders.Clear();
+        }
+        AppendLog("Unloaded all cached BSA readers.");
+    }
+
+    /// <summary>
+    /// Refcount-aware release: decrements the refcount of every cached reader
+    /// whose BSA path lives under one of <paramref name="folderPaths"/>, and
+    /// only disposes+removes the entry when its refcount reaches zero. Pairs
+    /// with <see cref="OpenBsaReadersFor"/> / <see cref="OpenBsaArchiveReaders"/>
+    /// (with <c>cacheReaders=true</c>) which increment on each open call.
+    /// </summary>
+    public void UnloadReadersInFolders(IEnumerable<string> folderPaths)
+    {
+        var folderList = folderPaths as IList<string> ?? folderPaths.ToList();
+        lock (_readersLock)
+        {
+            var toRelease = new List<string>();
+            foreach (var bsaPath in _openBsaArchiveReaders.Keys)
+            {
+                foreach (var folderPath in folderList)
+                {
+                    if (bsaPath.StartsWith(folderPath, StringComparison.InvariantCultureIgnoreCase))
+                    {
+                        toRelease.Add(bsaPath);
+                        break;
+                    }
+                }
+            }
+
+            foreach (var bsaPath in toRelease)
+            {
+                ReleaseReader_NoLock(bsaPath);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Refcount-aware release of specific BSA paths, one decrement per list
+    /// occurrence. Pair with the list returned by
+    /// <see cref="OpenBsaReadersFor"/> so a caller releases exactly the
+    /// refs it took — unlike <see cref="UnloadAllBsaReaders"/>, this can
+    /// never dispose a reader another consumer (e.g. the CharacterViewer
+    /// BSA adapter) still holds.
+    /// </summary>
+    public void ReleaseReaders(IEnumerable<string> bsaPaths)
+    {
+        lock (_readersLock)
+        {
+            foreach (var bsaPath in bsaPaths)
+            {
+                ReleaseReader_NoLock(bsaPath);
+            }
+        }
+    }
+
+    /// <summary>Caller MUST hold <see cref="_readersLock"/>.</summary>
+    private void ReleaseReader_NoLock(string bsaPath)
+    {
+        if (!_openBsaArchiveReaders.TryGetValue(bsaPath, out var entry))
+        {
+            return;
+        }
+        entry.RefCount--;
+        if (entry.RefCount <= 0)
+        {
+            (entry.Reader as IDisposable)?.Dispose();
+            _openBsaArchiveReaders.Remove(bsaPath);
+        }
+    }
+    
+    public HashSet<string> GetBsaPathsForPluginInDir(ModKey modKey, string directory, GameRelease gameRelease)
+    {
+        if (directory.Equals(_environmentStateProvider.DataFolderPath, StringComparison.OrdinalIgnoreCase))
+        {
+            // doesn't require re-enumerating directory
+            return PluginArchiveIndex.GetOwnedBsaFiles(modKey, directory);
+        }
+        
+        try
+        {
+            // Important: This should be the only call to Archive.GetApplicableArchivePaths in the entire application
+            return Archive.GetApplicableArchivePaths(gameRelease, directory, modKey)
+                .Select(x => x.Path)
+                .ToHashSet();
+        }
+        catch (InvalidOperationException) // Archive.GetApplicableArchivePaths is prone to throwing this on some plugins. Cause unclear.
+        {
+            return PluginArchiveIndex.GetOwnedBsaFiles(modKey, directory);
+        }
+    }
+
+    public HashSet<string> GetBsaPathsForPluginInDirs(ModKey modKey, IEnumerable<string> directories,
+        GameRelease gameRelease)
+    {
+        HashSet<string> bsaPaths = new();
+        foreach (var directoryPath in directories)
+        {
+            bsaPaths.UnionWith(GetBsaPathsForPluginInDir(modKey, directoryPath, gameRelease));
+        }
+        return bsaPaths;
+    }
+
+    public Dictionary<ModKey, HashSet<string>> GetBsaPathsForPluginsInDirs(IEnumerable<ModKey> modKeys,
+        IEnumerable<string> directories, GameRelease gameRelease)
+    {
+        Dictionary<ModKey, HashSet<string>> bsaPaths = new();
+        foreach (var modKey in modKeys.Distinct())
+        {
+            bsaPaths.Add(modKey, GetBsaPathsForPluginInDirs(modKey, directories, gameRelease));
+        }
+        return bsaPaths;
+    }
+    
+    /// <summary>
+    /// Extracts a single file from a specified BSA archive using a cached reader.
+    /// On failure the returned tuple's <c>error</c> carries a diagnostic string
+    /// (BSA-cache miss, file-not-found in archive, or the underlying exception
+    /// stack from the extraction). Callers that only need the success/failure
+    /// boolean can ignore the second tuple element.
+    /// </summary>
+    public Task<(bool ok, string? error)> ExtractFileAsync(string bsaPath, string relativePath, string destinationPath)
+    {
+        return Task.Run<(bool ok, string? error)>(() =>
+        {
+            IArchiveReader? bsaReader;
+            lock (_readersLock)
+            {
+                _openBsaArchiveReaders.TryGetValue(bsaPath, out var entry);
+                bsaReader = entry?.Reader;
+            }
+
+            // Recovery path: the reader wasn't pre-cached (e.g. a hard unload
+            // dropped it mid-session while a longer-lived consumer — the
+            // CharacterViewer BSA adapter — still expected it). The path index
+            // that led the caller here already vouched for the file, so open a
+            // reader on demand rather than failing; a failure would be cached
+            // as NotFound by the renderer's asset resolver for the rest of the
+            // session (headless mugshots). Logged loudly because steady-state
+            // code should never hit this — it signals a refcount/lifetime bug.
+            if (bsaReader == null)
+            {
+                AppendLog($"BSA-CACHE-MISS: The reader for {bsaPath} was not pre-cached; opening on demand.", false, true);
+                if (!File.Exists(bsaPath))
+                {
+                    string msg = $"BSA-CACHE-MISS: {bsaPath} does not exist on disk; cannot extract {relativePath}.";
+                    AppendLog(msg, true, true);
+                    return (false, msg);
+                }
+                IArchiveReader? fresh = null;
+                try
+                {
+                    fresh = Archive.CreateReader(_environmentStateProvider.SkyrimVersion.ToGameRelease(), bsaPath);
+                }
+                catch (Exception ex)
+                {
+                    string msg = $"BSA-CACHE-MISS: failed to open {bsaPath} on demand: {ex.Message}";
+                    AppendLog(msg, true, true);
+                    return (false, msg);
+                }
+                if (fresh == null)
+                {
+                    string msg = $"BSA-CACHE-MISS: on-demand reader for {bsaPath} is null.";
+                    AppendLog(msg, true, true);
+                    return (false, msg);
+                }
+                lock (_readersLock)
+                {
+                    if (_openBsaArchiveReaders.TryGetValue(bsaPath, out var raced))
+                    {
+                        // Another thread re-cached it while we were opening ours.
+                        (fresh as IDisposable)?.Dispose();
+                        bsaReader = raced.Reader;
+                    }
+                    else
+                    {
+                        // Cache with refcount 1 so repeated extractions from the
+                        // same archive don't re-parse its file table. Nobody owns
+                        // this ref; it lives until the next full unload, same as
+                        // the CharacterViewer adapter's startup-opened readers.
+                        _openBsaArchiveReaders[bsaPath] = new ReaderEntry { Reader = fresh, RefCount = 1 };
+                        bsaReader = fresh;
+                    }
+                }
+            }
+
+            try
+            {
+                if (TryGetFileFromSingleReader(relativePath, bsaReader, out var archiveFile) && archiveFile != null)
+                {
+                    return ExtractFileFromBsa(archiveFile, destinationPath);
+                }
+                else
+                {
+                    string msg = $"Could not find {relativePath} within {bsaPath} for extraction.";
+                    AppendLog(msg, true, true);
+                    return (false, msg);
+                }
+            }
+            catch (Exception ex)
+            {
+                string stack = ExceptionLogger.GetExceptionStack(ex);
+                AppendLog($"Failed to read from cached BSA reader for {bsaPath}: {stack}", true, true);
+                return (false, $"Failed to read from cached BSA reader for {bsaPath}: {stack}");
+            }
+        });
+    }
+    
+    /// <summary>
+    /// Opens (or refcount-bumps) cached readers for every BSA owned by
+    /// <paramref name="modSetting"/>'s plugins at its folders. Returns the
+    /// BSA paths whose cached refcount this call incremented — pass that
+    /// list to <see cref="ReleaseReaders"/> for an exactly-balanced release.
+    /// </summary>
+    public List<string> OpenBsaReadersFor(ModSetting modSetting, GameRelease gameRelease)
+    {
+        var bsaDict = GetBsaPathsForPluginsInDirs(modSetting.CorrespondingModKeys, modSetting.CorrespondingFolderPaths, gameRelease);
+
+        if (modSetting.DisplayName == VM_Mods.BaseGameModSettingName ||
+            modSetting.DisplayName == VM_Mods.CreationClubModsettingName)
+        {
+            foreach (var mk in modSetting.CorrespondingModKeys)
+            {
+               var entry = GetBsaPathsForPluginInDir(mk, _environmentStateProvider.DataFolderPath, gameRelease);
+               bsaDict.TryAdd(mk, entry);
+               if (!bsaDict[mk].Any())
+               {
+                   bsaDict[mk] = entry;
+               }
+            }
+        }
+
+        var opened = new List<string>();
+        foreach (var bsaPaths in bsaDict.Values)
+        {
+            // OpenBsaArchiveReaders only returns paths it actually cached
+            // (+1 refcount each); open failures are excluded, so releasing
+            // exactly this list can never underflow another owner's count.
+            opened.AddRange(OpenBsaArchiveReaders(bsaPaths, gameRelease, true).Keys);
+        }
+        return opened;
+    }
+    
+    public bool FileExists(string path, ModKey modKey, string bsaPath, bool convertSlashes = true)
+    {
+        if (convertSlashes)
+        {
+            path = path.Replace('/', '\\');
+        }
+        lock (_bsaContentsLock)
+        {
+            if (_bsaContents.ContainsKey(modKey) &&
+                _bsaContents[modKey].ContainsKey(bsaPath) &&
+                _bsaContents[modKey][bsaPath].Contains(path))
+            {
+                return true;
+            }
+            return false;
+        }
+    }
+
+    public bool FileExists(string path, ModKey modKey, out string? bsaPath, bool convertSlashes = true)
+    {
+        bsaPath = null;
+        if (convertSlashes)
+        {
+            path = path.Replace('/', '\\');
+        }
+
+        lock (_bsaContentsLock)
+        {
+            if (_bsaContents.TryGetValue(modKey, out var bsaFiles))
+            {
+                foreach (var entry in bsaFiles)
+                {
+                    if (entry.Value.Contains(path)) // This is now O(1)
+                    {
+                        bsaPath = entry.Key;
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+    }
+
+
+    public bool FileExists(string path, IEnumerable<ModKey> modKeys, out ModKey? modKey, out string? bsaPath, bool convertSlashes = true)
+    {
+        bsaPath = null;
+        modKey = null;
+        if (convertSlashes)
+        {
+            path = path.Replace('/', '\\');
+        }
+
+        lock (_bsaContentsLock)
+        {
+            foreach (var candidateModKey in modKeys)
+            {
+                if (_bsaContents.ContainsKey(candidateModKey))
+                {
+                    foreach (var entry in _bsaContents[candidateModKey])
+                    {
+                        if (entry.Value.Contains(path, StringComparer.OrdinalIgnoreCase))
+                        {
+                            bsaPath = entry.Key;
+                            modKey = candidateModKey;
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Every indexed archive that contains <paramref name="path"/>, as
+    /// (owning ModKey, BSA path) pairs. The <c>out</c>-style overloads above
+    /// stop at the first hit, which forces the caller to accept dictionary
+    /// enumeration order as the winner; this returns the full candidate set so
+    /// a caller can apply its own precedence rule (see
+    /// <see cref="CharacterViewerHost.Adapters.NpcChooserBsaProviderAdapter.TryLocateInBsa"/>,
+    /// which ranks by load order). Order of the returned list is unspecified —
+    /// rank it, don't index it.
+    /// </summary>
+    public IReadOnlyList<(ModKey ModKey, string BsaPath)> LocateAllInBsas(string path, bool convertSlashes = true)
+    {
+        if (convertSlashes)
+        {
+            path = path.Replace('/', '\\');
+        }
+
+        var matches = new List<(ModKey, string)>();
+        lock (_bsaContentsLock)
+        {
+            foreach (var modEntry in _bsaContents)
+            {
+                foreach (var archive in modEntry.Value)
+                {
+                    // The inner sets are built with OrdinalIgnoreCase, so this
+                    // is an O(1) case-insensitive probe (unlike the LINQ
+                    // Contains overload above, which is O(n) per archive).
+                    if (archive.Value.Contains(path))
+                    {
+                        matches.Add((modEntry.Key, archive.Key));
+                    }
+                }
+            }
+        }
+        return matches;
+    }
+
+    public bool TryGetFileFromReaders(string subpath, HashSet<IArchiveReader> bsaReaders, out IArchiveFile? file)
+    {
+        file = null;
+        if (bsaReaders == null || !bsaReaders.Any())
+        {
+            return false; // No readers to check
+        }
+
+        // Normalize path separators for BSA consistency if needed, depends on how paths are stored/compared
+        string normalizedSubpath = subpath.Replace('/', '\\');
+
+        foreach (var reader in bsaReaders)
+        {
+            // Use the existing TryGetFileFromSingleReader which presumably checks a single reader efficiently
+            if (TryGetFileFromSingleReader(normalizedSubpath, reader, out file)) // Assuming TryGetFileFromSingleReader exists from V1
+            {
+                return true; // Found it in this reader
+            }
+        }
+
+        return false; // Not found in any reader in this set
+    }
+    
+    public bool TryGetFileFromSingleReader(string subpath, IArchiveReader bsaReader, out IArchiveFile? file)
+    {
+        file = null;
+        // Use OrdinalIgnoreCase for path comparison in BSA lookups
+        var foundFile = bsaReader.Files.FirstOrDefault(candidate =>
+            candidate.Path.Equals(subpath, StringComparison.OrdinalIgnoreCase));
+        if (foundFile != null)
+        {
+            file = foundFile;
+            return true;
+        }
+
+        return false;
+    }
+    
+    public bool HaveFile(string subpath, HashSet<IArchiveReader> bsaReaders, out IArchiveFile? archiveFile)
+    {
+        foreach (var reader in bsaReaders)
+        {
+            if (TryGetFileFromSingleReader(subpath, reader, out archiveFile))
+            {
+                return true;
+            }
+        }
+
+        archiveFile = null;
+        return false;
+    }
+    
+    /// <summary>Marker prefix on <see cref="ExtractFileFromBsa"/> error strings whose cause was
+    /// the destination file being locked by another process, so callers can apply the same
+    /// deferred file-in-use handling the loose-copy path uses (verify at end of run instead of
+    /// treating the failure as immediately fatal).</summary>
+    public const string SharingViolationPrefix = "SHARING VIOLATION";
+
+    /// <summary>True when an IOException is a Win32 sharing/lock violation (file in use).</summary>
+    private static bool IsFileLockError(IOException ex)
+    {
+        int win32Code = ex.HResult & 0xFFFF;
+        return win32Code == 32 /* ERROR_SHARING_VIOLATION */ || win32Code == 33 /* ERROR_LOCK_VIOLATION */;
+    }
+
+    public (bool ok, string? error) ExtractFileFromBsa(IArchiveFile file, string destPath)
+    {
+        string? dirPath = Path.GetDirectoryName(destPath);
+        if (string.IsNullOrEmpty(dirPath)) // Also check for empty string
+        {
+            string msg = $"ERROR: Could not get directory path from destination '{destPath}'";
+            AppendLog(msg, true);
+            return (false, msg);
+        }
+
+        try
+        {
+            Directory.CreateDirectory(dirPath); // Ensure directory exists
+
+            // Get the stream from the archive file
+            using (Stream sourceStream = file.AsStream())
+            {
+                // Create the destination file stream
+                using (var destStream = File.Create(destPath))
+                {
+                    // Copy the contents from the source stream to the destination stream
+                    sourceStream.CopyTo(destStream);
+                }
+            }
+            return (true, null);
+        }
+        catch (IOException ioEx) when (IsFileLockError(ioEx))
+        {
+            // Destination locked by another process (mod manager, antivirus, a duplicate
+            // extraction). Usually benign — the file is typically already in place — so log
+            // without the error flag; callers defer judgment to end-of-run verification.
+            string msg = $"{SharingViolationPrefix} extracting BSA file: {file.Path} to {destPath}. Error: {ExceptionLogger.GetExceptionStack(ioEx)}";
+            AppendLog(msg, false, true);
+            return (false, msg);
+        }
+        catch (IOException ioEx) // Catch specific IO errors
+        {
+            string msg = $"IO ERROR extracting BSA file: {file.Path} to {destPath}. Error: {ExceptionLogger.GetExceptionStack(ioEx)}";
+            AppendLog(msg, true);
+            // Common issues: disk full, path too long
+            return (false, msg);
+        }
+        catch (UnauthorizedAccessException authEx) // Catch permission errors
+        {
+            string msg = $"ACCESS ERROR extracting BSA file: {file.Path} to {destPath}. Check permissions. Error: {ExceptionLogger.GetExceptionStack(authEx)}";
+            AppendLog(msg, true);
+            return (false, msg);
+        }
+        catch (Exception ex) // Catch any other unexpected errors
+        {
+            string msg = $"GENERAL ERROR extracting BSA file: {file.Path} to {destPath}. Error: {ExceptionLogger.GetExceptionStack(ex)}";
+            AppendLog(msg, true);
+            return (false, msg);
+        }
+    }
+
+    // Override for reading specific BSA files which are already assumed to exist.
+    // When cacheReaders=true, every successful open increments the cached
+    // entry's refcount — pair with UnloadReadersInFolders so transient users
+    // (PortraitCreator.FindNpcNifPath, etc.) don't yank readers out from
+    // under longer-lived users (CharacterViewer adapter's
+    // EnsureAllArchivesOpened).
+    public Dictionary<string, IArchiveReader> OpenBsaArchiveReaders(IEnumerable<string> bsaPaths, GameRelease gameRelease,
+        bool cacheReaders = false)
+    {
+        var readers = new Dictionary<string, IArchiveReader>();
+        foreach (var bsaPath in bsaPaths.Distinct())
+        {
+            if (cacheReaders)
+            {
+                lock (_readersLock)
+                {
+                    if (_openBsaArchiveReaders.TryGetValue(bsaPath, out var existing))
+                    {
+                        existing.RefCount++;
+                        readers.Add(bsaPath, existing.Reader);
+                        continue;
+                    }
+                    if (!File.Exists(bsaPath))
+                    {
+                        AppendLog($"ERROR opening archive '{bsaPath}': Expected file does not exist", true);
+                        continue;
+                    }
+                    AppendLog($"Loading BSA archive for {bsaPath}");
+                    var bsaReader = Archive.CreateReader(gameRelease, bsaPath);
+                    if (bsaReader == null)
+                    {
+                        AppendLog($"ERROR opening archive '{bsaPath}': Reader is null", true);
+                        continue;
+                    }
+                    _openBsaArchiveReaders[bsaPath] = new ReaderEntry { Reader = bsaReader, RefCount = 1 };
+                    readers.Add(bsaPath, bsaReader);
+                }
+            }
+            else
+            {
+                // Uncached path: read existing cache opportunistically (no
+                // refcount bump — these readers don't belong to us), otherwise
+                // open a one-shot reader the caller is responsible for.
+                lock (_readersLock)
+                {
+                    if (_openBsaArchiveReaders.TryGetValue(bsaPath, out var existing))
+                    {
+                        readers.Add(bsaPath, existing.Reader);
+                        continue;
+                    }
+                }
+                if (!File.Exists(bsaPath))
+                {
+                    AppendLog($"ERROR opening archive '{bsaPath}': Expected file does not exist", true);
+                    continue;
+                }
+                AppendLog($"Loading BSA archive for {bsaPath}");
+                var bsaReader = Archive.CreateReader(gameRelease, bsaPath);
+                if (bsaReader == null)
+                {
+                    AppendLog($"ERROR opening archive '{bsaPath}': Reader is null", true);
+                    continue;
+                }
+                readers.Add(bsaPath, bsaReader);
+            }
+        }
+
+        return readers;
+    }
+    
+    public bool CacheContainsModKey(ModKey modKey)
+    {
+        lock (_bsaContentsLock)
+        {
+            return _bsaContents.ContainsKey(modKey);
+        }
+    }
+
+    /// <summary>
+    /// Snapshot of every ModKey whose BSAs have been indexed via
+    /// <see cref="PopulateBsaContentPathsAsync"/> / <see cref="AddMissingModToCache"/>.
+    /// Used by the CharacterViewer BSA adapter to satisfy lookups that don't know
+    /// which mod a file belongs to.
+    /// </summary>
+    public IReadOnlyCollection<ModKey> GetIndexedModKeys()
+    {
+        lock (_bsaContentsLock)
+        {
+            return _bsaContents.Keys.ToList();
+        }
+    }
+
+    /// <summary>
+    /// Strict-scoped existence check: tests whether <paramref name="path"/>
+    /// exists inside any indexed BSA owned by <paramref name="modKey"/>
+    /// AND physically located under <paramref name="folderPath"/> (i.e.
+    /// <c>bsaPath.StartsWith(folderPath)</c> case-insensitively). Used by
+    /// the CharacterViewer renderer's per-mod-folder scope chain — the
+    /// "is this file in the mod's BSA at this folder" question that the
+    /// asset resolver asks for each scope in order.
+    /// </summary>
+    public bool FileExistsInArchiveAtFolder(string path, ModKey modKey, string folderPath, out string? bsaPath, bool convertSlashes = true)
+    {
+        bsaPath = null;
+        if (string.IsNullOrEmpty(folderPath)) return false;
+        if (convertSlashes) path = path.Replace('/', '\\');
+        lock (_bsaContentsLock)
+        {
+            if (!_bsaContents.TryGetValue(modKey, out var bsaFiles)) return false;
+            foreach (var entry in bsaFiles)
+            {
+                if (!entry.Key.StartsWith(folderPath, StringComparison.OrdinalIgnoreCase)) continue;
+                if (entry.Value.Contains(path))
+                {
+                    bsaPath = entry.Key;
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Snapshot of every BSA file path whose contents have been indexed —
+    /// the actual on-disk archive paths that <see cref="FileExists"/>
+    /// scans during a broadcast lookup. Deduped case-insensitively. Used
+    /// by the CharacterViewer BSA adapter to log exactly which archives
+    /// are being searched on each lookup, so the user can correlate a
+    /// missing-asset trace with the BSA inventory.
+    /// </summary>
+    public IReadOnlyCollection<string> GetIndexedBsaPaths()
+    {
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        lock (_bsaContentsLock)
+        {
+            foreach (var modEntry in _bsaContents.Values)
+            {
+                foreach (var bsaPath in modEntry.Keys)
+                {
+                    paths.Add(bsaPath);
+                }
+            }
+        }
+        return paths;
+    }
+    
+    public async Task AddMissingModToCache(ModSetting mod, GameRelease gameRelease)
+    {
+        BsaContentsDiag.Log($"AddMissingModToCache ENTER mod='{mod.DisplayName}' modKeys=[{string.Join(",", mod.CorrespondingModKeys.Select(k => k.FileName.String))}] folders=[{string.Join("|", mod.CorrespondingFolderPaths)}]");
+
+        // Always delegate to PopulateBsaContentPathsAsync. A modKey-presence
+        // short-circuit here is no longer sound: the index is keyed by plugin
+        // FILENAME, so a sibling mod shipping the same plugin name in a
+        // different folder may already have populated the modKey entry while
+        // THIS mod's own BSA (a different archive path) is still unindexed —
+        // skipping would leave it invisible to FileExistsInArchiveAtFolder.
+        // Delegation is cheap: PopulateBsaContentPathsAsync filters candidate
+        // archives per BSA path and only opens ones not yet indexed, so fully
+        // cached mods cost one directory scan and no archive I/O.
+        BsaContentsDiag.Log($"AddMissingModToCache delegating to PopulateBsaContentPathsAsync mod='{mod.DisplayName}'");
+        await PopulateBsaContentPathsAsync(new List<ModSetting>() {mod}, gameRelease, reinitializeCache: false);
+    }
+    
+    public async Task PopulateBsaContentPathsAsync(IEnumerable<ModSetting> mods, GameRelease gameRelease, bool cacheReaders = false, bool reinitializeCache = true)
+    {
+        if (reinitializeCache)
+        {
+            lock (_bsaContentsLock)
+            {
+                BsaContentsDiag.Log($"PopulateBsaContentPathsAsync reinitializeCache=TRUE — clearing _bsaContents (prior count={_bsaContents.Count})");
+                _bsaContents.Clear();
+            }
+        }
+
+        // Snapshot DataFolderPath once so the diag log makes the empty-vs-set
+        // value at the moment of the call obvious. Otherwise we have to
+        // correlate with timestamps in the env trace.
+        string dfp = _environmentStateProvider.DataFolderPath.ToString() ?? "";
+        BsaContentsDiag.Log($"PopulateBsaContentPathsAsync ENTER modsToProcess={mods.Count()} reinit={reinitializeCache} envDataFolderPath=[{dfp}] envDataFolderExists={(string.IsNullOrWhiteSpace(dfp) ? "(empty)" : Directory.Exists(dfp).ToString())}");
+
+        // Use Task.Run to offload the blocking I/O of reading BSA headers.
+        await Task.Run(() =>
+        {
+            foreach (var mod in mods)
+            {
+                var pathsToSearch = new HashSet<string>(mod.CorrespondingFolderPaths);
+                if (mod.DisplayName == VM_Mods.BaseGameModSettingName ||
+                    mod.DisplayName == VM_Mods.CreationClubModsettingName)
+                {
+                    pathsToSearch.Add(_environmentStateProvider.DataFolderPath);
+                }
+                BsaContentsDiag.Log($"  processing mod='{mod.DisplayName}' pathsToSearch=[{string.Join("|", pathsToSearch)}]");
+
+                var bsaDict = GetBsaPathsForPluginsInDirs(mod.CorrespondingModKeys, pathsToSearch, gameRelease);
+                foreach (var modkey in mod.CorrespondingModKeys)
+                {
+                    var bsaPaths = bsaDict[modkey];
+
+                    // Pre-I/O filter under the lock: only open archives not already
+                    // indexed under this modkey. The index outer key is the plugin
+                    // FILENAME (ModKey), and multiple NPC2 mods can ship the same
+                    // plugin name in DIFFERENT folders, each owning its own BSA with
+                    // different content. The previous first-content-wins commit
+                    // stored only the first variant's archives and skipped every
+                    // sibling, leaving their BSAs permanently invisible — folder-
+                    // scoped lookups (FileExistsInArchiveAtFolder) returned false
+                    // and folder-blind lookups served the wrong variant's archive.
+                    // Per-archive merging (full BSA path = inner key, unique per
+                    // folder) keeps the shared-plugin fast path — already-indexed
+                    // archives are filtered out here so nothing is re-opened —
+                    // while making every variant's BSA reachable.
+                    List<string> newBsaPaths;
+                    lock (_bsaContentsLock)
+                    {
+                        _bsaContents.TryGetValue(modkey, out var existing);
+                        newBsaPaths = bsaPaths
+                            .Where(p => existing == null || !existing.ContainsKey(p))
+                            .ToList();
+                        if (newBsaPaths.Count == 0 && existing != null)
+                        {
+                            int existingFileCount = existing.Values.Sum(s => s.Count);
+                            BsaContentsDiag.Log($"    SKIP modkey={modkey.FileName.String} — all {bsaPaths.Count} candidate BSA(s) already indexed (bsaCount={existing.Count}, fileCount={existingFileCount})");
+                            continue;
+                        }
+                    }
+
+                    var filesInArchives = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+                    var readers = OpenBsaArchiveReaders(newBsaPaths, gameRelease, cacheReaders);
+                    foreach (var entry in readers)
+                    {
+                        var (bsaPath, reader) = entry;
+                        var containedFiles = new HashSet<string>(reader.Files.Select(x => x.Path),
+                            StringComparer.OrdinalIgnoreCase);
+                        filesInArchives.Add(bsaPath, containedFiles);
+                    }
+
+                    int totalFiles = filesInArchives.Values.Sum(s => s.Count);
+                    BsaContentsDiag.Log($"    ADD modkey={modkey.FileName.String} bsaCount={filesInArchives.Count} fileCount={totalFiles} bsaPaths=[{string.Join("|", newBsaPaths)}]");
+                    // An empty result is only a problem when the plugin actually owns
+                    // unindexed BSAs that failed to open (that genuinely masks reachable
+                    // assets). A plugin that owns no BSA at all is expected — e.g.
+                    // Update/Dawnguard/HearthFires/Dragonborn in Skyrim SE, whose assets
+                    // are consolidated into the "Skyrim - *.bsa" set and resolve under
+                    // Skyrim.esm — so recording it empty is correct, not poisoning.
+                    if (filesInArchives.Count == 0 && newBsaPaths.Count > 0)
+                    {
+                        BsaContentsDiag.Log($"    !!! WARNING: modkey={modkey.FileName.String} owns BSA(s) but none opened/indexed — reachable assets may be masked. bsaPaths=[{string.Join("|", newBsaPaths)}]");
+                    }
+
+                    // Commit policy: MERGE per archive path (handles the pre-check→
+                    // commit race too — an archive another caller indexed meanwhile is
+                    // simply not overwritten). An empty result still records an empty
+                    // entry when the modkey is absent, so a genuinely BSA-less plugin
+                    // isn't rescanned, while staying extendable by a later mod whose
+                    // folders do hold an archive for this plugin name.
+                    lock (_bsaContentsLock)
+                    {
+                        if (!_bsaContents.TryGetValue(modkey, out var existing))
+                        {
+                            _bsaContents[modkey] = filesInArchives;
+                        }
+                        else
+                        {
+                            foreach (var kv in filesInArchives)
+                            {
+                                if (!existing.ContainsKey(kv.Key))
+                                {
+                                    existing[kv.Key] = kv.Value;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            int finalCount;
+            lock (_bsaContentsLock) { finalCount = _bsaContents.Count; }
+            BsaContentsDiag.Log($"PopulateBsaContentPathsAsync EXIT — _bsaContents.Count now={finalCount}");
+        });
+    }
+    
+    public Dictionary<ModKey, HashSet<string>> GetAllFilePathsForMod(IEnumerable<ModKey> modKeys, IEnumerable<string> modDirs, GameRelease gameRelease)
+    {
+        Dictionary<ModKey, HashSet<string>> result = new();
+        var bsaFilePaths = GetBsaPathsForPluginsInDirs(modKeys.Distinct(), modDirs, gameRelease);
+        foreach (var bsaFilePath in bsaFilePaths)
+        {
+            var modKey = bsaFilePath.Key;
+            var readers = OpenBsaArchiveReaders(bsaFilePath.Value, gameRelease, false);
+            HashSet<string> currentContents = new();
+            foreach (var entry in readers)
+            {
+                var (bsaPath, reader) = entry;
+                var containedFiles = new HashSet<string>(reader.Files.Select(x => x.Path),
+                    StringComparer.OrdinalIgnoreCase);
+                currentContents.UnionWith(containedFiles);
+            }
+            result.Add(modKey, currentContents);
+        }
+        return result;
+    }
+
+    // --- Vanilla (base game + Creation Club) asset-path index ---------------------------------
+    // Union of every archive-internal path shipped in the base game + Creation Club BSAs. Used
+    // for base-game-overwrite protection: detecting (VM_Mods scan) and skipping (AssetHandler)
+    // mod assets that sit at vanilla paths and would otherwise stomp the user's installed
+    // replacers (e.g. skin mods) game-wide. Built lazily on first request and cached for the
+    // session, keyed on data folder + release so a game-path change rebuilds it. Paths follow
+    // the _bsaContents convention: backslash separators, OrdinalIgnoreCase comparison.
+    private HashSet<string>? _vanillaAssetPaths;
+    private string? _vanillaAssetPathsKey;
+    private readonly SemaphoreSlim _vanillaAssetPathsLock = new(1, 1);
+
+    /// <summary>
+    /// Returns the set of all asset paths contained in the base game + Creation Club BSAs
+    /// (see field comment above). The stock game ships its assets exclusively in BSAs, so
+    /// membership in this set is the "would overwrite a base game asset" test. Returns an
+    /// empty set when the game environment is not resolved. Thread-safe; the potentially
+    /// expensive build runs at most once per session per (data folder, release).
+    /// </summary>
+    public async Task<IReadOnlySet<string>> GetVanillaAssetPathsAsync()
+    {
+        string dataFolder = _environmentStateProvider.DataFolderPath.ToString() ?? string.Empty;
+        var gameRelease = _environmentStateProvider.SkyrimVersion.ToGameRelease();
+        string cacheKey = $"{dataFolder}|{gameRelease}";
+
+        // Benign race: the field is only ever assigned a fully-built set.
+        if (_vanillaAssetPaths != null &&
+            cacheKey.Equals(_vanillaAssetPathsKey, StringComparison.OrdinalIgnoreCase))
+        {
+            return _vanillaAssetPaths;
+        }
+
+        await _vanillaAssetPathsLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (_vanillaAssetPaths != null &&
+                cacheKey.Equals(_vanillaAssetPathsKey, StringComparison.OrdinalIgnoreCase))
+            {
+                return _vanillaAssetPaths;
+            }
+
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(dataFolder) && Directory.Exists(dataFolder))
+            {
+                await Task.Run(() =>
+                {
+                    var vanillaKeys = _environmentStateProvider.BaseGamePlugins
+                        .Concat(_environmentStateProvider.CreationClubPlugins)
+                        .ToHashSet();
+                    var contents = GetAllFilePathsForMod(vanillaKeys, new[] { dataFolder }, gameRelease);
+                    foreach (var containedPaths in contents.Values)
+                    {
+                        result.UnionWith(containedPaths);
+                    }
+                }).ConfigureAwait(false);
+                AppendLog($"Indexed {result.Count} base game / Creation Club asset paths for overwrite protection.");
+            }
+
+            _vanillaAssetPaths = result;
+            _vanillaAssetPathsKey = cacheKey;
+            return result;
+        }
+        finally
+        {
+            _vanillaAssetPathsLock.Release();
+        }
+    }
+
+    public string GetStatusReport()
+    {
+        string output = "";
+        List<string> snapshot;
+        lock (_readersLock)
+        {
+            snapshot = _openBsaArchiveReaders.Keys.ToList();
+        }
+        if (snapshot.Count == 0)
+        {
+            output = "No BSA archives currently loaded.";
+        }
+        else
+        {
+            output = "Loaded BSA Archives at: " + Environment.NewLine + string.Join(Environment.NewLine, snapshot.Select(x => "\t" + x));
+        }
+
+        output += Environment.NewLine;
+
+        List<string> cachedModKeyLines;
+        lock (_bsaContentsLock)
+        {
+            cachedModKeyLines = _bsaContents.Keys.Select(k => "\t" + k.ToString()).ToList();
+        }
+        if (cachedModKeyLines.Count == 0)
+        {
+            output += "No BSA contents currently cached";
+        }
+        else
+        {
+            output += "Cached BSA archive contents for plugins: " + Environment.NewLine + string.Join(Environment.NewLine, cachedModKeyLines);
+        }
+
+        return output;
+    }
+}

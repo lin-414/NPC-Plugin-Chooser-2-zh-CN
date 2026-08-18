@@ -1,0 +1,325 @@
+﻿using Mutagen.Bethesda;
+using Mutagen.Bethesda.Environments;
+using Mutagen.Bethesda.Plugins;
+using Mutagen.Bethesda.Plugins.Cache;
+using Mutagen.Bethesda.Plugins.Order;
+using Mutagen.Bethesda.Plugins.Records;
+using Mutagen.Bethesda.Skyrim;
+using static NPC_Plugin_Chooser_2.BackEnd.RecordHandler;
+
+namespace NPC_Plugin_Chooser_2.BackEnd;
+
+public static class PatcherExtensions
+{
+    public static List<MajorRecord> DuplicateFromOnlyReferencedGetters<TMod, TModGetter>(
+        this TMod modToDuplicateInto,
+        IEnumerable<IMajorRecordGetter> recordsToDuplicate,
+        RecordHandler recordHandler,
+        IEnumerable<ModKey> modKeysToDuplicateFrom,
+        bool onlySubRecords, 
+        bool handleInjectedRecords,
+        HashSet<string> fallBackModFolderNames,
+        RecordLookupFallBack fallBackMode,
+        ref Dictionary<FormKey, FormKey> mapping,
+        ref HashSet<IFormLinkGetter> traversedFormLinks,
+        ref List<string> exceptionStrings,
+        params Type[] typesToInspect)
+        where TModGetter : class, IModGetter
+        where TMod : class, TModGetter, IMod, ISkyrimMod
+    {
+        if (modKeysToDuplicateFrom.Contains(modToDuplicateInto.ModKey))
+        {
+            throw new ArgumentException("Cannot pass the target mod's Key as the one to extract and self contain");
+        }
+
+        HashSet<IFormLinkGetter> identifiedLinks = new();
+        var implicits = Implicits.Get(modToDuplicateInto.GameRelease);
+
+        // Opt-in record-provenance tracking (RecordProvenance.csv): remember which record first
+        // referenced each traversed link (first-wins, so the maps form a forest rooted at
+        // recordsToDuplicate) plus each record's source EditorID, so every duplicated record can
+        // be attributed a root -> ... -> parent chain at duplication time. Null when disabled.
+        bool trackProvenance = RecordProvenanceDiag.IsEnabled;
+        Dictionary<FormKey, FormKey>? provParentOf = trackProvenance ? new() : null;
+        Dictionary<FormKey, string?>? provEditorIdOf = trackProvenance ? new() : null;
+
+        // Use an explicit stack to prevent recursive overflow
+        var linksToProcess = new Stack<IFormLinkGetter>();
+
+        // 1. Seed the stack with the initial records to traverse
+        foreach (var rec in recordsToDuplicate)
+        {
+            if (trackProvenance) provEditorIdOf![rec.FormKey] = rec.EditorID;
+            if (onlySubRecords)
+            {
+                foreach (var containedLink in rec.EnumerateFormLinks())
+                {
+                    if (trackProvenance) provParentOf!.TryAdd(containedLink.FormKey, rec.FormKey);
+                    linksToProcess.Push(containedLink);
+                }
+            }
+            else
+            {
+                linksToProcess.Push(rec.ToLink());
+            }
+        }
+
+        // 2. Process the stack iteratively
+        while (linksToProcess.Count > 0)
+        {
+            var link = linksToProcess.Pop();
+
+            if (link.FormKey.IsNull || !traversedFormLinks.Add(link))
+            {
+                // Skip null links or links we've already processed
+                continue;
+            }
+
+            if (implicits.Listings.Contains(link.FormKey.ModKey))
+            {
+                continue;
+            }
+
+            if ((modKeysToDuplicateFrom.Contains(link.FormKey.ModKey) || handleInjectedRecords) &&
+                recordHandler.TryGetRecordFromMods(link, modKeysToDuplicateFrom, fallBackModFolderNames, fallBackMode, out var linkRec) &&
+                linkRec != null)
+            {
+                identifiedLinks.Add(link);
+                if (trackProvenance) provEditorIdOf!.TryAdd(link.FormKey, linkRec.EditorID);
+                // 3. Add newly discovered links to the stack instead of making a recursive call
+                foreach (var containedLink in linkRec.EnumerateFormLinks())
+                {
+                    if (modKeysToDuplicateFrom.Contains(containedLink.FormKey.ModKey) || handleInjectedRecords)
+                    {
+                        if (trackProvenance) provParentOf!.TryAdd(containedLink.FormKey, link.FormKey);
+                        linksToProcess.Push(containedLink);
+                    }
+                }
+            }
+        }
+
+        List<MajorRecord> mergedInRecords = new();
+        // Duplicate in the records
+        foreach (var identifiedLink in identifiedLinks)
+        {
+            if (mapping.ContainsKey(identifiedLink.FormKey))
+            {
+                continue; // this form has already been remapped in a previous call of this function
+            }
+
+            if (!recordHandler.TryGetRecordFromMods(identifiedLink, modKeysToDuplicateFrom, fallBackModFolderNames,
+                    RecordLookupFallBack.None, out var identifiedRec)
+                || identifiedRec == null)
+            {
+                throw new KeyNotFoundException($"Could not locate record to make self contained: {identifiedLink}");
+            }
+
+            var newEdid = (identifiedRec.EditorID ?? "NoEditorID");
+            if (Auxilliary.TryDuplicateGenericRecordAsNew(identifiedRec, modToDuplicateInto, out dynamic? dup,
+                    out string exceptionString) &&
+                dup != null)
+            {
+                dup.EditorID = newEdid;
+                recordHandler.RecordMergedRecordOrigin(identifiedLink.FormKey, dup.FormKey, identifiedRec.EditorID);
+                if (trackProvenance)
+                {
+                    RecordProvenanceDiag.RecordMergedAsNew(identifiedLink.FormKey, identifiedRec.EditorID,
+                        identifiedRec.Registration.Name, (FormKey)dup.FormKey,
+                        BuildProvenanceParentChain(identifiedLink.FormKey, provParentOf!, provEditorIdOf!));
+                }
+                mapping[identifiedLink.FormKey] = dup.FormKey;
+                mergedInRecords.Add(dup);
+                modToDuplicateInto.Remove(identifiedLink.FormKey, identifiedLink.Type);
+            }
+            else
+            {
+                exceptionStrings.Add(identifiedLink.FormKey.ToString() + ": " + exceptionString);
+            }
+        }
+
+        // Remap links, scoped to records the CURRENT appearance-mod batch created.
+        //
+        // modToDuplicateInto is the whole output plugin and `mapping` accumulates every duplication
+        // made for this mod, so remapping the mod wholesale retroactively rewrote records written
+        // for EARLIER mods — whose own merge decisions were different, and often "merge nothing".
+        // Normally the damage was invisible because `mapping` only ever held FormKeys defined in
+        // this mod's own plugins, which no unrelated mod's NPC references. Include-As-New breaks
+        // that: it duplicates a mod's overrides of records it does NOT own (RecordHandler
+        // .DuplicateAllOverrideRecordsAsNew), putting VANILLA FormKeys in the map — and vanilla
+        // FormKeys are referenced by half the output. One mod's RS Children child-race override was
+        // thereby stamped onto 70+ NPCs whose selected mod had merge-in switched off entirely,
+        // silently giving them an appearance from a mod the user never chose for them.
+        //
+        // Intra-batch remapping is deliberately preserved. The second and later NPCs of a batch have
+        // their links fixed only here: DuplicateAllOverrideRecordsAsNew short-circuits on
+        // searchedFormKeys before populating its own remap map, so narrowing this to just the roots
+        // of the current call would break the batch's own NPCs.
+        if (mapping.Count > 0)
+        {
+            foreach (var record in modToDuplicateInto.EnumerateMajorRecords<IMajorRecord>())
+            {
+                if (recordHandler.IsFromCurrentBatch(record.FormKey))
+                {
+                    record.RemapLinks(mapping);
+                }
+            }
+        }
+
+        return mergedInRecords;
+    }
+
+    /// <summary>
+    /// Walks the first-referenced-by map from <paramref name="child"/> up to its walk root and
+    /// returns the path root-first, EXCLUDING the child itself — the shape
+    /// <see cref="RecordProvenanceDiag.RecordMergedAsNew"/> expects. The map is a forest
+    /// (parents are assigned first-wins, so each node's parent was discovered before it), which
+    /// makes the walk acyclic; the depth cap is a pure safety net.
+    /// </summary>
+    private static List<RecordProvenanceDiag.Node> BuildProvenanceParentChain(
+        FormKey child, Dictionary<FormKey, FormKey> parentOf, Dictionary<FormKey, string?> editorIdOf)
+    {
+        var chain = new List<RecordProvenanceDiag.Node>();
+        var current = child;
+        for (int depth = 0; depth < 100 && parentOf.TryGetValue(current, out var parent); depth++)
+        {
+            chain.Add(new RecordProvenanceDiag.Node(parent, editorIdOf.GetValueOrDefault(parent)));
+            current = parent;
+        }
+        chain.Reverse();
+        return chain;
+    }
+
+    // Original form depending on global link cache
+    // Kept for reference
+    public static void DuplicateFromOnlyReferencedGetters<TMod, TModGetter>(
+        this TMod modToDuplicateInto,
+        IEnumerable<IMajorRecordGetter> recordsToDuplicate,
+        ILinkCache<TMod, TModGetter> linkCache,
+        IEnumerable<ModKey> modKeysToDuplicateFrom,
+        bool onlySubRecords,
+        ref Dictionary<FormKey, FormKey> mapping,
+        params Type[] typesToInspect)
+        where TModGetter : class, IModGetter
+        where TMod : class, TModGetter, IMod, ISkyrimMod
+    {
+        if (modKeysToDuplicateFrom.Contains(modToDuplicateInto.ModKey))
+        {
+            throw new ArgumentException("Cannot pass the target mod's Key as the one to extract and self contain");
+        }
+
+        // Compile list of things to duplicate
+        HashSet<IFormLinkGetter> identifiedLinks = new();
+        HashSet<FormKey> passedLinks = new();
+        var implicits = Implicits.Get(modToDuplicateInto.GameRelease);
+
+        void AddAllLinks(IFormLinkGetter link)
+        {
+            if (link.FormKey.IsNull) return;
+            if (!passedLinks.Add(link.FormKey)) return;
+            if (implicits.RecordFormKeys.Contains(link.FormKey)) return;
+
+            if (!linkCache.TryResolve(link.FormKey, link.Type, out var linkRec))
+            {
+                return;
+            }
+
+            if (modKeysToDuplicateFrom.Contains(link.FormKey.ModKey))
+            {
+                identifiedLinks.Add(link);
+            }
+
+            var containedLinks = linkRec.EnumerateFormLinks();
+            foreach (var containedLink in containedLinks)
+            {
+                if (!modKeysToDuplicateFrom.Contains(containedLink.FormKey.ModKey)) continue;
+                AddAllLinks(containedLink);
+            }
+        }
+
+        foreach (var rec in recordsToDuplicate)
+        {
+            if (onlySubRecords)
+            {
+                var containedLinks = rec.EnumerateFormLinks();
+                foreach (var containedLink in containedLinks)
+                {
+                    AddAllLinks(containedLink);
+                }
+            }
+            else
+            {
+                AddAllLinks(rec.ToLink());
+            }
+        }
+
+        // Duplicate in the records
+        foreach (var identifiedRec in identifiedLinks)
+        {
+            var context = linkCache.ResolveAllContexts(identifiedRec.FormKey, identifiedRec.Type)
+                .FirstOrDefault(x => modKeysToDuplicateFrom.Contains(x.ModKey));
+
+            if (context == null)
+            {
+                throw new KeyNotFoundException($"Could not locate record to make self contained: {identifiedRec}");
+            }
+
+            var newEdid = (context.Record.EditorID ?? "NoEditorID");
+            var dup = context.DuplicateIntoAsNewRecord(modToDuplicateInto, newEdid);
+            dup.EditorID = newEdid;
+            mapping[context.Record.FormKey] = dup.FormKey;
+
+            modToDuplicateInto.Remove(identifiedRec.FormKey, identifiedRec.Type);
+        }
+
+        // Remap links
+        modToDuplicateInto.RemapLinks(mapping);
+    }
+
+    // Removes this app's own generated plugins (and anything that masters to them,
+    // recursively) from a load order before it is used to build the environment, so a
+    // re-run patches from the original source mods rather than from its own prior output.
+    //
+    // Generated plugins are identified by their stamped header description
+    // (<see cref="Patcher.PluginDescriptionSignature"/>). Because the splitting feature can
+    // emit several plugins per run under different ModKeys (e.g. NPC_Male.esp), the stamp is
+    // the reliable signal; ModKey-based dedup alone would miss the suffixed split plugins.
+    //
+    // <paramref name="outputModKey"/> is an optional safety/fallback: pass a plugin's ModKey
+    // to also exclude it (and its dependents) even if it carries no stamp — e.g. the current
+    // output mod whose on-disk predecessor may have lost or never had the description. It is
+    // optional so the function can be reused by other patchers that decide exclusion targets
+    // differently.
+    public static IEnumerable<IModListingGetter<ISkyrimModGetter>> TrimDependentPlugins(
+        this IEnumerable<IModListingGetter<ISkyrimModGetter>> loadOrder,
+        ModKey? outputModKey = null)
+    {
+        List<ModKey> mastersToRemove = loadOrder.Where(x => x.Mod?.ModHeader.Description != null &&
+                                                            x.Mod.ModHeader.Description.Equals(Patcher.PluginDescriptionSignature))
+            .Select(x => x.ModKey).ToList();
+
+        // Fallback seed: exclude the supplied output mod by ModKey even if it isn't stamped.
+        if (outputModKey.HasValue && !outputModKey.Value.IsNull && !mastersToRemove.Contains(outputModKey.Value))
+        {
+            mastersToRemove.Add(outputModKey.Value);
+        }
+
+        List<IModListingGetter<ISkyrimModGetter>> trimmedLoadOrder = new();
+        foreach (var listing in loadOrder)
+        {
+            if (listing.ModKey.IsNull) continue;
+            if (mastersToRemove.Contains(listing.ModKey)) continue;
+            // Mod can be null for a listed-but-unreadable plugin; we can't inspect its masters,
+            // so leave it in the trimmed order (we only remove plugins we positively identify).
+            var masters = listing.Mod?.ModHeader.MasterReferences;
+            if (masters != null && masters.Select(x => x.Master).Intersect(mastersToRemove).Any())
+            {
+                mastersToRemove.Add(listing.ModKey);
+                continue;
+            }
+
+            trimmedLoadOrder.Add(listing);
+        }
+
+        return trimmedLoadOrder;
+    }
+}

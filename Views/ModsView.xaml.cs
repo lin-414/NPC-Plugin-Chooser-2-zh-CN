@@ -1,0 +1,592 @@
+﻿// Views/ModsView.xaml.cs (Revised RefreshMugshotImageSizes)
+using NPC_Plugin_Chooser_2.View_Models;
+using ReactiveUI;
+using Splat; 
+using System;
+using System.Collections.ObjectModel;
+using System.Diagnostics;
+using System.Globalization;
+using System.Linq;      
+using System.Reactive; 
+using System.Reactive.Linq; 
+using System.Reactive.Disposables;
+using System.Reactive.Disposables.Fluent;
+using System.Reactive.Subjects;
+using System.Windows.Controls; 
+using System.Windows.Input;  
+using System.Windows;
+using System.Windows.Controls.Primitives;
+using System.Windows.Media;
+using System.Windows.Threading;
+using GongSolutions.Wpf.DragDrop;
+using DragDrop = System.Windows.DragDrop;
+
+namespace NPC_Plugin_Chooser_2.Views
+{
+    public partial class ModsView : ReactiveUserControl<VM_Mods>
+    {
+        private readonly CompositeDisposable _viewBindings = new CompositeDisposable(); 
+        private readonly Subject<SizeChangedEventArgs> _sizeChangedSubject = new Subject<SizeChangedEventArgs>();
+        private const double _minZoomPercentage = 1.0;
+        private const double _maxZoomPercentage = 1000.0;
+        private const double _zoomStepPercentage = 2.5; // For +/- buttons and scroll wheel
+        private bool _isInitialLayout = true; // Flag for one-time initial sizing
+        // Set once the user drags the splitter, so the load-time default (a persisted
+        // position, else 25% of width) never overrides a position they chose by hand.
+        // Purely a layout concern — it must not influence zoom/packing decisions.
+        private bool _userHasAdjustedSplitter = false;
+
+        public ModsView()
+        {
+            InitializeComponent();
+
+            if (this.DataContext == null)
+            {
+                try
+                {
+                    ViewModel = Locator.Current.GetService<VM_Mods>();
+                    DataContext = this.ViewModel;
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Error resolving VM_Mods: {ex.Message}");
+                }
+            }
+
+            this.WhenActivated(d =>
+            {
+                _viewBindings.Clear(); // Clear previous bindings if any (good practice for WhenActivated)
+                d.DisposeWith(_viewBindings);
+                if (ViewModel == null) return;
+
+                // --- TextBox Zoom Level Binding with Throttle ---
+                // One-way from VM to View (for display, formatted)
+                this.WhenAnyValue(x => x.ViewModel.ModsViewZoomLevel)
+                    .ObserveOn(RxApp.MainThreadScheduler)
+                    .Select(val => val.ToString("F2", CultureInfo.InvariantCulture))
+                    .BindTo(this, v => v.ZoomPercentageTextBoxMods.Text)
+                    .DisposeWith(d);
+
+                // From View (TextBox) to VM, with throttle
+                Observable.FromEventPattern<TextChangedEventArgs>(ZoomPercentageTextBoxMods,
+                        nameof(ZoomPercentageTextBoxMods.TextChanged))
+                    .Select(ep => ((TextBox)ep.Sender).Text)
+                    .Throttle(TimeSpan.FromMilliseconds(300), RxApp.MainThreadScheduler)
+                    .ObserveOn(RxApp.MainThreadScheduler)
+                    .Subscribe(text =>
+                    {
+                        Debug.WriteLine($"ModsView: ZoomPercentageTextBoxMods TextChanged to '{text}' (throttled)");
+                        if (ViewModel != null)
+                        {
+                            if (double.TryParse(text, NumberStyles.Any, CultureInfo.InvariantCulture,
+                                    out double result))
+                            {
+                                ViewModel.ModsViewHasUserManuallyZoomed = true;
+                                double clampedResult = Math.Max(_minZoomPercentage,
+                                    Math.Min(_maxZoomPercentage, result)); // Use field
+                                if (Math.Abs(ViewModel.ModsViewZoomLevel - clampedResult) > 0.001)
+                                {
+                                    Debug.WriteLine(
+                                        $"ModsView: Textbox updating VM.ModsViewZoomLevel to {clampedResult}");
+                                    ViewModel.ModsViewZoomLevel = clampedResult;
+                                }
+                            }
+                            else if (!string.IsNullOrWhiteSpace(text))
+                            {
+                                Debug.WriteLine($"ModsView: Textbox parse failed for '{text}', resetting to VM value.");
+                                ZoomPercentageTextBoxMods.Text =
+                                    ViewModel.ModsViewZoomLevel.ToString("F2", CultureInfo.InvariantCulture);
+                            }
+                        }
+                    })
+                    .DisposeWith(d);
+                // --- End TextBox Zoom Level Binding ---
+
+                _sizeChangedSubject
+                    .Throttle(TimeSpan.FromMilliseconds(250), RxApp.MainThreadScheduler)
+                    .ObserveOn(RxApp.MainThreadScheduler)
+                    .Subscribe(args =>
+                    {
+                        Debug.WriteLine(
+                            $"ModsView: _sizeChangedSubject (Throttled ScrollViewer.SizeChanged) triggered. New Size: {args.NewSize.Width}x{args.NewSize.Height}");
+                        // Matches NpcsView.ImageDisplayScrollViewer_SizeChanged: any size change
+                        // hands control back to the packer unless the zoom is explicitly locked.
+                        // Deliberately NOT gated on _userHasAdjustedSplitter — a splitter drag is
+                        // a resize, not a zoom, so it must still refit the mugshots.
+                        if (ViewModel != null && !ViewModel.ModsViewIsZoomLocked)
+                        {
+                            ViewModel.ModsViewHasUserManuallyZoomed = false;
+                        }
+
+                        // Here, the ScrollViewer's size *has* changed, so we can directly refresh.
+                        // No need for the extra invalidation of MainContentGridForSplitter,
+                        // as this path is a *result* of layout changes, not a trigger for them in the same way.
+                        RefreshMugshotImageSizes();
+                    })
+                    .DisposeWith(d);
+
+                // Subscription to GridSplitter DragCompleted (NEW explicit refresh trigger)
+                Observable.FromEventPattern<DragCompletedEventArgs>(ColumnSplitter, nameof(GridSplitter.DragCompleted))
+                    .ObserveOn(RxApp.MainThreadScheduler)
+                    .Subscribe(ep =>
+                    {
+                        // Records that the user owns the splitter position, so the 25% default
+                        // never overrides it on a later load. NOT a zoom signal: leaving
+                        // ModsViewHasUserManuallyZoomed alone lets the packer refit the mugshots
+                        // to the new pane width, the same way the NPCs view behaves.
+                        _userHasAdjustedSplitter = true;
+                        Debug.WriteLine("ModsView: ColumnSplitter_DragCompleted. User has adjusted.");
+                        if (ViewModel != null)
+                        {
+                            // Remember the splitter position across sessions.
+                            ViewModel.LeftPanelWidth = LeftColumnForModList.ActualWidth;
+                        }
+
+                        // Sequence: 1. Invalidate Grid, 2. Update Grid Layout, 3. Refresh Images
+                        Dispatcher.BeginInvoke(new Action(() =>
+                        {
+                            Debug.WriteLine(
+                                "ModsView: DragCompleted - Phase 1: Invalidating MainContentGridForSplitter.");
+                            if (MainContentGridForSplitter.IsLoaded)
+                            {
+                                MainContentGridForSplitter.InvalidateMeasure();
+                                MainContentGridForSplitter.InvalidateArrange(); // Invalidate both
+                                MainContentGridForSplitter
+                                    .UpdateLayout(); // Force re-layout of the grid and its columns
+                            }
+
+                            // Now that the grid owning the columns has hopefully updated,
+                            // queue the image refresh to run after this.
+                            Dispatcher.BeginInvoke(new Action(() =>
+                            {
+                                Debug.WriteLine("ModsView: DragCompleted - Phase 2: Calling RefreshMugshotImageSizes.");
+                                RefreshMugshotImageSizes();
+                            }), DispatcherPriority.Background); // Or Loaded. Background is safer.
+                        }), DispatcherPriority.ContextIdle); // Or even Send if you want it more immediate after drag.
+                    })
+                    .DisposeWith(d);
+
+                this.BindCommand(ViewModel, vm => vm.ZoomInModsCommand, v => v.ZoomInButtonMods).DisposeWith(d);
+                this.BindCommand(ViewModel, vm => vm.ZoomOutModsCommand, v => v.ZoomOutButtonMods).DisposeWith(d);
+                this.Bind(ViewModel, vm => vm.ModsViewIsZoomLocked, v => v.LockZoomCheckBoxMods.IsChecked)
+                    .DisposeWith(d);
+                this.BindCommand(ViewModel, vm => vm.ResetZoomModsCommand, v => v.ResetZoomModsButton)
+                    .DisposeWith(d); // NEW BINDING
+
+
+                // In ModsView.xaml.cs, inside the WhenActivated block
+
+                ViewModel.RefreshMugshotSizesObservable
+                    .ObserveOn(RxApp.MainThreadScheduler)
+                    .Subscribe(_ =>
+                    {
+                        Debug.WriteLine(
+                            "ModsView: RefreshMugshotSizesObservable (from VM) triggered. Calling RefreshMugshotImageSizes directly.");
+                        RefreshMugshotImageSizes();
+                    })
+                    .DisposeWith(d);
+
+                if (ViewModel.CurrentModNpcMugshots != null && ViewModel.CurrentModNpcMugshots.Any())
+                {
+                    RefreshMugshotImageSizes();
+                }
+
+                // NEW: Subscribe to the ViewModel's scroll request observable for Mods
+                ViewModel.RequestScrollToModObservable
+                    .Where(modToScrollTo => modToScrollTo != null)
+                    .ObserveOn(RxApp.MainThreadScheduler)
+                    .Subscribe(async modSettingToScrollTo =>
+                    {
+                        Debug.WriteLine(
+                            $"ModsView.WhenActivated: Received scroll request for ModSetting {modSettingToScrollTo.DisplayName}");
+                        try
+                        {
+                            await Task.Delay(50); // Small delay to let UI settle after tab switch
+                            ModSettingsItemsControl.UpdateLayout();
+
+                            // Check if the item is the current VM selection (to avoid stale requests from BehaviorSubject replay)
+                            var currentVmSelectedMod = ViewModel.SelectedModForMugshots;
+                            if (modSettingToScrollTo != currentVmSelectedMod)
+                            {
+                                Debug.WriteLine(
+                                    $"ModsView: Scroll request for '{modSettingToScrollTo.DisplayName}' does not match current VM selection " +
+                                    $"'{currentVmSelectedMod?.DisplayName ?? "null"}'. Ignoring stale request.");
+                                return;
+                            }
+
+                            if (ModSettingsItemsControl.Items.Contains(modSettingToScrollTo))
+                            {
+                                // Use ScrollIntoView - this properly handles virtualized items!
+                                ModSettingsItemsControl.ScrollIntoView(modSettingToScrollTo);
+                                Debug.WriteLine(
+                                    $"ModsView: Called ScrollIntoView for {modSettingToScrollTo.DisplayName}.");
+
+                                // Optional: After scrolling, ensure visibility with BringIntoView on the container
+                                await Task.Delay(50); // Give ScrollIntoView time to work
+                                ModSettingsItemsControl.UpdateLayout();
+
+                                var container =
+                                    ModSettingsItemsControl.ItemContainerGenerator.ContainerFromItem(
+                                        modSettingToScrollTo) as FrameworkElement;
+                                if (container != null)
+                                {
+                                    container.BringIntoView();
+                                    Debug.WriteLine(
+                                        $"ModsView: Ensured visibility using BringIntoView on container for {modSettingToScrollTo.DisplayName}.");
+                                }
+                            }
+                            else
+                            {
+                                Debug.WriteLine(
+                                    $"ModsView: ModSetting {modSettingToScrollTo.DisplayName} not in ModSettingsItemsControl items when trying to scroll.");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.WriteLine(
+                                $"ModsView: Error during scroll attempt for {modSettingToScrollTo.DisplayName}: {ex.Message}");
+                        }
+                    })
+                    .DisposeWith(d);
+            });
+        }
+
+        private void ModsView_Loaded(object sender, RoutedEventArgs e)
+        {
+            if (_isInitialLayout && !_userHasAdjustedSplitter)
+            {
+                AdjustLeftColumnWidth();
+                _isInitialLayout = false; // Ensure this runs only once per load unless reset
+            }
+        }
+        
+        private void AdjustLeftColumnWidth()
+        {
+            // Ensure the grid has had a chance to perform its initial layout pass
+            // to get a valid ActualWidth.
+            if (MainContentGridForSplitter.ActualWidth > 0 && LeftColumnForModList != null)
+            {
+                ApplyLeftColumnWidth();
+            }
+            else
+            {
+                Debug.WriteLine("Initial AdjustLeftColumnWidth: MainContentGridForSplitter.ActualWidth is 0 or LeftColumnForModList is null. Deferring.");
+                // If ActualWidth is 0, the layout hasn't completed yet.
+                // We can try to dispatch this to run after the current layout pass.
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (_isInitialLayout && !_userHasAdjustedSplitter && MainContentGridForSplitter.ActualWidth > 0 && LeftColumnForModList != null)
+                    {
+                        ApplyLeftColumnWidth(deferred: true);
+                        _isInitialLayout = false; // Still mark as done
+                    }
+                }), System.Windows.Threading.DispatcherPriority.Loaded);
+            }
+        }
+
+        /// <summary>
+        /// Sizes the mod-list column to the splitter position remembered from the last
+        /// session, falling back to 25% of the available width the first time (or if the
+        /// user has never dragged the splitter). Assumes a valid MainContentGridForSplitter.ActualWidth.
+        /// </summary>
+        private void ApplyLeftColumnWidth(bool deferred = false)
+        {
+            double availableWidth = MainContentGridForSplitter.ActualWidth;
+
+            // A persisted splitter position wins over the 25% default.
+            double savedWidth = ViewModel?.LeftPanelWidth ?? 0;
+            bool restoring = savedWidth > 0;
+            double targetWidth = restoring ? savedWidth : availableWidth * 0.25;
+
+            // Never let the left column squeeze the mugshot panel below its MinWidth —
+            // matters most when restoring a width saved on a wider window.
+            double maxWidth = availableWidth - RightPanelColumn.MinWidth - ColumnSplitter.ActualWidth;
+            if (maxWidth > LeftColumnForModList.MinWidth && targetWidth > maxWidth)
+            {
+                targetWidth = maxWidth;
+            }
+
+            // Respect MinWidth if defined on the ColumnDefinition
+            if (targetWidth < LeftColumnForModList.MinWidth)
+            {
+                targetWidth = LeftColumnForModList.MinWidth;
+            }
+            // Respect MaxWidth if defined (though you weren't using it for this column)
+            if (targetWidth > LeftColumnForModList.MaxWidth)
+            {
+                targetWidth = LeftColumnForModList.MaxWidth;
+            }
+
+            // Set the Width. GridLength can take a double for pixel value.
+            // It's important to set it as a pixel value here, not a star,
+            // because we want a specific size based on the current parent width.
+            // The GridSplitter will then operate on this pixel-defined width.
+            LeftColumnForModList.Width = new GridLength(targetWidth, GridUnitType.Pixel);
+
+            Debug.WriteLine($"Initial AdjustLeftColumnWidth{(deferred ? " (deferred)" : string.Empty)}: Available={availableWidth:F2}, " +
+                            $"Source={(restoring ? "saved" : "25%")}, Target={targetWidth:F2}. LeftColumn set to {LeftColumnForModList.Width}");
+        }
+
+        private void MugshotScrollViewer_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            Debug.WriteLine($"ModsView: MugshotScrollViewer_SizeChanged RAW event. New size: {e.NewSize.Width}x{e.NewSize.Height}. Pushing to _sizeChangedSubject.");
+            _sizeChangedSubject.OnNext(e);
+        }
+
+        private void MugshotScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
+        {
+            if (ViewModel?.CurrentModNpcMugshots == null || !ViewModel.CurrentModNpcMugshots.Any()) return;
+            if (Keyboard.Modifiers == ModifierKeys.Control)
+            {
+                double change = (e.Delta > 0 ? 1 : -1) * _zoomStepPercentage; // Use field
+                ViewModel.ModsViewHasUserManuallyZoomed = true; 
+                ViewModel.ModsViewZoomLevel = Math.Max(_minZoomPercentage, Math.Min(_maxZoomPercentage, ViewModel.ModsViewZoomLevel + change)); // Use fields
+                e.Handled = true; 
+            }
+        }
+
+         private void MugshotItem_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+         {
+             if (sender is not FrameworkElement element || element.DataContext is not VM_ModsMenuMugshot vm)
+                 return;
+
+             // Ctrl+Shift+RClick → 3D preview popup. Must be checked BEFORE the
+             // bare-Ctrl branch so the more specific shortcut wins (modifier
+             // equality treats Control|Shift as distinct from Control alone).
+             if (Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift))
+             {
+                 if (vm.Show3DPreviewCommand.CanExecute.FirstAsync().Wait())
+                 {
+                     vm.Show3DPreviewCommand.Execute(Unit.Default).Subscribe().DisposeWith(_viewBindings);
+                 }
+                 e.Handled = true;
+                 return;
+             }
+
+             if (Keyboard.Modifiers == ModifierKeys.Control)
+             {
+                 if (vm.ToggleFullScreenCommand.CanExecute.FirstAsync().Wait())
+                 {
+                     vm.ToggleFullScreenCommand.Execute(Unit.Default).Subscribe().DisposeWith(_viewBindings);
+                 }
+                 e.Handled = true;
+             }
+         }
+         
+        private void RefreshMugshotImageSizes()
+        {
+            if (ViewModel == null) { Debug.WriteLine("ModsView.RefreshMugshotImageSizes: ViewModel is null. Skipping."); return; }
+            if (ViewModel.CurrentModNpcMugshots == null) { Debug.WriteLine("ModsView.RefreshMugshotImageSizes: CurrentModNpcMugshots is null. Skipping."); return; }
+
+            var imagesToProcess = ViewModel.CurrentModNpcMugshots;
+            // No need to check imagesToProcess.Any() here, ImagePacker handles empty list.
+
+            Debug.WriteLine($"ModsView.RefreshMugshotImageSizes: ENTER. VM.IsZoomLocked: {ViewModel.ModsViewIsZoomLocked}, VM.HasUserManuallyZoomed: {ViewModel.ModsViewHasUserManuallyZoomed}, VM.ZoomLevel: {ViewModel.ModsViewZoomLevel:F2}");
+
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (ViewModel == null || ViewModel.CurrentModNpcMugshots == null || !MugshotScrollViewer.IsLoaded)
+                {
+                    Debug.WriteLine("ModsView.RefreshMugshotImageSizes (Dispatcher): VM/Collection null or ScrollViewer not loaded. Skipping.");
+                    return;
+                }
+
+                // Force layout update to ensure ActualWidth/ViewportWidth are current
+                MugshotScrollViewer.UpdateLayout();
+                MugshotsItemsControl.UpdateLayout(); // Also update the ItemsControl which contains the WrapPanel
+
+                // Use ActualWidth when HorizontalScrollBarVisibility is Disabled, as ViewportWidth might not be what we expect.
+                // ActualWidth reflects the space allocated to the ScrollViewer by its parent.
+                double availableWidth = MugshotScrollViewer.ActualWidth;
+                double availableHeight = MugshotScrollViewer.ActualHeight; // Using ActualHeight too for consistency
+
+                // If vertical scrollbar is visible, subtract its width from availableWidth for packing.
+                // And use ViewportHeight for availableHeight.
+                if (MugshotScrollViewer.ComputedVerticalScrollBarVisibility == Visibility.Visible)
+                {
+                    availableHeight = MugshotScrollViewer.ViewportHeight;
+                    // Assuming SystemParameters.VerticalScrollBarWidth is a close enough approximation
+                    availableWidth -= SystemParameters.VerticalScrollBarWidth;
+                }
+                 // Ensure availableWidth is not negative if scrollbar is wider than the viewer (edge case)
+                availableWidth = Math.Max(0, availableWidth);
+
+
+                Debug.WriteLine($"ModsView.RefreshMugshotImageSizes (Dispatcher BEGIN):");
+                Debug.WriteLine($"  ScrollViewer.IsLoaded: {MugshotScrollViewer.IsLoaded}");
+                Debug.WriteLine($"  ScrollViewer.ActualWidth: {MugshotScrollViewer.ActualWidth}, ScrollViewer.ViewportWidth: {MugshotScrollViewer.ViewportWidth}");
+                Debug.WriteLine($"  ScrollViewer.ExtentWidth: {MugshotScrollViewer.ExtentWidth}, ScrollViewer.ScrollableWidth: {MugshotScrollViewer.ScrollableWidth}");
+                Debug.WriteLine($"  ScrollViewer.ActualHeight: {MugshotScrollViewer.ActualHeight}, ScrollViewer.ViewportHeight: {MugshotScrollViewer.ViewportHeight}");
+                Debug.WriteLine($"  ScrollViewer.ComputedVerticalScrollBarVisibility: {MugshotScrollViewer.ComputedVerticalScrollBarVisibility}");
+                Debug.WriteLine($"  ItemsControl.ActualWidth: {MugshotsItemsControl.ActualWidth}");
+                Debug.WriteLine($"  Calculated availableWidth for Packer: {availableWidth}, availableHeight for Packer: {availableHeight}");
+
+
+                // The ImagePacker itself filters for IsVisible and valid dimensions.
+                // We pass the whole collection from the ViewModel.
+                var imagesForPacker = ViewModel.CurrentModNpcMugshots;
+
+
+                if (ViewModel.ModsViewIsZoomLocked || ViewModel.ModsViewHasUserManuallyZoomed)
+                {
+                    Debug.WriteLine("ModsView.RefreshMugshotImageSizes (Dispatcher): Applying DIRECT scaling (Locked or Manual Zoom).");
+
+                    var visibleImagesForDirectScale = imagesForPacker
+                        .Where(img => img.IsVisible && img.OriginalDipDiagonal > 0)
+                        .ToList();
+
+                    if (!visibleImagesForDirectScale.Any())
+                    {
+                        Debug.WriteLine("ModsView.RefreshMugshotImageSizes (Dispatcher): No visible images for direct scaling.");
+                        foreach (var img in imagesForPacker) { img.ImageWidth = 0; img.ImageHeight = 0; } // Clear all
+                        return;
+                    }
+
+                    double sumOfDiagonals = visibleImagesForDirectScale.Sum(img => img.OriginalDipDiagonal);
+                    double averageOriginalDipDiagonal = sumOfDiagonals / visibleImagesForDirectScale.Count;
+                    // No need for fallback if averageOriginalDipDiagonal is 0 because visibleImagesForDirectScale ensures OriginalDipDiagonal > 0
+
+                    double userZoomFactor = ViewModel.ModsViewZoomLevel / 100.0;
+                    Debug.WriteLine($"ModsView.RefreshMugshotImageSizes (Dispatcher): DIRECT - AvgDiag: {averageOriginalDipDiagonal:F2}, UserZoomFactor: {userZoomFactor:F2}");
+
+                    foreach (var img in imagesForPacker) // Iterate over the full list to update all
+                    {
+                        if (img.IsVisible && img.OriginalDipDiagonal > 0)
+                        {
+                            double individualScaleFactor = (averageOriginalDipDiagonal / img.OriginalDipDiagonal) * userZoomFactor;
+                            img.ImageWidth = img.OriginalDipWidth * individualScaleFactor;
+                            img.ImageHeight = img.OriginalDipHeight * individualScaleFactor;
+                        }
+                        else // Not visible or invalid original dimensions
+                        {
+                            img.ImageWidth = 0;
+                            img.ImageHeight = 0;
+                        }
+                    }
+                }
+                else // Packer scaling (Unlocked and Not Manually Zoomed)
+                {
+                    try
+                    {
+                        Debug.WriteLine("ModsView.RefreshMugshotImageSizes (Dispatcher): Applying PACKER scaling.");
+
+                        if (availableHeight > 0 && availableWidth > 0)
+                        {
+                            // ImagePacker.FitOriginalImagesToContainer expects ObservableCollection<IHasMugshotImage>
+                            // and will modify the ImageWidth/ImageHeight of the items within it.
+                            // Since imagesForPacker from ViewModel is already ObservableCollection<VM_ModsMenuMugshot>
+                            // and VM_ModsMenuMugshot implements IHasMugshotImage, we can cast.
+                            // However, the method signature is specific.
+                            // It's better if the ImagePacker can take IEnumerable<IHasMugshotImage>
+                            // or if we pass a new ObservableCollection as it expects.
+                            // For now, let's assume the packer method is updated or we make a temp collection.
+
+                            // Get the singleton ImagePacker instance from the service locator.
+                            var imagePacker = Locator.Current.GetService<ImagePacker>();
+                            if (imagePacker == null)
+                            {
+                                Debug.WriteLine(
+                                    "ModsView.RefreshMugshotImageSizes: ImagePacker service could not be resolved.");
+                                return;
+                            }
+
+                            // Get the cancellation token from the ViewModel
+                            var cancellationToken = ViewModel.GetCurrentMugshotLoadToken();
+
+                            var tempCollectionForPacker =
+                                new ObservableCollection<IHasMugshotImage>(imagesForPacker.Cast<IHasMugshotImage>());
+
+                            // Call the instance method on the retrieved service.
+                            double packerScaleFactor = imagePacker.FitOriginalImagesToContainer(
+                                tempCollectionForPacker,
+                                availableHeight,
+                                availableWidth,
+                                5, // xamlItemUniformMargin (from XAML Margin="5")
+                                ViewModel.NormalizeImageDimensions,
+                                ViewModel.MaxMugshotsToFit,
+                                cancellationToken
+                            );
+
+                            // After packer runs, items in tempCollectionForPacker have updated ImageWidth/Height.
+                            // We need to transfer these back if tempCollectionForPacker was a new collection of *new* VMs.
+                            // But if it's a collection of *references* to the original VMs, they are already updated.
+                            // The current ImagePacker modifies the items in the passed collection.
+                            // The Cast().ToList() then new ObservableCollection(list) creates new list with original references.
+
+                            Debug.WriteLine(
+                                $"ModsView.RefreshMugshotImageSizes (Dispatcher): Packer returned scaleFactor: {packerScaleFactor:F4}. Updating VM.ModsViewZoomLevel.");
+                            if (ViewModel != null) // Check ViewModel again as this is in a lambda
+                            {
+                                ViewModel.ModsViewZoomLevel = packerScaleFactor * 100.0;
+                            }
+                        }
+                        else
+                        {
+                            Debug.WriteLine(
+                                "ModsView.RefreshMugshotImageSizes (Dispatcher): Packer NOT called due to zero calculated available height/width.");
+                            // If packer isn't called, images might retain old sizes or need clearing.
+                            // Let's clear them to avoid stale display if container becomes too small.
+                            foreach (var img in imagesForPacker)
+                            {
+                                img.ImageWidth = 0;
+                                img.ImageHeight = 0;
+                            }
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // This is expected when the user cancels. We just swallow the exception.
+                        Debug.WriteLine("ModsView.RefreshMugshotImageSizes: Image packing was cancelled by the user.");
+                    }
+                }
+                Debug.WriteLine("ModsView.RefreshMugshotImageSizes (Dispatcher): EXIT.");
+            }), DispatcherPriority.Background); // Using Background for more layout time
+        }
+
+
+        private void ZoomPercentageTextBoxMods_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
+        {
+            if (ViewModel == null || !(sender is TextBox textBox)) return;
+            double currentValue = ViewModel.ModsViewZoomLevel;
+            double change = (e.Delta > 0 ? 1 : -1) * _zoomStepPercentage; // Use field
+            
+            ViewModel.ModsViewHasUserManuallyZoomed = true; 
+            ViewModel.ModsViewZoomLevel = Math.Max(_minZoomPercentage, Math.Min(_maxZoomPercentage, currentValue + change)); // Use fields
+            
+            var binding = textBox.GetBindingExpression(TextBox.TextProperty);
+            binding?.UpdateSource();
+            textBox.CaretIndex = textBox.Text.Length;
+            textBox.SelectAll();
+            e.Handled = true;
+        }
+        
+        private void FolderPathsItemsControl_Loaded(object sender, RoutedEventArgs e)
+        {
+            // Cast the sender to the ItemsControl
+            if (sender is ItemsControl itemsControl)
+            {
+                // Get the DataContext, which is our VM_ModSetting instance
+                var viewModel = itemsControl.DataContext as IDropTarget;
+
+                // Programmatically set the DropHandler to be the ViewModel.
+                // This is the code-behind equivalent of gong:DragDrop.DropHandler="{Binding}"
+                GongSolutions.Wpf.DragDrop.DragDrop.SetDropHandler(itemsControl, viewModel);
+            }
+        }
+    }
+    
+    // Helper extension method (place in a utility class or at the bottom of ModsView.xaml.cs if local)
+    public static class FrameworkElementExtensions
+    {
+        public static T? TryFindParent<T>(this DependencyObject child) where T : DependencyObject
+        {
+            DependencyObject parentObject = VisualTreeHelper.GetParent(child);
+            if (parentObject == null) return null;
+            T parent = parentObject as T;
+            if (parent != null)
+                return parent;
+            else
+                return TryFindParent<T>(parentObject);
+        }
+    }
+}

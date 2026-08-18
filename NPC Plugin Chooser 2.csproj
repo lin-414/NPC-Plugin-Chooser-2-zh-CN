@@ -1,0 +1,239 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>WinExe</OutputType>
+        <!-- ReactiveUI.WPF 23.x (pulled in transitively by Mutagen.Bethesda.WPF 0.54.0 via
+             Noggog.WPF) ships its WPF assembly only for net*-windows10.0.19041; the default
+             net10.0-windows (=windows7.0) is too low and silently falls back to the .NET
+             Framework 4.6.2 build, which breaks ReactiveUI/System.Reactive type resolution.
+             Pin the Windows platform version so the real .NET 10 Windows assets resolve. -->
+        <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+        <!-- Mark the apphost NOT CET-compatible so Windows doesn't enable the CET hardware shadow
+             stack for the process. The shadow stack fights runtime API-hooking / DLL injection, which
+             is exactly what Mod Organizer 2's USVFS does — with CET on, launching under MO2 crashes
+             at native init (0xc0000005 in an "unknown" module, before any managed code). Harmless for
+             standalone launches; only relaxes a security hardening this dev tool doesn't rely on. -->
+        <CETCompat>false</CETCompat>
+        <RootNamespace>NPC_Plugin_Chooser_2</RootNamespace>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <UseWPF>true</UseWPF>
+        <ApplicationIcon>Resources\NPC Logo.ico</ApplicationIcon>
+    </PropertyGroup>
+
+    <!-- The xUnit test project lives in the Tests\ subfolder (kept inside the git
+         repo, whose root is this project folder). The SDK's default globbing would
+         otherwise pull every Tests\**\*.cs into THIS app's compilation (and the
+         WPF markup-compile temp project), which fails because the app doesn't
+         reference xunit. Exclude the whole subtree from the app; the test csproj
+         compiles those files itself. -->
+    <ItemGroup>
+        <Compile Remove="Tests\**" />
+        <EmbeddedResource Remove="Tests\**" />
+        <None Remove="Tests\**" />
+        <Page Remove="Tests\**" />
+        <Resource Remove="Tests\**" />
+        <Content Remove="Tests\**" />
+    </ItemGroup>
+
+    <!-- CharacterViewer.Rendering (the offscreen 3D renderer) lives in the SynthEBD
+         repo. If that repo is checked out as a sibling (..\..\SynthEBD), build
+         against its live source so the renderer can be co-developed in place.
+         Otherwise (a fresh clone, or CI without the sibling) restore the published
+         NuGet package so the project builds with no extra setup. Keep the package
+         version in sync with the SynthEBD source / CharacterViewerRendering.Version. -->
+    <ItemGroup Condition="Exists('..\..\SynthEBD\CharacterViewer.Rendering\CharacterViewer.Rendering.csproj')">
+      <ProjectReference Include="..\..\SynthEBD\CharacterViewer.Rendering\CharacterViewer.Rendering.csproj" />
+    </ItemGroup>
+    <ItemGroup Condition="!Exists('..\..\SynthEBD\CharacterViewer.Rendering\CharacterViewer.Rendering.csproj')">
+      <PackageReference Include="SynthEBD.CharacterViewer.Rendering" Version="2.7.0" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <PackageReference Include="Autofac" Version="9.3.0" />
+      <PackageReference Include="gong-wpf-dragdrop" Version="4.0.0" />
+      <PackageReference Include="Hjg.Pngcs" Version="1.1.4" />
+      <PackageReference Include="HtmlAgilityPack" Version="1.12.0" />
+      <PackageReference Include="Microsoft.Extensions.Http" Version="9.0.4" />
+      <PackageReference Include="Microsoft.Xaml.Behaviors.Wpf" Version="1.1.135" />
+      <PackageReference Include="Mutagen.Bethesda.FormKeys.SkyrimSE" Version="3.4.0" />
+      <PackageReference Include="Mutagen.Bethesda.Json" Version="0.54.0" />
+      <PackageReference Include="Mutagen.Bethesda.Serialization.SourceGenerator" Version="1.38.3" />
+      <PackageReference Include="Mutagen.Bethesda.Serialization.Yaml" Version="1.38.3" />
+      <PackageReference Include="Mutagen.Bethesda.Skyrim" Version="0.54.0" />
+      <PackageReference Include="Mutagen.Bethesda.Synthesis.WPF" Version="0.36.0" />
+      <PackageReference Include="Mutagen.Bethesda.WPF" Version="0.54.0" />
+      <PackageReference Include="niflysharp" Version="1.3.0" />
+      <PackageReference Include="ReactiveUI.Fody" Version="19.5.41" />
+      <PackageReference Include="ReactiveUI.WPF" Version="23.2.28" />
+      <PackageReference Include="SixLabors.ImageSharp" Version="3.1.11" />
+      <PackageReference Include="Splat.Autofac" Version="19.4.1" />
+      <PackageReference Include="System.IO.Hashing" Version="9.0.6" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <Page Update="Views\MainWindow.xaml">
+        <Generator>MSBuild:Compile</Generator>
+        <XamlRuntime>Wpf</XamlRuntime>
+        <SubType>Designer</SubType>
+      </Page>
+      <!-- Exclude theme files from BAML compilation; they are loaded from disk at runtime -->
+      <Page Remove="Themes\Dark.xaml" />
+      <Page Remove="Themes\Light.xaml" />
+      <Page Remove="Themes\Tokyo Night.xaml" />
+      <Page Remove="Themes\GitHub Light.xaml" />
+      <None Remove="Themes\Dark.xaml" />
+      <None Remove="Themes\Light.xaml" />
+      <None Remove="Themes\Tokyo Night.xaml" />
+      <None Remove="Themes\GitHub Light.xaml" />
+      <Content Include="Themes\Dark.xaml">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <Content Include="Themes\Light.xaml">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <Content Include="Themes\Tokyo Night.xaml">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <Content Include="Themes\GitHub Light.xaml">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+    </ItemGroup>
+
+    <!-- NPC Portrait Creator native binaries (CONDITIONAL: only add if the binaries exist).
+         Keep ONLY the external binaries here — project resources must stay in the
+         unconditional ItemGroup below, otherwise they are skipped when the condition
+         is false (e.g. No Mugshot.png / SplashScreenImage.png would be missing). -->
+    <ItemGroup Condition="Exists('..\..\NPC Portrait Creator\out\build\x64-Release\NPCPortraitCreator.exe')">
+      <Content Include="..\..\NPC Portrait Creator\out\build\x64-Release\glfw3.dll">
+        <Link>NPC Portrait Creator\glfw3.dll</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <Content Include="..\..\NPC Portrait Creator\out\build\x64-Release\libbsarch.dll">
+        <Link>NPC Portrait Creator\libbsarch.dll</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <Content Include="..\..\NPC Portrait Creator\out\build\x64-Release\libcrypto-3-x64.dll">
+        <Link>NPC Portrait Creator\libcrypto-3-x64.dll</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <Content Include="..\..\NPC Portrait Creator\out\build\x64-Release\lighting.json">
+        <Link>NPC Portrait Creator\lighting.json</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <Content Include="..\..\NPC Portrait Creator\out\build\x64-Release\NPCPortraitCreator.exe">
+        <Link>NPC Portrait Creator\NPCPortraitCreator.exe</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <Content Include="..\..\NPC Portrait Creator\out\build\x64-Release\shaders\basic.frag">
+        <Link>NPC Portrait Creator\shaders\basic.frag</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <Content Include="..\..\NPC Portrait Creator\out\build\x64-Release\shaders\basic.vert">
+        <Link>NPC Portrait Creator\shaders\basic.vert</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <Content Include="..\..\NPC Portrait Creator\out\build\x64-Release\shaders\debug_line.frag">
+        <Link>NPC Portrait Creator\shaders\debug_line.frag</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <Content Include="..\..\NPC Portrait Creator\out\build\x64-Release\shaders\debug_line.vert">
+        <Link>NPC Portrait Creator\shaders\debug_line.vert</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <Content Include="..\..\NPC Portrait Creator\out\build\x64-Release\shaders\depth_shader.frag">
+        <Link>NPC Portrait Creator\shaders\depth_shader.frag</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <Content Include="..\..\NPC Portrait Creator\out\build\x64-Release\shaders\depth_shader.vert">
+        <Link>NPC Portrait Creator\shaders\depth_shader.vert</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+    </ItemGroup>
+
+    <!-- Project resources (UNCONDITIONAL - always copied/embedded) -->
+    <ItemGroup>
+      <None Remove="Resources\No Mugshot.png" />
+      <Content Include="Resources\No Mugshot.png">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <None Remove="Resources\Paths To Ignore.json" />
+      <Content Include="Resources\Paths To Ignore.json">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <None Remove="Resources\Warnings To Suppress.json" />
+      <Content Include="Resources\Warnings To Suppress.json">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <None Remove="Resources\Dragon Drop.png" />
+      <Content Include="Resources\Dragon Drop.png">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <None Remove="Resources\SplashScreenImage.png" />
+      <Content Include="Resources\SplashScreenImage.png">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <None Remove="Resources\Face Bug.png" />
+      <Content Include="Resources\Face Bug.png">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <Resource Include="Resources\No Associated Data.png">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Resource>
+      <None Remove="Resources\Multiple Plugins for NPC.png" />
+      <Resource Include="Resources\Multiple Plugins for NPC.png">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Resource>
+      <None Remove="Resources\No Npc Record.png" />
+      <Resource Include="Resources\No Npc Record.png">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Resource>
+      <None Remove="Resources\Missing Asset.png" />
+      <Resource Include="Resources\Missing Asset.png">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Resource>
+      <None Remove="Resources\Missing Outfit Assets.png" />
+      <Resource Include="Resources\Missing Outfit Assets.png">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Resource>
+      <None Remove="Resources\No Antlers.png" />
+      <Resource Include="Resources\No Antlers.png">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Resource>
+      <None Remove="Resources\Has Wig.png" />
+      <Resource Include="Resources\Has Wig.png">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Resource>
+      <None Remove="Resources\Contains Overrides.png" />
+      <Resource Include="Resources\Contains Overrides.png">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Resource>
+      <None Remove="Resources\Replace Selected Mod.png" />
+      <Resource Include="Resources\Replace Selected Mod.png" />
+      <None Remove="Resources\Guest Plugin.png" />
+      <Resource Include="Resources\Guest Plugin.png" />
+      <None Remove="Resources\SourcePlugin.png" />
+      <Resource Include="Resources\SourcePlugin.png" />
+      <None Remove="Resources\SelectedSourcePlugin.png" />
+      <Resource Include="Resources\SelectedSourcePlugin.png" />
+      <None Remove="Resources\RedDragon.png" />
+      <Resource Include="Resources\RedDragon.png" />
+      <None Remove="Resources\CotR_Plugins.txt" />
+      <Content Include="Resources\CotR_Plugins.txt">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+    </ItemGroup>
+
+    <!-- Localization files (UNCONDITIONAL) -->
+    <ItemGroup>
+      <None Remove="Localization\strings.json" />
+      <Content Include="Localization\strings.json">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+      <None Remove="Localization\strings.zh-CN.json" />
+      <Content Include="Localization\strings.zh-CN.json">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+    </ItemGroup>
+
+</Project>

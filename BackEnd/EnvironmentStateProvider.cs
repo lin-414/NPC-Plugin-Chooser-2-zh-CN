@@ -1,0 +1,493 @@
+﻿using System.Diagnostics;
+using Mutagen.Bethesda.Plugins.Cache;
+using Mutagen.Bethesda.Plugins.Order;
+using Mutagen.Bethesda.Skyrim;
+using Mutagen.Bethesda.Environments;
+using Noggog;
+using NPC_Plugin_Chooser_2.Models;
+using System.IO;
+using System.Reactive;
+using System.Reactive.Subjects;
+using System.Reflection;
+using Mutagen.Bethesda;
+using Mutagen.Bethesda.Plugins;
+using Mutagen.Bethesda.Plugins.Allocators;
+using NPC_Plugin_Chooser_2.View_Models;
+using ReactiveUI;
+using ReactiveUI.Fody.Helpers;
+using YamlDotNet.RepresentationModel;
+
+namespace NPC_Plugin_Chooser_2.BackEnd;
+
+public class EnvironmentStateProvider : ReactiveObject
+{
+    // "Core" state properties and fields
+    private IGameEnvironment<ISkyrimMod, ISkyrimModGetter> _environment;
+    private static ILoadOrderGetter<IModListingGetter<ISkyrimModGetter>> _emptyLoadOrder =
+        new LoadOrder<IModListingGetter<ISkyrimModGetter>>();
+    public ILoadOrderGetter<IModListingGetter<ISkyrimModGetter>>? LoadOrder => _environment?.LoadOrder ?? _emptyLoadOrder;
+    public IEnumerable<ModKey> LoadOrderModKeys => LoadOrder?.ListedOrder?.Select(m => m.ModKey) ?? new HashSet<ModKey>();
+    public ILinkCache<ISkyrimMod, ISkyrimModGetter>? LinkCache => _environment?.LinkCache;
+    public SkyrimRelease SkyrimVersion { get; private set; }
+    public DirectoryPath ExtraSettingsDataPath { get; set; }
+    public DirectoryPath InternalDataPath { get; set; }
+    public DirectoryPath DataFolderPath { get; private set; }
+    public ISkyrimMod OutputMod { get; set; }
+    public TextFileFormKeyAllocator? CurrentAllocator { get; set; }
+    public HashSet<ModKey> BaseGamePlugins => Implicits.Get(SkyrimVersion.ToGameRelease()).BaseMasters.ToHashSet();
+    public HashSet<ModKey> CreationClubPlugins { get; set; } = new();
+    public ModKey AbsoluteBasePlugin = ModKey.FromFileName("Skyrim.esm");
+    
+    public static string DefaultPluginName { get; } = "NPC";
+    public string OutputPluginName { get; private set; }
+    public string OutputPluginFileName => (OutputPluginName ?? DefaultPluginName) + ".esp";
+
+    // Absolute path to the folder this app writes its output plugins into (when known). Used to
+    // exclude the app's OWN output plugins from the resolved load order BEFORE Mutagen loads them,
+    // so building the environment never memory-maps (and thus never locks) a previously generated
+    // output plugin that a mod manager has enabled in the load order.
+    public string? OutputModFolderPath { get; private set; }
+    
+    // Additional properties (for logging and diagnostics)
+    [Reactive] public string CreationClubListingsFilePath { get; set; } = string.Empty;
+    [Reactive] public string LoadOrderFilePath { get; set; } = string.Empty;
+    [Reactive] public string EnvironmentBuilderError { get; set; }
+    [Reactive] public int NumPlugins { get; set; } = 0;
+    [Reactive] public int NumActivePlugins { get; set; } = 0;
+    [Reactive] public EnvironmentStatus Status { get; private set; } = EnvironmentStatus.Invalid;
+
+    // Diagnostics surfaced on the Settings → Environment Status panel so users can
+    // tell where Mutagen located plugins.txt / Skyrim.ccc, whether the files exist,
+    // and how many CC plugins (if any) were parsed vs actually present in the
+    // resolved load order. Helpful for non-standard installs (renamed folders,
+    // moved drives) where the default registry-based discovery falls through.
+    [Reactive] public bool LoadOrderFileExists { get; private set; }
+    [Reactive] public bool CreationClubListingsFileExists { get; private set; }
+    [Reactive] public CreationClubListingsSourceKind CreationClubListingsSource { get; private set; } = CreationClubListingsSourceKind.NotFound;
+    [Reactive] public int CreationClubPluginsCount { get; private set; }
+    [Reactive] public int CreationClubPluginsInLoadOrderCount { get; private set; }
+
+    // True when the resolved load order contains ONLY base-game and Creation Club plugins - i.e. not
+    // a single third-party plugin. Purely advisory: the environment is still Valid (data folder,
+    // Plugins.txt and Skyrim.esm all resolved), so nothing is gated off this flag.
+    //
+    // The usual cause is launching outside a mod manager. Mutagen resolves the load order from
+    // %LOCALAPPDATA%\<Game>\Plugins.txt; under MO2/Vortex the VFS redirects that path to the active
+    // profile, but without the manager in the loop it reads the vanilla launcher's file instead. Every
+    // check in UpdateEnvironmentCore still passes, so the app reports a healthy environment while
+    // seeing a handful of plugins.
+    //
+    // Note what this does NOT break: appearance mods are still discovered, because VM_Mods scans the
+    // Mods folder directly rather than going through the load order. What breaks is everything
+    // downstream of it - the output plugin gets patched against the wrong conflict winners, and any
+    // NPC outside the base game / Creation Club never reaches the NPCs menu.
+    [Reactive] public bool LoadOrderIsVanillaOnly { get; private set; }
+
+    public enum CreationClubListingsSourceKind
+    {
+        NotFound,
+        Mutagen,
+        Fallback
+    }
+    
+    // Additional fields to help other classes
+    private readonly Dictionary<ModKey, string> _modKeyFormIdPrefixCache = new();
+    private SkyrimRelease _targetSkyrimRelease;
+    private string _targetDataFolderPath;
+    
+    // 1. Create a private Subject to control the broadcast
+    private readonly Subject<Unit> _environmentUpdatedSubject = new();
+
+    // 2. Expose it publicly as an IObservable so others can subscribe but not broadcast
+    public IObservable<Unit> OnEnvironmentUpdated => _environmentUpdatedSubject;
+
+    public enum EnvironmentStatus
+    {
+        Valid,
+        Invalid,
+        Pending
+    }
+
+    public EnvironmentStateProvider(VM_SplashScreen? splashReporter = null)
+    {
+        string? exeLocation = null;
+        var assembly = Assembly.GetEntryAssembly();
+        if (assembly != null)
+        {
+            exeLocation = Path.GetDirectoryName(assembly.Location);
+        }
+        else
+        {
+            throw new Exception("Could not locate running assembly");
+        }
+        
+        ExtraSettingsDataPath = Path.Combine(exeLocation, "Settings");
+        InternalDataPath = Path.Combine(exeLocation, "InternalData");
+    }
+
+    public void SetEnvironmentTarget(SkyrimRelease skyrimRelease, string dataFolderPath, string outputPluginName, string? outputModFolderPath = null)
+    {
+        SkyrimVersion = skyrimRelease;
+        _targetDataFolderPath = dataFolderPath;
+        OutputPluginName = !string.IsNullOrWhiteSpace(outputPluginName) ? outputPluginName : DefaultPluginName;
+        OutputModFolderPath = outputModFolderPath;
+    }
+
+    public void UpdateEnvironment()
+    {
+        // Production path: only enabled+existing plugins, with this app's own output (and anything
+        // mastered to it) trimmed so a previously deployed output plugin is never mapped/locked.
+        UpdateEnvironmentCore(listings =>
+            listings.OnlyEnabledAndExisting().TrimDependentPlugins(OutputMod.ModKey));
+    }
+
+    /// <summary>
+    /// Test-only seam. Builds the environment with a caller-supplied transform over the loaded mod
+    /// listings, so an integration test can reproduce a specific mod-manager profile's exact active
+    /// load order - including plugins that live in mod-manager folders rather than the game Data
+    /// folder (the transform may append hand-loaded <see cref="IModListingGetter{TMod}"/> entries).
+    /// Mirrors <see cref="UpdateEnvironment"/>'s post-build computation; has no production callers.
+    /// </summary>
+    internal void UpdateEnvironmentForTest(
+        Func<IEnumerable<IModListingGetter<ISkyrimModGetter>>, IEnumerable<IModListingGetter<ISkyrimModGetter>>> modListingTransform)
+    {
+        UpdateEnvironmentCore(modListingTransform);
+    }
+
+    private void UpdateEnvironmentCore(
+        Func<IEnumerable<IModListingGetter<ISkyrimModGetter>>, IEnumerable<IModListingGetter<ISkyrimModGetter>>> modListingTransform)
+    {
+        EnvironmentBuilderError = string.Empty;
+        Status = EnvironmentStatus.Pending;
+        
+        var builder = GameEnvironment.Typical.Builder<ISkyrimMod, ISkyrimModGetter>(SkyrimVersion.ToGameRelease());
+        if (!_targetDataFolderPath.IsNullOrWhitespace() && Directory.Exists(_targetDataFolderPath))
+        {
+            builder = builder.WithTargetDataFolder(_targetDataFolderPath);
+        }
+
+        var validatedName = Path.GetFileNameWithoutExtension(OutputPluginName);
+        
+        OutputMod = null;
+        OutputMod = new SkyrimMod(ModKey.FromName(validatedName, ModType.Plugin), SkyrimVersion);
+
+        var built = false;
+
+        try
+        {
+            string notificationStr = "";
+
+            // Exclude THIS app's own output plugins (those it writes into OutputModFolderPath, which a
+            // mod manager may have enabled in the load order) BEFORE Mutagen loads them. The stamp-based
+            // TrimDependentPlugins below reads each plugin's header to identify our output — and that read
+            // memory-maps the file, a map the environment then retains for its lifetime, locking the file
+            // so the patcher can't overwrite it. Filtering here, at the pre-load listing stage (ModKey
+            // only, no Mod materialization), means our output is never mapped and never locked.
+            var ownOutputModKeys = GetOwnOutputModKeys();
+            if (ownOutputModKeys.Count > 0)
+            {
+                StartupLogger.Log($"Excluding {ownOutputModKeys.Count} own output plugin(s) from the environment pre-load: {string.Join(", ", ownOutputModKeys.Select(k => k.FileName))}");
+            }
+
+            _environment = builder
+                .TransformLoadOrderListings(listings =>
+                    ownOutputModKeys.Count == 0
+                        ? listings
+                        : listings.Where(l => !ownOutputModKeys.Contains(l.ModKey)))
+                .TransformModListings(modListingTransform)
+                    .WithOutputMod(OutputMod, OutputModTrimming.Self)
+                .Build();
+
+            if (!Directory.Exists(_environment.DataFolderPath))
+            {
+                Status = EnvironmentStatus.Invalid;
+                return;
+            }
+
+            if (_environment.LoadOrder?.ListedOrder?.Count() == 0)
+            {
+                Status = EnvironmentStatus.Invalid;
+                return;
+            }
+
+            if (!_environment.LoadOrder.ContainsKey(AbsoluteBasePlugin))
+            {
+                Status = EnvironmentStatus.Invalid;
+                return;
+            }
+            
+            // Mutagen 0.54 made IGameEnvironment.LoadOrderFilePath nullable (FilePath?), which no
+            // longer exposes .Exists/.Path directly. Resolve it to its string path (the same
+            // implicit conversion the field assignment below already relies on) and validate that.
+            string loadOrderFilePath = _environment.LoadOrderFilePath;
+            if (string.IsNullOrEmpty(loadOrderFilePath) || !File.Exists(loadOrderFilePath))
+            {
+                EnvironmentBuilderError =  "Load order file path at " + loadOrderFilePath + " does not exist"; // prevent successful initialization in the wrong mode.
+                Status = EnvironmentStatus.Invalid;
+                return;
+            }
+            
+            LoadOrderFilePath = _environment.LoadOrderFilePath;
+            LoadOrderFileExists = !string.IsNullOrEmpty(LoadOrderFilePath) && File.Exists(LoadOrderFilePath);
+            DataFolderPath = _environment.DataFolderPath; // If a custom data folder path was provided it will not change. If no custom data folder path was provided, this will set it to the default path.
+
+            ResolveCreationClubListingsPath();
+            CreationClubPlugins = GetCreationClubPlugins();
+            CreationClubPluginsCount = CreationClubPlugins.Count;
+            var listedKeys = LoadOrder.ListedOrder.Select(p => p.ModKey).ToHashSet();
+            CreationClubPluginsInLoadOrderCount = CreationClubPlugins.Count(listedKeys.Contains);
+
+            ComputeFormIdPrefixes();
+
+            Status = EnvironmentStatus.Valid;
+            NumPlugins = LoadOrder.ListedOrder.Count();
+            NumActivePlugins = LoadOrder.ListedOrder.Count(p => p.Enabled);
+            LoadOrderIsVanillaOnly = ComputeLoadOrderIsVanillaOnly();
+
+            StartupLogger.Log($"Environment resolved: DataFolder='{DataFolderPath}', LoadOrderFile='{LoadOrderFilePath}' (exists={LoadOrderFileExists}), CreationClubFile='{CreationClubListingsFilePath}' (exists={CreationClubListingsFileExists}, source={CreationClubListingsSource}), CC parsed={CreationClubPluginsCount}, CC in LoadOrder={CreationClubPluginsInLoadOrderCount}, NumPlugins={NumPlugins}, NumActive={NumActivePlugins}, VanillaOnly={LoadOrderIsVanillaOnly}");
+        }
+        catch (Exception ex)
+        {
+            EnvironmentBuilderError = ExceptionLogger.GetExceptionStack(ex);
+            Status = EnvironmentStatus.Invalid;
+        }
+        
+        _environmentUpdatedSubject.OnNext(Unit.Default);
+    }
+
+    // ModKeys of the plugin files physically present in this app's own output folder (if known).
+    // These are excluded from the resolved load order before Mutagen loads them (see UpdateEnvironment)
+    // so the environment never memory-maps — and thus never locks — a previously generated output
+    // plugin. Best-effort: returns an empty set if the folder is unset/missing or unreadable, in which
+    // case only the stamp-based TrimDependentPlugins fallback applies.
+    private HashSet<ModKey> GetOwnOutputModKeys()
+    {
+        var result = new HashSet<ModKey>();
+        var dir = OutputModFolderPath;
+        if (string.IsNullOrWhiteSpace(dir) || !Directory.Exists(dir)) return result;
+
+        try
+        {
+            foreach (var file in Directory.EnumerateFiles(dir))
+            {
+                var ext = Path.GetExtension(file);
+                if (!ext.Equals(".esp", StringComparison.OrdinalIgnoreCase)
+                    && !ext.Equals(".esm", StringComparison.OrdinalIgnoreCase)
+                    && !ext.Equals(".esl", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var mk = ModKey.TryFromFileName(Path.GetFileName(file));
+                if (mk != null) result.Add(mk.Value);
+            }
+        }
+        catch
+        {
+            // Best-effort only; the stamp-based TrimDependentPlugins remains as a fallback.
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// True when not one enabled plugin in the resolved load order comes from outside the base game
+    /// or Creation Club. See <see cref="LoadOrderIsVanillaOnly"/> for why that is worth flagging.
+    /// This is a diagnostic only, so it never throws and never blocks initialization: on any
+    /// unexpected state it returns false, leaving the warning off.
+    /// </summary>
+    private bool ComputeLoadOrderIsVanillaOnly()
+    {
+        try
+        {
+            var baseGame = BaseGamePlugins; // property re-derives from Implicits on each read
+            var creationClub = CreationClubPlugins;
+            var ownOutput = OutputMod?.ModKey;
+
+            // Enabled-only: a disabled third-party plugin contributes nothing, so a load order whose
+            // only mods are unticked is just as broken for our purposes as one with no mods at all.
+            var listed = LoadOrder?.ListedOrder;
+            if (listed == null) return false;
+
+            // Enabled-only: a disabled third-party plugin contributes nothing, so a load order whose
+            // only mods are unticked is just as broken for our purposes as one with no mods at all.
+            return IsVanillaOnlyLoadOrder(
+                listed.Where(p => p.Enabled).Select(p => p.ModKey),
+                baseGame,
+                creationClub,
+                ownOutput);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Pure predicate behind <see cref="LoadOrderIsVanillaOnly"/>, split out so it can be tested
+    /// without standing up a real game environment.
+    /// </summary>
+    internal static bool IsVanillaOnlyLoadOrder(
+        IEnumerable<ModKey> enabledModKeys,
+        ISet<ModKey> baseGamePlugins,
+        ISet<ModKey> creationClubPlugins,
+        ModKey? ownOutputModKey)
+    {
+        var enabled = enabledModKeys.ToList();
+        if (enabled.Count == 0) return false; // an empty load order is already reported as Invalid
+
+        // Our own output plugin is normally filtered out pre-load (GetOwnOutputModKeys), but a rename
+        // between runs can leave a stale one listed - don't let that mask the warning.
+        return !enabled.Any(k =>
+            !baseGamePlugins.Contains(k)
+            && !creationClubPlugins.Contains(k)
+            && (!ownOutputModKey.HasValue || k != ownOutputModKey.Value));
+    }
+
+    // Mutagen's default Skyrim.ccc discovery uses registry-based game lookup, which
+    // fails for non-standard installs (renamed folder, drive move). When that happens
+    // _environment.CreationClubListingsFilePath is empty / missing, so the manual
+    // parse below returns an empty set, the free CC plugins never appear as implicit
+    // masters, and screening rejects mods that declare them as required. Fall back
+    // to probing the data folder's parent for Skyrim.ccc before giving up.
+    private void ResolveCreationClubListingsPath()
+    {
+        var mutagenPath = _environment.CreationClubListingsFilePath ?? string.Empty;
+        if (!string.IsNullOrEmpty(mutagenPath) && File.Exists(mutagenPath))
+        {
+            CreationClubListingsFilePath = mutagenPath;
+            CreationClubListingsFileExists = true;
+            CreationClubListingsSource = CreationClubListingsSourceKind.Mutagen;
+            return;
+        }
+
+        try
+        {
+            var parent = Directory.GetParent(_environment.DataFolderPath)?.FullName;
+            if (!string.IsNullOrEmpty(parent))
+            {
+                var fallback = Path.Combine(parent, "Skyrim.ccc");
+                if (File.Exists(fallback))
+                {
+                    CreationClubListingsFilePath = fallback;
+                    CreationClubListingsFileExists = true;
+                    CreationClubListingsSource = CreationClubListingsSourceKind.Fallback;
+                    return;
+                }
+            }
+        }
+        catch
+        {
+            // Fall through to NotFound; we don't want path-probing exceptions to
+            // break environment initialization.
+        }
+
+        CreationClubListingsFilePath = mutagenPath;
+        CreationClubListingsFileExists = false;
+        CreationClubListingsSource = CreationClubListingsSourceKind.NotFound;
+    }
+
+    public HashSet<ModKey> GetCreationClubPlugins()
+    {
+        HashSet<ModKey> creationClubModKeys = new ();
+
+        try // currently Implicits.Get doesn't seem to include creation club plugins
+        {
+            if (File.Exists(CreationClubListingsFilePath))
+            {
+                var ccListings = File.ReadAllText(CreationClubListingsFilePath);
+                var ccPlugins = ccListings.Split(Environment.NewLine);
+                foreach (var pluginName in ccPlugins)
+                {
+                    var plugin = ModKey.TryFromFileName(pluginName);
+                    if (plugin != null && !creationClubModKeys.Contains(plugin.Value))
+                    {
+                        creationClubModKeys.Add(plugin.Value);
+                    }
+                }
+            }
+        }
+        catch
+        {
+            return new HashSet<ModKey>();
+        }
+        
+        return creationClubModKeys;
+    }
+
+    /// <summary>Rebuilds the ModKey -> FormID-prefix map for the CURRENT load order. The
+    /// two-counter rule lives in <see cref="Auxilliary.BuildFormIdPrefixes"/> so the output
+    /// validator, which reports against an untrimmed load order of its own, shares it.</summary>
+    private void ComputeFormIdPrefixes()
+    {
+        _modKeyFormIdPrefixCache.Clear();
+        foreach (var (modKey, prefix) in Auxilliary.BuildFormIdPrefixes(LoadOrder.ListedOrder))
+        {
+            _modKeyFormIdPrefixCache[modKey] = prefix;
+        }
+    }
+
+    public bool TryGetPluginIndex(ModKey modKey, out string prefix)
+    {
+        if (_modKeyFormIdPrefixCache.TryGetValue(modKey, out prefix))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    public string GetAllocatorPath()
+    {
+        string pluginName = Path.GetFileNameWithoutExtension(OutputPluginName);
+        string allocatorName = "Allocator_" + pluginName;
+        return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, allocatorName) + ".txt";
+    }
+
+    /// <summary>
+    /// Builds a throwaway environment from the real on-disk load order WITHOUT trimming
+    /// this app's generated output (and without overlaying a fresh in-memory output mod),
+    /// so callers can inspect the true conflict-winning records the game actually sees —
+    /// including a deployed output plugin and anything overriding it. The normal
+    /// environment (<see cref="UpdateEnvironment"/>) deliberately trims the output via
+    /// <c>TrimDependentPlugins</c>, which hides it from validation.
+    ///
+    /// The returned environment is the caller's to dispose. Returns null on failure with
+    /// the reason in <paramref name="error"/>.
+    /// </summary>
+    public IGameEnvironment<ISkyrimMod, ISkyrimModGetter>? TryBuildUntrimmedEnvironment(out string? error)
+    {
+        error = null;
+        try
+        {
+            var builder = GameEnvironment.Typical.Builder<ISkyrimMod, ISkyrimModGetter>(SkyrimVersion.ToGameRelease());
+            if (!_targetDataFolderPath.IsNullOrWhitespace() && Directory.Exists(_targetDataFolderPath))
+            {
+                builder = builder.WithTargetDataFolder(_targetDataFolderPath);
+            }
+
+            // Only OnlyEnabledAndExisting() — the set the game actually loads. No
+            // TrimDependentPlugins, no WithOutputMod: the deployed output plugin and any
+            // overrides of it stay in the link cache so winning records are the real ones.
+            var env = builder
+                .TransformModListings(x => x.OnlyEnabledAndExisting())
+                .Build();
+
+            if (!Directory.Exists(env.DataFolderPath) ||
+                env.LoadOrder?.ListedOrder == null ||
+                !env.LoadOrder.ListedOrder.Any())
+            {
+                error = "Untrimmed environment built with no usable load order or data folder.";
+                env.Dispose();
+                return null;
+            }
+
+            return env;
+        }
+        catch (Exception ex)
+        {
+            error = ExceptionLogger.GetExceptionStack(ex);
+            return null;
+        }
+    }
+}

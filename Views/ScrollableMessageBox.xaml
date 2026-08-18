@@ -1,0 +1,53 @@
+﻿<Window x:Class="NPC_Plugin_Chooser_2.Views.ScrollableMessageBox"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:local="clr-namespace:NPC_Plugin_Chooser_2.Views"
+        xmlns:themes="clr-namespace:NPC_Plugin_Chooser_2.Themes"
+        xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
+        mc:Ignorable="d"
+        Style="{DynamicResource ThemedWindowStyle}"
+        Title="{l:Loc scrollableMessageBox}">
+    
+    <i:Interaction.Behaviors>
+        <themes:TitleBarThemingBehavior />
+    </i:Interaction.Behaviors>
+    
+    <Grid>
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <DockPanel x:Name="ContentDockPanel" Margin="10">
+                <Image x:Name="DisplayImage"
+                       Visibility="Collapsed"
+                       Stretch="Uniform"
+                       Margin="0,0,10,0" />
+
+                <ScrollViewer VerticalScrollBarVisibility="Auto">
+                    <TextBox x:Name="MessageTextBox" 
+                             TextWrapping="Wrap"
+                             IsReadOnly="True"
+                             AcceptsReturn="True"
+                             BorderThickness="0"
+                             Background="Transparent"/>
+                </ScrollViewer>
+            </DockPanel>
+
+            <StackPanel Orientation="Horizontal"
+                        Grid.Row="1"
+                        HorizontalAlignment="Right"
+                        Margin="10"
+                        x:Name="ButtonPanel"
+            >
+                <Button x:Name="YesButton" Content="{l:Loc yes}" Width="75" Height="25" Margin="0,0,10,0" Click="YesButton_Click" Visibility="Collapsed"/>
+                <Button x:Name="NoButton" Content="{l:Loc no}" Width="75" Height="25" Click="NoButton_Click" Visibility="Collapsed"/>
+                <Button x:Name="OkButton" Content="{l:Loc ok}" Width="75" Height="25" Click="OkButton_Click" Visibility="Collapsed"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

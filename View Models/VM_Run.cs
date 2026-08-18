@@ -1,0 +1,1034 @@
+﻿// VM_Run.cs
+using System.Reactive;
+using System.Reactive.Concurrency;
+using System.Reactive.Linq;
+using System.Text;
+using Mutagen.Bethesda.Plugins;
+using Mutagen.Bethesda.Skyrim;
+using NPC_Plugin_Chooser_2.BackEnd;
+using NPC_Plugin_Chooser_2.Models;
+using NPC_Plugin_Chooser_2.Localization;
+using ReactiveUI;
+using ReactiveUI.Fody.Helpers;
+using System.IO;
+using Mutagen.Bethesda;
+using System.Collections.ObjectModel;
+using System.Reactive.Disposables;
+using System.Reactive.Subjects;
+using System.Reflection;
+using System.Text.RegularExpressions;
+using System.Windows;
+using Microsoft.Win32;
+using CharacterViewer.Rendering.Offscreen;
+using Mutagen.Bethesda.Archives;
+using Mutagen.Bethesda.Plugins.Records;
+using Noggog;
+using NPC_Plugin_Chooser_2.Views;
+using Serilog; // Needed for LinkCache Interface
+
+namespace NPC_Plugin_Chooser_2.View_Models;
+
+public class VM_Run : ReactiveObject, IDisposable
+{
+    private readonly EnvironmentStateProvider _environmentStateProvider;
+    private readonly Settings _settings;
+    private readonly VM_Settings _vmSettings;
+    private readonly Lazy<VM_Mods> _lazyVmMods;
+    private readonly Patcher _patcher;
+    private readonly Validator _validator;
+    private readonly AssetHandler _assetHandler;
+    private readonly BsaHandler _bsaHandler;
+    private readonly SkyPatcherInterface _skyPatcherInterface;
+    private readonly RecordDeltaPatcher _recordDeltaPatcher;
+    private readonly PluginProvider _pluginProvider;
+    private readonly RecordHandler _recordHandler;
+    private readonly Auxilliary _aux;
+    private readonly MasterAnalyzer _masterAnalyzer;
+    private readonly Lazy<IOffscreenRenderer> _offscreenRenderer;
+    private CancellationTokenSource? _patchingCts;
+    private readonly CompositeDisposable _disposables = new();
+    private readonly Subject<RunLogEntry> _logMessageSubject = new Subject<RunLogEntry>();
+
+    // --- Constants ---
+    public const string ALL_NPCS_GROUP = "<All NPCs>";
+
+
+    // --- Logging & State ---
+    /// <summary>
+    /// The log, one entry per rendered line, each carrying the severity the view colours it
+    /// with. This replaced a single flat string: besides making per-line colouring possible it
+    /// drops the O(n²) rebuild of the whole log on every 250 ms batch.
+    /// </summary>
+    public ObservableCollection<RunLogEntry> LogLines { get; } = new();
+    [Reactive] public bool IsRunning { get; private set; }
+    [Reactive] public string RunButtonText { get; private set; } = GetTranslation("runPatchGeneration", "Run Patch Generation");
+    [Reactive] public double ProgressValue { get; private set; } = 0;
+    [Reactive] public string ProgressText { get; private set; } = string.Empty;
+    /// <summary>
+    /// Whether routine narration reaches the log. Persisted as
+    /// <see cref="Settings.LogVerbose"/> (default off).
+    /// </summary>
+    [Reactive] public bool IsVerboseModeEnabled { get; set; } = false;
+
+    /// <summary>
+    /// Gates the per-batch "PERFORMANCE REPORT for Group: [...]" blocks, and the phase timings +
+    /// detailed tracer report in the Validate Output log. Persisted as
+    /// <see cref="Settings.LogPerformance"/> (default on); the Patcher and OutputValidator read
+    /// the setting directly so they can skip generating those reports at all.
+    /// </summary>
+    [Reactive] public bool IsPerformanceLoggingEnabled { get; set; } = true;
+
+    // --- New Properties for Timestamps ---
+    [Reactive] private DateTime? ValidationStartTime { get; set; }
+    [Reactive] private DateTime? PatchingStartTime { get; set; }
+    [Reactive] private string CurrentProgressMessage { get; set; } = string.Empty;
+    [Reactive] private TimeSpan? FinalValidationTime { get; set; }
+
+
+    // --- Group Filtering ---
+    public ObservableCollection<string> AvailableNpcGroups { get; } = new();
+    [Reactive] public string SelectedNpcGroup { get; set; } = ALL_NPCS_GROUP;
+
+
+    // --- Configuration (Mirrored from V1 for backend use) ---
+    // These could be exposed in Settings View later if desired, or kept internal
+    private bool ClearOutputDirectoryOnRun => true; // Example: default to true
+
+    // --- Internal Data for Patching Run ---
+
+    private Dictionary<string, ModSetting> _modSettingsMap = new(); // Key: DisplayName, Value: ModSetting
+    private string _currentRunOutputAssetPath = string.Empty;
+    public string CurrentRunOutputAssetPath => _currentRunOutputAssetPath;
+
+
+    public ReactiveCommand<Unit, Unit> RunCommand { get; }
+    public ReactiveCommand<Unit, Unit> GenerateSpawnBatCommand { get; }
+    public ReactiveCommand<Unit, Unit> ShowStatusCommand { get; }
+    
+    public ReactiveCommand<Unit, Unit> AnalyzeMastersCommand { get; }
+
+    // Passthrough to the Settings VM so the Run tab can offer the same "Validate Output"
+    // action without duplicating its logic (which lives in VM_Settings).
+    public ReactiveCommand<Unit, Unit> ValidateOutputCommand => _vmSettings.ValidateOutputCommand;
+
+    public VM_Run(
+        EnvironmentStateProvider environmentStateProvider,
+        Settings settings,
+        VM_Settings vmSettings,
+        Lazy<VM_Mods> lazyVmMods,
+        Patcher patcher,
+        Validator validator,
+        AssetHandler assetHandler,
+        BsaHandler bsaHandler,
+        SkyPatcherInterface skyPatcherInterface,
+        RecordDeltaPatcher recordDeltaPatcher,
+        Auxilliary aux,
+        PluginProvider pluginProvider,
+        RecordHandler recordHandler,
+        MasterAnalyzer masterAnalyzer,
+        NPC_Plugin_Chooser_2.BackEnd.OutfitDistribution.ForwardedOutfitDistributor forwardedOutfitDistributor,
+        Lazy<IOffscreenRenderer> offscreenRenderer)
+    {
+        _environmentStateProvider = environmentStateProvider;
+        _settings = settings;
+        _vmSettings = vmSettings;
+        _lazyVmMods = lazyVmMods;
+        _patcher = patcher;
+        _validator = validator;
+        _assetHandler = assetHandler;
+        _bsaHandler = bsaHandler;
+        _skyPatcherInterface = skyPatcherInterface;
+        _recordDeltaPatcher = recordDeltaPatcher;
+        _aux = aux;
+        _pluginProvider = pluginProvider;
+        _recordHandler = recordHandler;
+        _masterAnalyzer = masterAnalyzer;
+        _offscreenRenderer = offscreenRenderer;
+
+        _patcher.ConnectToUILogger(AppendLog, UpdateProgress, ResetProgress, ResetLog);
+        _validator.ConnectToUILogger(AppendLog, UpdateProgress, ResetProgress, ResetLog);
+        _assetHandler.ConnectToUILogger(AppendLog, UpdateProgress, ResetProgress, ResetLog);
+        _bsaHandler.ConnectToUILogger(AppendLog, UpdateProgress, ResetProgress, ResetLog);
+        _recordDeltaPatcher.ConnectToUILogger(AppendLog, UpdateProgress, ResetProgress, ResetLog);
+        _skyPatcherInterface.ConnectToUILogger(AppendLog, UpdateProgress, ResetProgress, ResetLog);
+        forwardedOutfitDistributor.ConnectToUILogger(AppendLog, UpdateProgress, ResetProgress, ResetLog);
+
+        this.WhenAnyValue(x => x.IsRunning)
+            .Select(isRunning => isRunning ? GetTranslation("cancelPatching", "Cancel Patching") : GetTranslation("runPatchGeneration", "Run Patch Generation"))
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .BindTo(this, x => x.RunButtonText)
+            .DisposeWith(_disposables);
+
+        // Command should be executable if the environment is valid (to start) OR if it's already running (to cancel).
+        var canExecute = this.WhenAnyValue(
+            x => x.IsRunning,
+            x => x._environmentStateProvider.Status,
+            (running, status) => running || status == EnvironmentStateProvider.EnvironmentStatus.Valid);
+
+        // This command's delegate is SYNCHRONOUS. It fires off the async work or cancels it.
+        RunCommand = ReactiveCommand.Create(TogglePatcherExecution, canExecute).DisposeWith(_disposables);
+
+        // DO NOT bind IsExecuting to IsRunning. We are managing IsRunning manually.
+
+        // Note: Since the command's task is now synchronous and short-lived,
+        // the ThrownExceptions subscription is less likely to fire for patching errors.
+        // We will handle exceptions within the async method itself.
+        RunCommand.ThrownExceptions.Subscribe(ex =>
+        {
+            // This will now only catch rare errors within TogglePatcherExecution itself.
+            AppendLog($"FATAL UI ERROR: {ExceptionLogger.GetExceptionStack(ex)}", true);
+        }).DisposeWith(_disposables);
+
+        // --- Timestamp and Progress Text Composition Logic ---
+        var runningTimer = this.WhenAnyValue(x => x.IsRunning)
+            .Select(running => running
+                ? Observable.Interval(TimeSpan.FromSeconds(1), RxApp.MainThreadScheduler).Select(_ => Unit.Default)
+                : Observable.Empty<Unit>())
+            .Switch();
+
+        // React to changes in any property that affects the progress text
+        var progressChanged = this.WhenAnyValue(x => x.CurrentProgressMessage, x => x.ValidationStartTime,
+                x => x.PatchingStartTime, x => x.FinalValidationTime)
+            .Select(_ => Unit.Default);
+
+        Observable.Merge(runningTimer, progressChanged)
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(_ =>
+            {
+                if (!IsRunning && string.IsNullOrEmpty(CurrentProgressMessage))
+                {
+                    ProgressText = string.Empty;
+                    return;
+                }
+
+                if (!IsRunning)
+                {
+                    ProgressText = CurrentProgressMessage;
+                    return;
+                }
+
+                var sb = new StringBuilder();
+
+                if (FinalValidationTime.HasValue) // If validation time is frozen, display it
+                {
+                    sb.Append($"Validation: {FinalValidationTime.Value:hh\\:mm\\:ss}");
+                }
+                else if (ValidationStartTime.HasValue) // Otherwise, calculate running time
+                {
+                    var validationTime = (DateTime.Now - ValidationStartTime.Value);
+                    sb.Append($"Validation: {validationTime:hh\\:mm\\:ss}");
+                }
+
+                if (PatchingStartTime.HasValue) // Patching timer logic is separate and simple
+                {
+                    if (sb.Length > 0) sb.Append(" | ");
+                    var patchingTime = (DateTime.Now - PatchingStartTime.Value);
+                    sb.Append($"Execution: {patchingTime:hh\\:mm\\:ss}");
+                }
+
+                if (sb.Length > 0) sb.Append(" | ");
+                sb.Append(CurrentProgressMessage);
+
+                ProgressText = sb.ToString();
+            })
+            .DisposeWith(_disposables);
+        // --- End of New Logic ---
+
+        // Bat command logic
+        var canGenerateBat = this.WhenAnyValue(
+            x => x.IsRunning,
+            x => x.SelectedNpcGroup,
+            (running, group) => !running && !string.IsNullOrEmpty(group) &&
+                                _environmentStateProvider.Status == EnvironmentStateProvider.EnvironmentStatus.Valid
+        );
+
+        GenerateSpawnBatCommand = ReactiveCommand.CreateFromTask(GenerateSpawnBatFileAsync, canGenerateBat)
+            .DisposeWith(_disposables);
+
+        GenerateSpawnBatCommand.ThrownExceptions.Subscribe(ex =>
+        {
+            AppendLog($"ERROR: Failed to generate spawn bat file: {ExceptionLogger.GetExceptionStack(ex)}", true);
+        }).DisposeWith(_disposables);
+
+        ShowStatusCommand = ReactiveCommand.CreateFromTask(GenerateEnvironmentReportAsync).DisposeWith(_disposables);
+
+        ShowStatusCommand.ThrownExceptions.Subscribe(ex =>
+        {
+            AppendLog($"ERROR: Failed to get status report: {ExceptionLogger.GetExceptionStack(ex)}", true);
+        }).DisposeWith(_disposables);
+
+        _logMessageSubject
+            .Buffer(TimeSpan.FromMilliseconds(250), RxApp.TaskpoolScheduler) // Collect messages for 250ms
+            .Where(buffer => buffer.Any()) // Only continue if there are messages in the buffer
+            .ObserveOn(RxApp.MainThreadScheduler) // Switch to the UI thread to touch LogLines
+            .Subscribe(messages =>
+            {
+                foreach (var msg in messages)
+                foreach (var line in RunLogClassifier.SplitIntoLines(msg))
+                {
+                    LogLines.Add(line);
+                }
+            })
+            .DisposeWith(_disposables);
+
+        // Both log toggles mirror their persisted setting. Skip(1) so seeding the properties from
+        // the model does not immediately write them back.
+        IsPerformanceLoggingEnabled = _settings.LogPerformance;
+        this.WhenAnyValue(x => x.IsPerformanceLoggingEnabled)
+            .Skip(1)
+            .Subscribe(enabled => _settings.LogPerformance = enabled)
+            .DisposeWith(_disposables);
+
+        IsVerboseModeEnabled = _settings.LogVerbose;
+        this.WhenAnyValue(x => x.IsVerboseModeEnabled)
+            .Skip(1)
+            .Subscribe(enabled => _settings.LogVerbose = enabled)
+            .DisposeWith(_disposables);
+
+        // Update Available Groups when NpcGroupAssignments changes in settings
+        UpdateAvailableGroups();
+
+        // Subscribe to VM_Settings EnvironmentStatus changes to refresh groups when env becomes valid
+        _vmSettings.WhenAnyValue(x => x.EnvironmentStatus)
+            .Where(status => status == EnvironmentStateProvider.EnvironmentStatus.Valid)
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(_ => UpdateAvailableGroups())
+            .DisposeWith(_disposables);
+
+        // Subscribe to group change messages
+        MessageBus.Current.Listen<NpcGroupsChangedMessage>()
+            .ObserveOn(RxApp.MainThreadScheduler) // Ensure update happens on UI thread
+            .Subscribe(_ =>
+            {
+                AppendLog("NPC Groups potentially changed. Refreshing dropdown..."); // Verbose only
+                UpdateAvailableGroups();
+            })
+            .DisposeWith(_disposables); // Add subscription to disposables
+        
+        // Analyze Masters command - can execute when not running and environment is valid
+        var canAnalyzeMasters = this.WhenAnyValue(
+            x => x.IsRunning,
+            x => x._environmentStateProvider.Status,
+            (running, status) => !running && status == EnvironmentStateProvider.EnvironmentStatus.Valid);
+
+        AnalyzeMastersCommand = ReactiveCommand.CreateFromTask(AnalyzeMastersAsync, canAnalyzeMasters)
+            .DisposeWith(_disposables);
+
+        AnalyzeMastersCommand.ThrownExceptions.Subscribe(ex =>
+        {
+            AppendLog($"ERROR: Failed to analyze masters: {ExceptionLogger.GetExceptionStack(ex)}", true);
+        }).DisposeWith(_disposables);
+    }
+
+    private void TogglePatcherExecution()
+    {
+        if (IsRunning)
+        {
+            // If it's running, cancel.
+            AppendLog("Cancellation requested by user.");
+            _patchingCts?.Cancel();
+        }
+        else
+        {
+            // If it's not running, start the patching process in the background.
+            // We use `_ = ` to discard the task, telling the compiler we are intentionally not awaiting it.
+            _ = ExecutePatchingAsync();
+        }
+    }
+
+
+    private async Task ExecutePatchingAsync()
+    {
+        _patchingCts = new CancellationTokenSource();
+        var token = _patchingCts.Token;
+
+        try
+        {
+            // MANUALLY set IsRunning to true. This will update the UI.
+            IsRunning = true;
+            ValidationStartTime = null;
+            PatchingStartTime = null;
+
+            // --- *** Save Mod Settings Before Proceeding *** ---
+            try
+            {
+                var vmMods = _lazyVmMods.Value;
+                if (vmMods == null) throw new InvalidOperationException("VM_Mods instance could not be resolved.");
+                vmMods.SaveModSettingsToModel();
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"CRITICAL ERROR: Failed to save Mod Settings: {ExceptionLogger.GetExceptionStack(ex)}",
+                    true);
+                return; // Abort
+            }
+
+            // --- *** End Save Mod Settings *** ---
+            if (_settings.ModSettings == null || !_settings.ModSettings.Any())
+            {
+                AppendLog("ERROR: No Mod Settings configured. Aborting.", true);
+                return; // Abort
+            }
+
+            var modSettingsMap = _patcher.BuildModSettingsMap();
+
+            // Last gate on the SkyPatcher + Forward To Outfit naked-NPC combination (see
+            // HandlingModeDisplay.SkyPatcherForwardToOutfitWarning). The Settings dropdowns
+            // only see the GLOBAL default, so this is the check that catches a per-mod
+            // override — and the one that catches ForwardToSkin's silent per-NPC fallback to
+            // ForwardToOutfit for appearance plugins that assign no WNAM. Raised before any
+            // real work so declining costs nothing.
+            if (_settings.UseSkyPatcherMode && !_settings.SuppressPopupWarnings)
+            {
+                var outfitForwardingMods = modSettingsMap.Values
+                    .Where(ms => _settings.GetEffectiveWigMode(ms) == WigHandlingMode.ForwardToOutfit)
+                    .Select(ms => ms.DisplayName)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                if (outfitForwardingMods.Any())
+                {
+                    CurrentProgressMessage = "Waiting for user input...";
+
+                    var warning = new StringBuilder(HandlingModeDisplay.SkyPatcherForwardToOutfitWarning);
+                    warning.AppendLine().AppendLine();
+                    warning.AppendLine($"Wigs forward to outfits for {outfitForwardingMods.Count} mod(s):");
+                    foreach (var modName in outfitForwardingMods)
+                    {
+                        warning.AppendLine("    " + modName);
+                    }
+                    warning.Append("\nContinue patching anyway?");
+
+                    bool proceed = true;
+                    Application.Current?.Dispatcher.Invoke(() =>
+                    {
+                        proceed = ScrollableMessageBox.Confirm(warning.ToString(),
+                            HandlingModeDisplay.SkyPatcherForwardToOutfitWarningTitle, MessageBoxImage.Warning);
+                    });
+
+                    if (!proceed)
+                    {
+                        AppendLog("Patching aborted: SkyPatcher mode with wigs forwarded to outfits.", true);
+                        return; // Abort
+                    }
+                }
+            }
+
+            await _patcher.PreInitializationLogicAsync();
+
+            // Arm per-NPC diagnostic logging for the user-selected NPCs. This
+            // overwrites last run's files and stays armed across validation and all
+            // patch batches; the handles are closed in the finally below.
+            NpcDiagnosticLogger.Configure(BuildNpcLogTargets());
+
+            ValidationStartTime = DateTime.Now;
+
+            var validationReport = await _validator.ScreenSelectionsAsync(modSettingsMap, SelectedNpcGroup, token);
+            FinalValidationTime = DateTime.Now - ValidationStartTime.Value;
+
+            // Hand the rejections to the patcher so they reach NPC_Token.json. Done before the
+            // confirmation dialog: if the user backs out there is no run and no token to pollute,
+            // and if they continue the map is already in place for the token written at the end.
+            _patcher.RecordScreenedOutNpcs(_validator.GetRejectedSelections());
+
+            bool continuePatching = true;
+            if (validationReport.InvalidSelections.Any())
+            {
+                CurrentProgressMessage = "Waiting for user input...";
+
+                // Presented as an issue -> mod -> NPC tree: a load order can reject hundreds of
+                // NPCs for one shared reason, and repeating that reason on every line makes the
+                // dialog unreadable. Reports built without structured entries (callers predating
+                // them) are lifted into one catch-all issue so the tree still has something to
+                // show rather than silently going empty.
+                var details = validationReport.DetailedSelections;
+                if (!details.Any())
+                {
+                    details = validationReport.InvalidSelections
+                        .Select(line => new Validator.InvalidSelection(line, "(unspecified)", "Invalid selection"))
+                        .ToList();
+                }
+
+                Application.Current?.Dispatcher.Invoke(() =>
+                {
+                    continuePatching = InvalidSelectionsWindow.Confirm(details);
+                });
+            }
+
+            if (continuePatching)
+            {
+                PatchingStartTime = DateTime.Now;
+
+                var validSelections = _validator.GetScreeningCache().Where(kv => kv.Value.SelectionIsValid).ToList();
+                
+                // Reiniitialize the output mod in case the user is re-running the patcher in the current session
+                _environmentStateProvider.OutputMod = new SkyrimMod(
+                    ModKey.FromName(_environmentStateProvider.OutputPluginName, ModType.Plugin), _environmentStateProvider.SkyrimVersion);
+
+                // --- NEW: Splitting Logic ---
+                if (_settings.SplitOutput && validSelections.Any())
+                {
+                    AppendLog($"\nSplitting output based on user settings...", forceLog: true);
+                    var batches = CreatePatchingBatches(validSelections);
+                    AppendLog($"Created {batches.Count} patching batches.", forceLog: true);
+
+                    for (int i = 0; i < batches.Count; i++)
+                    {
+                        var batch = batches[i];
+                        token.ThrowIfCancellationRequested();
+
+                        string originalPluginName =
+                            Path.GetFileNameWithoutExtension(_environmentStateProvider.OutputPluginName);
+                        string newPluginName = string.IsNullOrWhiteSpace(batch.Suffix)
+                            ? originalPluginName
+                            : $"{originalPluginName}_{batch.Suffix}";
+
+                        AppendLog(
+                            $"\n--- Processing Batch {i + 1}/{batches.Count}: {newPluginName} ({batch.Selections.Count} NPCs) ---",
+                            forceLog: true);
+
+                        // Update environment with the new output mod name for this batch run
+                        _environmentStateProvider.OutputMod = new SkyrimMod(
+                            ModKey.FromName(newPluginName, ModType.Plugin), _environmentStateProvider.SkyrimVersion);
+
+                        // Call patcher with just the NPCs for this specific batch
+                        await _patcher.RunPatchingLogic(batch.Selections, false, i == 0, token);
+                    }
+                    
+                    // Write unified NPC token file after all batches are complete
+                    _patcher.WriteUnifiedTokenFile();
+                }
+                else
+                {
+                    // If not splitting, run the patcher once with all valid selections
+                    await _patcher.RunPatchingLogic(validSelections, false, true, token);
+                    
+                    // Write unified NPC token file after patching is complete
+                    _patcher.WriteUnifiedTokenFile();
+                }
+                // --- END: Splitting Logic ---
+
+                if (PatchingStartTime.HasValue && FinalValidationTime.HasValue)
+                {
+                    var patchingDuration = DateTime.Now - PatchingStartTime.Value;
+                    var totalDuration = FinalValidationTime.Value + patchingDuration;
+                    AppendLog($"\nPatch generation process completed in {totalDuration:hh\\:mm\\:ss}.", forceLog: true);
+                }
+            }
+            else
+            {
+                AppendLog("Patching cancelled by user due to invalid selections.");
+                ResetProgress();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            AppendLog("Patching was cancelled.", false, true);
+            ResetProgress();
+        }
+        catch (Exception ex)
+        {
+            // Centralized exception handling for the async process
+            AppendLog($"ERROR: {ex.GetType().Name} - {ExceptionLogger.GetExceptionStack(ex)}", true);
+            AppendLog(ExceptionLogger.GetExceptionStack(ex), true);
+            AppendLog("ERROR: Patching failed.", true);
+            ResetProgress();
+        }
+        finally
+        {
+            // Close per-NPC diagnostic files opened for this run.
+            NpcDiagnosticLogger.Shutdown();
+
+            // Drop the offscreen renderer's caches after any run that reached
+            // patching (PatchingStartTime is set right before the first
+            // RunPatchingLogic call and stays null on the abort paths). The
+            // renderer's GameAssetResolver latches NotFound verdicts — a BSA
+            // extraction that failed while the run had the readers in flux
+            // would otherwise leave that asset "missing" for the rest of the
+            // session (headless mugshots/previews). Safe from any thread; the
+            // cost is one cache re-warm on the next render.
+            if (PatchingStartTime.HasValue)
+            {
+                // Same "this run touched the disk" signal: arm the Validate Output confirmation.
+                // Under a mod manager the VFS this process sees was built at launch, so the
+                // validator can no longer trust the Data folder until N.P.C.2 is relaunched.
+                _vmSettings.NotifyPatchRunCompleted();
+
+                try { _offscreenRenderer.Value.InvalidateCaches(); }
+                catch (Exception ex)
+                {
+                    AppendLog($"Note: could not invalidate renderer caches: {ex.Message}");
+                }
+            }
+
+            // CRITICAL: Ensure IsRunning is always set back to false,
+            // and the CancellationTokenSource is disposed.
+            IsRunning = false;
+            _patchingCts?.Dispose();
+            _patchingCts = null;
+        }
+    }
+
+    /// <summary>
+    /// Resolves the user-selected "NPCs to log" (<see cref="Settings.NpcsToLog"/>)
+    /// into (FormKey, display-string) pairs for <see cref="NpcDiagnosticLogger"/>.
+    /// The display string is the NPC's name (falling back to EditorID/FormKey) and
+    /// becomes the per-NPC log filename; the FormKey is appended for uniqueness.
+    /// </summary>
+    private List<(FormKey FormKey, string DisplayString)> BuildNpcLogTargets()
+    {
+        var targets = new List<(FormKey, string)>();
+        var toLog = _settings.NpcsToLog;
+        if (toLog == null || toLog.Count == 0) return targets;
+
+        var lang = _settings.LocalizationLanguage;
+        var linkCache = _environmentStateProvider.LinkCache;
+
+        foreach (var formKey in toLog)
+        {
+            if (formKey.IsNull) continue;
+            string display = formKey.ToString();
+            if (linkCache != null && linkCache.TryResolve<INpcGetter>(formKey, out var npc) && npc != null)
+            {
+                display = Auxilliary.GetLogString(npc, lang);
+            }
+            targets.Add((formKey, display));
+        }
+
+        return targets;
+    }
+
+    private async Task GenerateSpawnBatFileAsync()
+    {
+        string initialDirectory;
+        string outputDirSetting = _settings.OutputDirectory;
+
+        // If the OutputDirectory is a full, absolute path, use it directly.
+        if (!string.IsNullOrWhiteSpace(outputDirSetting) && Path.IsPathRooted(outputDirSetting))
+        {
+            initialDirectory = outputDirSetting;
+        }
+        // If the ModsFolder is valid, combine it with the relative OutputDirectory.
+        else if (!string.IsNullOrWhiteSpace(_settings.ModsFolder) && Directory.Exists(_settings.ModsFolder))
+        {
+            initialDirectory = Path.Combine(_settings.ModsFolder, outputDirSetting);
+        }
+        else
+        {
+            // As a fallback, use the game's Data folder.
+            initialDirectory = _environmentStateProvider.DataFolderPath;
+        }
+        // --- End of new logic ---
+
+        string groupNameForFile = SelectedNpcGroup;
+        groupNameForFile = Regex.Replace(groupNameForFile, @"[^a-zA-Z0-9]", "");
+
+        var saveFileDialog = new SaveFileDialog
+        {
+            // Guard against a non-existent directory: the WPF SaveFileDialog throws
+            // E_INVALIDARG ("Value does not fall within the expected range") if
+            // InitialDirectory does not resolve to a real folder.
+            InitialDirectory = Auxilliary.GetSafeInitialDirectory(initialDirectory, _environmentStateProvider.DataFolderPath),
+            FileName = $"{groupNameForFile}.txt",
+            DefaultExt = ".txt",
+            Filter = "Text files (*.txt)|*.txt|All files (*.*)|*.*"
+        };
+
+        if (saveFileDialog.ShowDialog() != true)
+        {
+            AppendLog("Spawn bat file generation cancelled by user.");
+            return;
+        }
+
+        try
+        {
+            AppendLog($"Generating spawn bat file for group '{SelectedNpcGroup}'...");
+
+            List<FormKey> npcsToProcess;
+
+            if (SelectedNpcGroup == ALL_NPCS_GROUP)
+            {
+                // If "All NPCs" is selected, get all NPCs that have any appearance mod selected.
+                // This data comes from the dictionary updated by the NpcConsistencyProvider.
+                npcsToProcess = _settings.SelectedAppearanceMods.Keys.ToList();
+            }
+            else
+            {
+                // Otherwise, get NPCs from the specifically selected group.
+                npcsToProcess = _settings.NpcGroupAssignments
+                    .Where(kvp =>
+                        kvp.Value != null && kvp.Value.Contains(SelectedNpcGroup, StringComparer.OrdinalIgnoreCase))
+                    .Select(kvp => kvp.Key)
+                    .ToList();
+            }
+
+            if (!npcsToProcess.Any())
+            {
+                // Provide a more specific warning message based on the user's selection.
+                string warningMessage = SelectedNpcGroup == ALL_NPCS_GROUP
+                    ? "Warning: No appearance selections have been made. File will be empty."
+                    : $"Warning: No NPCs found in group '{SelectedNpcGroup}'. File will be empty.";
+
+                AppendLog(warningMessage, isError: true);
+                await File.WriteAllTextAsync(saveFileDialog.FileName, string.Empty);
+                return;
+            }
+
+            string content = _aux.BuildSpawnBatchContent(npcsToProcess, _settings.BatFilePreCommands,
+                _settings.BatFilePostCommands, out int successCount, out var unresolvedFormKeys);
+
+            foreach (var unresolvedFormKey in unresolvedFormKeys)
+            {
+                AppendLog($"Warning: Could not resolve FormID for {unresolvedFormKey}. It will be skipped.",
+                    isError: true);
+            }
+
+            await File.WriteAllTextAsync(saveFileDialog.FileName, content);
+            AppendLog($"Successfully generated spawn bat file with {successCount} NPC(s) at: {saveFileDialog.FileName}",
+                forceLog: true);
+        }
+        catch (Exception ex)
+        {
+            AppendLog(
+                $"FATAL: An unexpected error occurred during bat file generation: {ExceptionLogger.GetExceptionStack(ex)}",
+                true);
+        }
+    }
+
+    private void UpdateAvailableGroups()
+    {
+        // (Implementation remains the same as before)
+        RxApp.MainThreadScheduler.Schedule(() =>
+        {
+            string currentSelection = SelectedNpcGroup;
+            AvailableNpcGroups.Clear();
+            AvailableNpcGroups.Add(ALL_NPCS_GROUP);
+
+            if (_settings.NpcGroupAssignments != null)
+            {
+                var distinctGroups = _settings.NpcGroupAssignments.Values
+                    .SelectMany(set => set ?? Enumerable.Empty<string>())
+                    .Where(g => !string.IsNullOrWhiteSpace(g))
+                    .Select(g => g.Trim())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(g => g);
+
+                foreach (var group in distinctGroups)
+                {
+                    AvailableNpcGroups.Add(group);
+                }
+            }
+
+            if (AvailableNpcGroups.Contains(currentSelection))
+            {
+                SelectedNpcGroup = currentSelection;
+            }
+            else
+            {
+                SelectedNpcGroup = ALL_NPCS_GROUP;
+            }
+        });
+    }
+
+    /// <summary>
+    /// Handles the Analyze Masters command execution.
+    /// Prompts user to select a plugin, shows master selection dialog, then displays analysis results.
+    /// </summary>
+    private async Task AnalyzeMastersAsync()
+    {
+        // Step 1: Prompt user to select an ESP/ESM/ESL file
+        var openFileDialog = new OpenFileDialog
+        {
+            Title = "Select Plugin to Analyze",
+            Filter = "Plugin files (*.esp;*.esm;*.esl)|*.esp;*.esm;*.esl|All files (*.*)|*.*",
+            InitialDirectory = Auxilliary.GetSafeInitialDirectory(_environmentStateProvider.DataFolderPath),
+            CheckFileExists = true
+        };
+
+        if (openFileDialog.ShowDialog() != true)
+        {
+            AppendLog("Master analysis cancelled - no file selected.");
+            return;
+        }
+
+        string targetPluginPath = openFileDialog.FileName;
+        AppendLog($"Selected plugin for analysis: {Path.GetFileName(targetPluginPath)}", forceLog: true);
+
+        // Step 2: Read masters from the selected plugin
+        var masters = _masterAnalyzer.GetMastersFromPlugin(targetPluginPath);
+
+        if (!masters.Any())
+        {
+            Application.Current?.Dispatcher.Invoke(() =>
+            {
+                ScrollableMessageBox.ShowWarning(
+                    $"The selected plugin '{Path.GetFileName(targetPluginPath)}' has no master files listed in its header.",
+                    "No Masters Found");
+            });
+            return;
+        }
+
+        AppendLog($"Found {masters.Count} master(s) in plugin header.", forceLog: true);
+
+        // Step 3: Show master selection dialog
+        List<ModKey>? selectedMasters = null;
+
+        Application.Current?.Dispatcher.Invoke(() =>
+        {
+            var selectionWindow = new Views.MasterSelectionWindow();
+    
+            // Find the main window safely - avoid setting Owner to itself
+            var mainWindow = Application.Current.Windows
+                                 .OfType<Window>()
+                                 .FirstOrDefault(w => w is not Views.MasterSelectionWindow && w.IsActive)
+                             ?? Application.Current.Windows
+                                 .OfType<Window>()
+                                 .FirstOrDefault(w => w is not Views.MasterSelectionWindow);
+    
+            if (mainWindow != null && mainWindow != selectionWindow)
+            {
+                selectionWindow.Owner = mainWindow;
+            }
+    
+            selectionWindow.Initialize(targetPluginPath, masters);
+
+            if (selectionWindow.ShowDialog() == true)
+            {
+                selectedMasters = selectionWindow.SelectedMasters;
+            }
+        });
+
+        if (selectedMasters == null || !selectedMasters.Any())
+        {
+            AppendLog("Master analysis cancelled - no masters selected.");
+            return;
+        }
+
+        AppendLog($"Analyzing {selectedMasters.Count} selected master(s)...", forceLog: true);
+
+        // Step 4: Run the analysis
+        MasterAnalysisResult? result = null;
+
+        try
+        {
+
+            // Run analysis on a background thread
+            result = await Task.Run(() =>
+                _masterAnalyzer.AnalyzeMasterReferences(
+                    targetPluginPath,
+                    selectedMasters,
+                    IsVerboseModeEnabled));
+        }
+        catch (OperationCanceledException)
+        {
+            AppendLog("Master analysis was cancelled.");
+            ResetProgress();
+            return;
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"ERROR during master analysis: {ex.Message}", true);
+            ResetProgress();
+            return;
+        }
+
+        ResetProgress();
+
+        if (result == null)
+        {
+            AppendLog("ERROR: Analysis returned no results.", true);
+            return;
+        }
+
+        // Step 5: Format and display results
+        string report = _masterAnalyzer.FormatAnalysisReport(result);
+
+        // Log summary to the Run view log
+        int totalReferences = result.ReferencesByMaster.Values.Sum(list => list.Count);
+        AppendLog(
+            $"Analysis complete. Found {totalReferences} total reference(s) across {selectedMasters.Count} master(s).",
+            forceLog: true);
+
+        // Show detailed results in ScrollableMessageBox
+        Application.Current?.Dispatcher.Invoke(() => { ScrollableMessageBox.Show(report, "Master Analysis Results"); });
+    }
+
+    private record PatchingBatch(string Suffix, List<KeyValuePair<FormKey, ScreeningResult>> Selections);
+
+    /// <summary>
+    /// Creates virtual groups ("batches") of NPCs to be processed into separate plugin files.
+    /// </summary>
+    private List<PatchingBatch> CreatePatchingBatches(List<KeyValuePair<FormKey, ScreeningResult>> validSelections)
+    {
+        var batches = new List<PatchingBatch>();
+        if (!validSelections.Any()) return batches;
+
+        // Group selections by the chosen criteria (gender and/or race).
+        var groupedByCriteria = validSelections.GroupBy(kvp =>
+        {
+            var npc = kvp.Value.WinningNpcOverride;
+
+            string genderKey = _settings.SplitOutputByGender ? Auxilliary.GetGender(npc).ToString() : string.Empty;
+            string raceKey = string.Empty;
+            if (_settings.SplitOutputByRace)
+            {
+                raceKey = npc.Race.TryResolve(_environmentStateProvider.LinkCache, out var raceRecord)
+                    ? (raceRecord.EditorID ?? "UnknownRace")
+                    : "UnknownRace";
+            }
+
+            // Sanitize raceKey to be filename-friendly
+            raceKey = Regex.Replace(raceKey, @"[^a-zA-Z0-9]", "");
+
+            return (Gender: genderKey, Race: raceKey);
+        });
+
+        int maxNpcsPerPlugin = _settings.SplitOutputMaxNpcs ?? int.MaxValue;
+
+        // Process each criteria group (e.g., all Male Nords).
+        foreach (var group in groupedByCriteria)
+        {
+            var npcsInGroup = group.ToList();
+            int totalInGroup = npcsInGroup.Count;
+            int currentOffset = 0;
+            int subBatchCounter = 1;
+
+            // Sub-divide the criteria group by the max number of NPCs.
+            while (currentOffset < totalInGroup)
+            {
+                var chunk = npcsInGroup.Skip(currentOffset).Take(maxNpcsPerPlugin).ToList();
+
+                var nameParts = new List<string>();
+                if (_settings.SplitOutputByGender && !string.IsNullOrEmpty(group.Key.Gender))
+                    nameParts.Add(group.Key.Gender);
+                if (_settings.SplitOutputByRace && !string.IsNullOrEmpty(group.Key.Race))
+                    nameParts.Add(group.Key.Race);
+
+                // Only add a numeric suffix if the group was large enough to be split.
+                if (totalInGroup > maxNpcsPerPlugin)
+                {
+                    nameParts.Add(subBatchCounter.ToString());
+                }
+
+                string batchSuffix = string.Join("_", nameParts.Where(s => !string.IsNullOrEmpty(s)));
+
+                batches.Add(new PatchingBatch(batchSuffix, chunk));
+
+                currentOffset += maxNpcsPerPlugin;
+                subBatchCounter++;
+            }
+        }
+
+        return batches;
+    }
+
+    private void ResetProgress()
+    {
+        ProgressValue = 0;
+        CurrentProgressMessage = string.Empty;
+        ValidationStartTime = null;
+        PatchingStartTime = null;
+    }
+
+    private void UpdateProgress(int current, int total, string message)
+    {
+        RxApp.MainThreadScheduler.Schedule(() =>
+        {
+            if (total > 0)
+            {
+                ProgressValue = (double)current / total * 100.0;
+                CurrentProgressMessage = $"[{current}/{total}] {message}";
+            }
+            else
+            {
+                ProgressValue = 0;
+                CurrentProgressMessage = message;
+            }
+        });
+    }
+
+    private async Task GenerateEnvironmentReportAsync()
+    {
+        AppendLog("Program Version: " + App.ProgramVersion, forceLog: true);
+        AppendLog("===Game Environment===", forceLog: true);
+        AppendLog("Game Type: " + _environmentStateProvider.SkyrimVersion, forceLog: true);
+        AppendLog("Game Directory: " + _environmentStateProvider.DataFolderPath, forceLog: true);
+        AppendLog("Creation Club Path: " + _environmentStateProvider.CreationClubListingsFilePath, forceLog: true);
+        AppendLog(
+            "Core Plugins:" + Environment.NewLine + string.Join(Environment.NewLine,
+                _environmentStateProvider.BaseGamePlugins.Select(x => "\t" + x.ToString())), forceLog: true);
+        AppendLog(
+            "CC Plugins:" + Environment.NewLine + string.Join(Environment.NewLine,
+                _environmentStateProvider.CreationClubPlugins.Select(x => "\t" + x.ToString())), forceLog: true);
+        AppendLog(
+            "Load Order:" + Environment.NewLine + string.Join(Environment.NewLine,
+                _environmentStateProvider.LoadOrder.Select(x =>
+                    "\t" + (x.Value.Enabled ? "*" : "-") + x.Key.ToString())), forceLog: true);
+        AppendLog("Environment Status: " + _environmentStateProvider.Status, forceLog: true);
+        AppendLog(Environment.NewLine, forceLog: true);
+        AppendLog("===Program Variables===", forceLog: true);
+        AppendLog(_vmSettings.GetStatusReport(), forceLog: true);
+        AppendLog(_lazyVmMods.Value.GetStatusReport(), forceLog: true);
+        AppendLog(Environment.NewLine, forceLog: true);
+        AppendLog("Plugin Provider: " + _pluginProvider.GetStatusReport(), forceLog: true);
+        AppendLog("Record Handler: " + _recordHandler.GetStatusReport(), forceLog: true);
+        AppendLog("BSA Handler: " + _bsaHandler.GetStatusReport(), forceLog: true);
+    }
+
+    // Add Dispose method if not present
+    public void Dispose()
+    {
+        _disposables.Dispose();
+    }
+
+    /// <summary>
+    /// Appends a log line in a way that keeps the UI thread responsive **and** scales well
+    /// with large logs.
+    ///
+    /// * **Thread-safety / UI affinity** – <see cref="LogLines"/> is an
+    ///   <see cref="ObservableCollection{T}"/> and so may only be mutated on the UI thread.
+    ///   Rather than touch it here, the method pushes the message onto
+    ///   <c>_logMessageSubject</c>; the constructor's subscription batches 250 ms of messages,
+    ///   hops to <see cref="RxApp.MainThreadScheduler"/> and appends them there. Callers may
+    ///   therefore invoke <c>AppendLog</c> freely from background threads.
+    ///
+    /// * **Low allocation pressure** – Each message becomes one entry per physical line and
+    ///   nothing else is rebuilt, so the log costs O(<i>n</i>) overall instead of the
+    ///   O(<i>n</i><sup>2</sup>) of republishing the entire log text on every batch.
+    ///
+    /// The optional flags allow you to suppress routine messages unless verbose mode is
+    /// enabled, while still forcing important or error messages to appear.
+    /// </summary>
+    /// <param name="message">Text to write to the log.</param>
+    /// <param name="isError">
+    /// Marks the entry as an error so it bypasses verbose filtering. It also seeds the entry's
+    /// severity, but only as a fallback: a line that carries its own marker (<c>"WARNING: "</c>,
+    /// <c>"ERROR: "</c>, …) is coloured by that marker instead, because many callers pass
+    /// warnings through this flag to get them past the verbose gate. See
+    /// <see cref="RunLogClassifier"/>.
+    /// </param>
+    /// <param name="forceLog">
+    /// When <c>true</c>, the entry is logged even if verbose mode is off and
+    /// <paramref name="isError"/> is <c>false</c>.
+    /// </param>
+    public void AppendLog(string message, bool isError = false, bool forceLog = false)
+    {
+        if (!IsVerboseModeEnabled && !isError && !forceLog) return;
+
+        // Instead of scheduling directly on the UI thread,
+        // push the message to the subject, which will handle batching and updating.
+        _logMessageSubject.OnNext(
+            new RunLogEntry(message, isError ? RunLogSeverity.Error : RunLogSeverity.Info));
+    }
+
+    public void ResetLog()
+    {
+        // Called from the patcher on a background thread; an ObservableCollection may only be
+        // mutated on the UI thread, so marshal rather than clearing in place.
+        RxApp.MainThreadScheduler.Schedule(() => LogLines.Clear());
+    }
+
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
+}

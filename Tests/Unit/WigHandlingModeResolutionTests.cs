@@ -1,0 +1,572 @@
+using FluentAssertions;
+using Mutagen.Bethesda.Plugins;
+using Mutagen.Bethesda.Plugins.Records;
+using Mutagen.Bethesda.Skyrim;
+using NPC_Plugin_Chooser_2.Models;
+using NPC_Plugin_Chooser_2.Tests.TestSupport;
+using Xunit;
+
+namespace NPC_Plugin_Chooser_2.Tests.Unit;
+
+/// <summary>
+/// Locks the effective-mode resolution matrix shared by the patcher
+/// (<see cref="Settings.GetEffectiveWigMode"/>) and the renderer/staleness
+/// side (<see cref="Settings.GetEffectiveRenderWigMode"/>): active in
+/// Create-and-Patch record mode and in SkyPatcher mode (either PatchingMode),
+/// inert in plain Create record mode or without detections; per-mod override
+/// beats the global default; the harness-only render override forces the
+/// depicted mode when (and only when) the mod has detections.
+/// </summary>
+public class WigHandlingModeResolutionTests
+{
+    private static readonly FormKey WigKey = MutagenFixtures.Fk("000808:FoxGloveAuri.esp");
+    private static readonly FormKey AntlerKey = MutagenFixtures.Fk("000A0C:FoxGloveAuri.esp");
+
+    private static ModSetting ModWithWig(WigHandlingMode? perMod = null) => new()
+    {
+        DisplayName = "FoxGlove",
+        DetectedWigArmors = { WigKey },
+        ModWigHandlingMode = perMod,
+    };
+
+    private static ModSetting ModWithAntler(AntlerHandlingMode? perMod = null) => new()
+    {
+        DisplayName = "FoxGlove",
+        DetectedAntlerArmors = { AntlerKey },
+        ModAntlerHandlingMode = perMod,
+    };
+
+    private static Settings NewSettings(PatchingMode mode, bool skyPatcher = false,
+        WigHandlingMode globalDefault = WigHandlingMode.ForwardToSkin,
+        AntlerHandlingMode antlerDefault = AntlerHandlingMode.ForwardToSkin) => new()
+    {
+        PatchingMode = mode,
+        UseSkyPatcherMode = skyPatcher,
+        DefaultWigHandlingMode = globalDefault,
+        DefaultAntlerHandlingMode = antlerDefault,
+    };
+
+    [Fact]
+    public void NoDetections_IsAlwaysNone()
+    {
+        var settings = NewSettings(PatchingMode.CreateAndPatch);
+        var mod = new ModSetting { DisplayName = "Plain" };
+
+        settings.GetEffectiveWigMode(mod).Should().Be(WigHandlingMode.None);
+        settings.GetEffectiveWigMode(null).Should().Be(WigHandlingMode.None);
+        settings.GetEffectiveRenderWigMode(mod).Should().Be(WigHandlingMode.None);
+    }
+
+    [Fact]
+    public void PlainCreateRecordMode_IsInert()
+    {
+        NewSettings(PatchingMode.Create).GetEffectiveWigMode(ModWithWig())
+            .Should().Be(WigHandlingMode.None);
+    }
+
+    [Fact]
+    public void CreateAndPatch_UsesGlobalDefault_WhenPerModIsNull()
+    {
+        NewSettings(PatchingMode.CreateAndPatch, globalDefault: WigHandlingMode.ForwardToOutfit)
+            .GetEffectiveWigMode(ModWithWig())
+            .Should().Be(WigHandlingMode.ForwardToOutfit);
+    }
+
+    [Fact]
+    public void PerModOverride_BeatsGlobalDefault()
+    {
+        var settings = NewSettings(PatchingMode.CreateAndPatch, globalDefault: WigHandlingMode.ForwardToSkin);
+
+        settings.GetEffectiveWigMode(ModWithWig(WigHandlingMode.None)).Should().Be(WigHandlingMode.None);
+        settings.GetEffectiveWigMode(ModWithWig(WigHandlingMode.ForwardToOutfit))
+            .Should().Be(WigHandlingMode.ForwardToOutfit);
+    }
+
+    [Fact]
+    public void SkyPatcherMode_ActivatesInEitherPatchingMode()
+    {
+        NewSettings(PatchingMode.Create, skyPatcher: true).GetEffectiveWigMode(ModWithWig())
+            .Should().Be(WigHandlingMode.ForwardToSkin);
+        NewSettings(PatchingMode.CreateAndPatch, skyPatcher: true).GetEffectiveWigMode(ModWithWig())
+            .Should().Be(WigHandlingMode.ForwardToSkin);
+    }
+
+    [Fact]
+    public void RenderOverride_ForcesDepictedMode_OnlyWithDetections()
+    {
+        var settings = NewSettings(PatchingMode.Create); // patch-side inert
+        settings.InternalMugshot.WigModeOverride = WigHandlingMode.ForwardToSkin;
+
+        settings.GetEffectiveRenderWigMode(ModWithWig()).Should().Be(WigHandlingMode.ForwardToSkin,
+            "the harness override wins regardless of the output-mode gate");
+        settings.GetEffectiveWigMode(ModWithWig()).Should().Be(WigHandlingMode.None,
+            "the override must never leak into the patcher");
+        settings.GetEffectiveRenderWigMode(new ModSetting { DisplayName = "Plain" })
+            .Should().Be(WigHandlingMode.None, "detection is still required");
+    }
+
+    [Fact]
+    public void RenderMode_MatchesPatchMode_WhenNoOverride()
+    {
+        var settings = NewSettings(PatchingMode.CreateAndPatch, globalDefault: WigHandlingMode.ForwardToOutfit);
+        settings.GetEffectiveRenderWigMode(ModWithWig())
+            .Should().Be(settings.GetEffectiveWigMode(ModWithWig()));
+    }
+
+    [Fact]
+    public void ModSetting_DetectionFlags_ReflectTheirOwnSets()
+    {
+        new ModSetting().HasWigArmors.Should().BeFalse();
+        new ModSetting().HasAntlers.Should().BeFalse();
+
+        new ModSetting { DetectedWigArmors = { WigKey } }.HasWigArmors.Should().BeTrue();
+        new ModSetting { DetectedWigArmors = { WigKey } }.HasAntlers.Should().BeFalse();
+
+        // Antlers count from any of the three sources.
+        new ModSetting { DetectedAntlerArmors = { AntlerKey } }.HasAntlers.Should().BeTrue();
+        new ModSetting { DetectedAntlerArmatures = { AntlerKey } }.HasAntlers.Should().BeTrue();
+        new ModSetting { DetectedAntlerHeadParts = { AntlerKey } }.HasAntlers.Should().BeTrue();
+        new ModSetting { DetectedAntlerArmors = { AntlerKey } }.HasWigArmors.Should().BeFalse();
+    }
+
+    // ── Antler mode resolution (mirrors the wig matrix; independent gating) ──
+
+    [Fact]
+    public void Antler_NoDetections_IsAlwaysNone()
+    {
+        var settings = NewSettings(PatchingMode.CreateAndPatch);
+        settings.GetEffectiveAntlerMode(new ModSetting { DisplayName = "Plain" })
+            .Should().Be(AntlerHandlingMode.None);
+        settings.GetEffectiveAntlerMode(null).Should().Be(AntlerHandlingMode.None);
+        // A wig-only mod resolves to no antler handling, and vice versa.
+        settings.GetEffectiveAntlerMode(ModWithWig()).Should().Be(AntlerHandlingMode.None);
+        settings.GetEffectiveWigMode(ModWithAntler()).Should().Be(WigHandlingMode.None);
+    }
+
+    [Fact]
+    public void Antler_PlainCreateRecordMode_IsInert()
+    {
+        NewSettings(PatchingMode.Create).GetEffectiveAntlerMode(ModWithAntler())
+            .Should().Be(AntlerHandlingMode.None);
+    }
+
+    [Fact]
+    public void Antler_CreateAndPatch_UsesGlobalDefault_WhenPerModIsNull()
+    {
+        NewSettings(PatchingMode.CreateAndPatch, antlerDefault: AntlerHandlingMode.Remove)
+            .GetEffectiveAntlerMode(ModWithAntler())
+            .Should().Be(AntlerHandlingMode.Remove);
+    }
+
+    [Fact]
+    public void Antler_PerModOverride_BeatsGlobalDefault()
+    {
+        var settings = NewSettings(PatchingMode.CreateAndPatch, antlerDefault: AntlerHandlingMode.ForwardToSkin);
+        settings.GetEffectiveAntlerMode(ModWithAntler(AntlerHandlingMode.Remove)).Should().Be(AntlerHandlingMode.Remove);
+        settings.GetEffectiveAntlerMode(ModWithAntler(AntlerHandlingMode.None)).Should().Be(AntlerHandlingMode.None);
+    }
+
+    [Fact]
+    public void Antler_DefaultsToForwardToSkin_PreservingPreSplitBehavior()
+    {
+        NewSettings(PatchingMode.CreateAndPatch).GetEffectiveAntlerMode(ModWithAntler())
+            .Should().Be(AntlerHandlingMode.ForwardToSkin);
+    }
+
+    [Fact]
+    public void Antler_RenderOverride_ForcesDepictedMode_OnlyWithDetections()
+    {
+        var settings = NewSettings(PatchingMode.Create); // patch-side inert
+        settings.InternalMugshot.AntlerModeOverride = AntlerHandlingMode.Remove;
+
+        settings.GetEffectiveRenderAntlerMode(ModWithAntler()).Should().Be(AntlerHandlingMode.Remove,
+            "the harness override wins regardless of the output-mode gate");
+        settings.GetEffectiveAntlerMode(ModWithAntler()).Should().Be(AntlerHandlingMode.None,
+            "the override must never leak into the patcher");
+        settings.GetEffectiveRenderAntlerMode(new ModSetting { DisplayName = "Plain" })
+            .Should().Be(AntlerHandlingMode.None, "detection is still required");
+    }
+
+    [Fact]
+    public void WigOrAntlerHandlingActive_TrueWhenEitherClassActs()
+    {
+        var settings = NewSettings(PatchingMode.CreateAndPatch);
+        settings.WigOrAntlerHandlingActive(ModWithWig()).Should().BeTrue();
+        settings.WigOrAntlerHandlingActive(ModWithAntler()).Should().BeTrue();
+        settings.WigOrAntlerHandlingActive(new ModSetting { DisplayName = "Plain" }).Should().BeFalse();
+
+        // A mod with an antler set to None (and no wig) is inert.
+        settings.WigOrAntlerHandlingActive(ModWithAntler(AntlerHandlingMode.None)).Should().BeFalse();
+
+        // Plain Create record mode: inert even with detections.
+        NewSettings(PatchingMode.Create).WigOrAntlerHandlingActive(ModWithAntler()).Should().BeFalse();
+    }
+
+    // ── Manually-designated antler head parts (the "Set Antler Head Parts" selector) ──
+
+    private static readonly FormKey NpcA = MutagenFixtures.Fk("000D62:018Auri.esp");
+    private static readonly FormKey NpcB = MutagenFixtures.Fk("000E71:018Auri.esp");
+
+    [Fact]
+    public void ManualDesignation_ActivatesHandling_AndResolvesMode_ForAScanUndetectedMod()
+    {
+        var settings = NewSettings(PatchingMode.CreateAndPatch);
+        var mod = new ModSetting { DisplayName = "FoxGlove" }; // no keyword detection at all
+
+        settings.ModHasAntlers(mod).Should().BeFalse();
+        settings.GetEffectiveAntlerMode(mod).Should().Be(AntlerHandlingMode.None);
+
+        // The user designates head part "Antler01" on NpcA in FoxGlove.
+        settings.AddManualAntlerHeadPart("Antler01", "FoxGlove", NpcA);
+
+        settings.ModHasAntlers(mod).Should().BeTrue("a designation made in the mod counts as having antlers");
+        settings.GetEffectiveAntlerMode(mod).Should().Be(AntlerHandlingMode.ForwardToSkin,
+            "manual-only mod resolves to the global default until a per-mod mode is set");
+
+        // IsAntlerHeadPart matches the designated EditorID (eligibility; removal still needs Remove).
+        settings.IsAntlerHeadPart(mod, MutagenFixtures.Fk("000111:M.esp"), "Antler01", NpcA).Should().BeTrue();
+        settings.IsAntlerHeadPart(mod, MutagenFixtures.Fk("000111:M.esp"), "NotAnAntler", NpcA).Should().BeFalse();
+
+        mod.ModAntlerHandlingMode = AntlerHandlingMode.Remove;
+        settings.GetEffectiveAntlerMode(mod).Should().Be(AntlerHandlingMode.Remove);
+    }
+
+    [Fact]
+    public void IsAntlerHeadPart_UnionsDetected_AndManual()
+    {
+        var detected = MutagenFixtures.Fk("000111:M.esp");
+        var settings = NewSettings(PatchingMode.CreateAndPatch);
+        var mod = new ModSetting { DisplayName = "M", DetectedAntlerHeadParts = { detected } };
+        settings.AddManualAntlerHeadPart("ManualAntler", "M", NpcA);
+
+        settings.IsAntlerHeadPart(mod, detected, "AnyEid", NpcA).Should().BeTrue("keyword-detected by FormKey");
+        settings.IsAntlerHeadPart(mod, MutagenFixtures.Fk("000999:M.esp"), "ManualAntler", NpcA)
+            .Should().BeTrue("manually designated by EditorID");
+    }
+
+    [Fact]
+    public void BlockScope_AllNpcs_BlocksTheEditorIdEverywhere()
+    {
+        var settings = NewSettings(PatchingMode.CreateAndPatch);
+        settings.ManualAntlerBlockScope = AntlerBlockScope.AllNpcs;
+        settings.AddManualAntlerHeadPart("Antler01", "FoxGlove", NpcA);
+
+        settings.IsManualAntlerHeadPart("Antler01", "FoxGlove", NpcA).Should().BeTrue();
+        settings.IsManualAntlerHeadPart("Antler01", "OtherMod", NpcB).Should().BeTrue("All NPCs = any mod, any NPC");
+        settings.IsManualAntlerHeadPart("antler01", "OtherMod", NpcB).Should().BeTrue("EditorID match is case-insensitive");
+    }
+
+    [Fact]
+    public void BlockScope_SameMod_BlocksOnlyWithinTheDesignatingMod()
+    {
+        var settings = NewSettings(PatchingMode.CreateAndPatch);
+        settings.ManualAntlerBlockScope = AntlerBlockScope.SameMod;
+        settings.AddManualAntlerHeadPart("Antler01", "FoxGlove", NpcA);
+
+        settings.IsManualAntlerHeadPart("Antler01", "FoxGlove", NpcB).Should().BeTrue("same mod, any NPC");
+        settings.IsManualAntlerHeadPart("Antler01", "OtherMod", NpcA).Should().BeFalse("different mod");
+    }
+
+    [Fact]
+    public void BlockScope_SpecificNpc_BlocksOnlyOnTheDesignatedNpc()
+    {
+        var settings = NewSettings(PatchingMode.CreateAndPatch);
+        settings.ManualAntlerBlockScope = AntlerBlockScope.SpecificNpc;
+        settings.AddManualAntlerHeadPart("Antler01", "FoxGlove", NpcA);
+
+        settings.IsManualAntlerHeadPart("Antler01", "OtherMod", NpcA).Should().BeTrue("same NPC, regardless of source mod");
+        settings.IsManualAntlerHeadPart("Antler01", "FoxGlove", NpcB).Should().BeFalse("different NPC");
+    }
+
+    [Fact]
+    public void RemoveManualAntlerHeadPart_DropsOnlyThatSource()
+    {
+        var settings = NewSettings(PatchingMode.CreateAndPatch);
+        settings.ManualAntlerBlockScope = AntlerBlockScope.SpecificNpc;
+        settings.AddManualAntlerHeadPart("Antler01", "FoxGlove", NpcA);
+        settings.AddManualAntlerHeadPart("Antler01", "FoxGlove", NpcB);
+
+        settings.RemoveManualAntlerHeadPart("Antler01", "FoxGlove", NpcA);
+
+        settings.IsManualAntlerHeadPart("Antler01", "FoxGlove", NpcA).Should().BeFalse("its source was removed");
+        settings.IsManualAntlerHeadPart("Antler01", "FoxGlove", NpcB).Should().BeTrue("the other NPC's source survives");
+
+        settings.RemoveManualAntlerHeadPart("Antler01", "FoxGlove", NpcB);
+        settings.ManualAntlerHeadParts.Should().BeEmpty("the entry is dropped when its last source is gone");
+    }
+
+    // ── Skin-carried (WNAM) wig armatures: gating + IsWigArmature matrix ──
+
+    private static readonly FormKey ArmaKey = MutagenFixtures.Fk("000B10:HPNO.esp");
+
+    private static ModSetting ModWithWigArmature() => new()
+    {
+        DisplayName = "HPNO",
+        DetectedWigArmatures = { ArmaKey },
+    };
+
+    [Fact]
+    public void WnamOnlyMod_ActivatesWigHandling()
+    {
+        // The coarse gate must fold DetectedWigArmatures — a mod with only
+        // skin-carried wigs (no outfit wig ARMOs) still gets a wig mode.
+        var settings = NewSettings(PatchingMode.CreateAndPatch,
+            globalDefault: WigHandlingMode.ConvertToHeadParts);
+
+        settings.GetEffectiveWigMode(ModWithWigArmature())
+            .Should().Be(WigHandlingMode.ConvertToHeadParts);
+        settings.GetEffectiveRenderWigMode(ModWithWigArmature())
+            .Should().Be(WigHandlingMode.ConvertToHeadParts);
+    }
+
+    [Fact]
+    public void ManualPositiveDesignationOnly_ActivatesWigHandling()
+    {
+        var settings = NewSettings(PatchingMode.CreateAndPatch);
+        var mod = new ModSetting { DisplayName = "HPNO" }; // no scan detections
+
+        settings.ModHasWigs(mod).Should().BeFalse();
+        settings.GetEffectiveWigMode(mod).Should().Be(WigHandlingMode.None);
+
+        settings.AddManualWigArmature("0Sky205Addon", "HPNO", NpcA, isWig: true);
+
+        settings.ModHasWigs(mod).Should().BeTrue("a positive designation made in the mod counts");
+        settings.GetEffectiveWigMode(mod).Should().Be(WigHandlingMode.ForwardToSkin,
+            "manual-only mod resolves to the global default until a per-mod mode is set");
+    }
+
+    [Fact]
+    public void NegativeDesignation_DoesNotDeactivateTheCoarseGate_ButVetoesTheArma()
+    {
+        var settings = NewSettings(PatchingMode.CreateAndPatch);
+        var mod = ModWithWigArmature();
+
+        settings.IsWigArmature(mod, ArmaKey, "0Sky205Addon", NpcA).Should().BeTrue("scan-detected");
+
+        settings.AddManualWigArmature("0Sky205Addon", "HPNO", NpcA, isWig: false);
+
+        settings.IsWigArmature(mod, ArmaKey, "0Sky205Addon", NpcA)
+            .Should().BeFalse("the veto suppresses the detection");
+        settings.ModHasWigs(mod).Should().BeTrue(
+            "the coarse gate stays open (the detection set is unchanged; only eligibility is refined)");
+    }
+
+    [Fact]
+    public void IsWigArmature_PositivePromotion_WinsOverNoDetection()
+    {
+        var settings = NewSettings(PatchingMode.CreateAndPatch);
+        var mod = new ModSetting { DisplayName = "HPNO" };
+
+        settings.IsWigArmature(mod, ArmaKey, "0Sky205Addon", NpcA).Should().BeFalse();
+        settings.AddManualWigArmature("0Sky205Addon", "HPNO", NpcA, isWig: true);
+        settings.IsWigArmature(mod, ArmaKey, "0Sky205Addon", NpcA).Should().BeTrue();
+    }
+
+    [Fact]
+    public void AddManualWigArmature_SwitchingDirection_RemovesTheOppositeEntry()
+    {
+        var settings = NewSettings(PatchingMode.CreateAndPatch);
+
+        settings.AddManualWigArmature("0Sky205Addon", "HPNO", NpcA, isWig: false);
+        settings.ManualNonWigArmatures.Should().ContainSingle();
+
+        settings.AddManualWigArmature("0Sky205Addon", "HPNO", NpcA, isWig: true);
+
+        settings.ManualWigArmatures.Should().ContainSingle();
+        settings.ManualNonWigArmatures.Should().BeEmpty(
+            "a designation is a single checkbox — never both directions at once");
+    }
+
+    [Fact]
+    public void WigScope_Matrix_AppliesToBothDirections()
+    {
+        var settings = NewSettings(PatchingMode.CreateAndPatch);
+        settings.AddManualWigArmature("Addon01", "HPNO", NpcA, isWig: true);
+        settings.AddManualWigArmature("Veto01", "HPNO", NpcA, isWig: false);
+
+        settings.ManualWigBlockScope = AntlerBlockScope.AllNpcs;
+        settings.IsManualWigArmature("Addon01", "OtherMod", NpcB).Should().BeTrue();
+        settings.IsManualNonWigArmature("Veto01", "OtherMod", NpcB).Should().BeTrue();
+        settings.IsManualWigArmature("addon01", "OtherMod", NpcB).Should().BeTrue("case-insensitive");
+
+        settings.ManualWigBlockScope = AntlerBlockScope.SameMod;
+        settings.IsManualWigArmature("Addon01", "HPNO", NpcB).Should().BeTrue("same mod, any NPC");
+        settings.IsManualWigArmature("Addon01", "OtherMod", NpcA).Should().BeFalse("different mod");
+        settings.IsManualNonWigArmature("Veto01", "OtherMod", NpcA).Should().BeFalse();
+
+        settings.ManualWigBlockScope = AntlerBlockScope.SpecificNpc;
+        settings.IsManualWigArmature("Addon01", "OtherMod", NpcA).Should().BeTrue("same NPC, any mod");
+        settings.IsManualWigArmature("Addon01", "HPNO", NpcB).Should().BeFalse("different NPC");
+    }
+
+    [Fact]
+    public void RemoveManualWigArmature_DropsOnlyThatSource_AndDirection()
+    {
+        var settings = NewSettings(PatchingMode.CreateAndPatch);
+        settings.ManualWigBlockScope = AntlerBlockScope.SpecificNpc;
+        settings.AddManualWigArmature("Addon01", "HPNO", NpcA, isWig: true);
+        settings.AddManualWigArmature("Addon01", "HPNO", NpcB, isWig: true);
+
+        settings.RemoveManualWigArmature("Addon01", "HPNO", NpcA, isWig: true);
+
+        settings.IsManualWigArmature("Addon01", "HPNO", NpcA).Should().BeFalse();
+        settings.IsManualWigArmature("Addon01", "HPNO", NpcB).Should().BeTrue();
+
+        settings.RemoveManualWigArmature("Addon01", "HPNO", NpcB, isWig: true);
+        settings.ManualWigArmatures.Should().BeEmpty("the entry is dropped when its last source is gone");
+    }
+
+    // --- Converted-wig hair tint (Settings.GetEffectiveWigHairTintMode) ---
+    // Same override-beats-default shape as the handling modes, but deliberately
+    // NOT gated on the output mode: it is only ever read by the wig→HeadPart
+    // converter, which already runs behind GetEffectiveWigMode.
+
+    [Fact]
+    public void WigHairTint_DefaultsToAuto()
+    {
+        new Settings().DefaultWigHairTintMode.Should().Be(WigHairTintMode.Auto);
+        new Settings().GetEffectiveWigHairTintMode(ModWithWig()).Should().Be(WigHairTintMode.Auto);
+    }
+
+    [Fact]
+    public void WigHairTint_UsesGlobalDefault_WhenPerModIsNull()
+    {
+        var settings = new Settings { DefaultWigHairTintMode = WigHairTintMode.Always };
+
+        settings.GetEffectiveWigHairTintMode(ModWithWig()).Should().Be(WigHairTintMode.Always);
+    }
+
+    [Fact]
+    public void WigHairTint_PerModOverrideBeatsGlobalDefault()
+    {
+        var settings = new Settings { DefaultWigHairTintMode = WigHairTintMode.Always };
+        var mod = ModWithWig();
+        mod.ModWigHairTintMode = WigHairTintMode.Never;
+
+        settings.GetEffectiveWigHairTintMode(mod).Should().Be(WigHairTintMode.Never);
+    }
+
+    [Fact]
+    public void WigHairTint_FallsBackToTheGlobalDefault_WithoutAMod()
+    {
+        // A mod with no wigs (or none at all) can't carry a meaningful override,
+        // so the global default answers — never None, since there is no
+        // "inactive" state for a color choice.
+        var settings = new Settings { DefaultWigHairTintMode = WigHairTintMode.Never };
+
+        settings.GetEffectiveWigHairTintMode(null).Should().Be(WigHairTintMode.Never);
+        settings.GetEffectiveWigHairTintMode(new ModSetting { DisplayName = "Plain" })
+            .Should().Be(WigHairTintMode.Never);
+    }
+
+    [Fact]
+    public void ModSetting_HasWigSources_ReflectsEitherWigSet()
+    {
+        new ModSetting().HasWigSources.Should().BeFalse();
+        new ModSetting { DetectedWigArmors = { WigKey } }.HasWigSources.Should().BeTrue();
+        new ModSetting { DetectedWigArmatures = { ArmaKey } }.HasWigSources.Should().BeTrue();
+        new ModSetting { DetectedWigArmatures = { ArmaKey } }.HasWigArmors
+            .Should().BeFalse("HasWigArmors stays outfit-ARMO-only for its existing consumers");
+    }
+
+    // ── Per-NPC refinement: ForwardToOutfit → ConvertToHeadParts on an inert outfit field ──
+    //
+    // Whole vanilla NPC classes (generic Enc*/Treas*/Lvl* actors) take their whole inventory,
+    // outfit included, from an Inventory template, so a forwarded outfit could never reach them.
+    // The patcher converts the wig to head parts for those instead. The output validator read the
+    // MOD-level mode and therefore did not know, and reported all 1,621 such conversions on the
+    // measuring run as "HeadParts: extra [NPC2Wig_...]" appearance mismatches.
+
+    private static Npc TemplatedNpc(SkyrimMod mod, NpcConfiguration.TemplateFlag flags)
+    {
+        var template = MutagenFixtures.NewNpc(mod, "Template");
+        var npc = MutagenFixtures.NewNpc(mod, "Generic");
+        npc.Configuration.TemplateFlags = flags;
+        npc.Template.SetTo(template.FormKey);
+        return npc;
+    }
+
+    [Fact]
+    public void ForwardToOutfit_InventoryTemplatedNpc_ResolvesToConvertToHeadParts()
+    {
+        var mod = MutagenFixtures.NewMod("Test.esp");
+        var npc = TemplatedNpc(mod, NpcConfiguration.TemplateFlag.Inventory);
+        var settings = NewSettings(PatchingMode.CreateAndPatch, globalDefault: WigHandlingMode.ForwardToOutfit);
+
+        settings.GetEffectiveWigModeForNpc(ModWithWig(), npc)
+            .Should().Be(WigHandlingMode.ConvertToHeadParts,
+                "a wig written into an outfit field the engine never reads would silently do nothing");
+    }
+
+    [Fact]
+    public void ForwardToOutfit_UntemplatedNpc_StaysForwardToOutfit()
+    {
+        var mod = MutagenFixtures.NewMod("Test.esp");
+        var npc = MutagenFixtures.NewNpc(mod, "Named");
+        var settings = NewSettings(PatchingMode.CreateAndPatch, globalDefault: WigHandlingMode.ForwardToOutfit);
+
+        settings.GetEffectiveWigModeForNpc(ModWithWig(), npc).Should().Be(WigHandlingMode.ForwardToOutfit);
+    }
+
+    [Fact]
+    public void InventoryFlagWithoutATemplate_IsNotInert()
+    {
+        // The flag alone changes nothing — the engine needs somewhere to take the inventory FROM.
+        var mod = MutagenFixtures.NewMod("Test.esp");
+        var npc = MutagenFixtures.NewNpc(mod, "Orphan");
+        npc.Configuration.TemplateFlags = NpcConfiguration.TemplateFlag.Inventory;
+        var settings = NewSettings(PatchingMode.CreateAndPatch, globalDefault: WigHandlingMode.ForwardToOutfit);
+
+        settings.OutfitFieldIsInert(npc).Should().BeFalse();
+        settings.GetEffectiveWigModeForNpc(ModWithWig(), npc).Should().Be(WigHandlingMode.ForwardToOutfit);
+    }
+
+    [Fact]
+    public void OtherTemplateFlags_DoNotMakeTheOutfitInert()
+    {
+        // Traits is the flag this app usually reasons about; it says nothing about inventory.
+        var mod = MutagenFixtures.NewMod("Test.esp");
+        var npc = TemplatedNpc(mod, NpcConfiguration.TemplateFlag.Traits | NpcConfiguration.TemplateFlag.Stats);
+        var settings = NewSettings(PatchingMode.CreateAndPatch, globalDefault: WigHandlingMode.ForwardToOutfit);
+
+        settings.OutfitFieldIsInert(npc).Should().BeFalse();
+    }
+
+    [Fact]
+    public void SkyPatcherMode_IsNeverInert()
+    {
+        // There the outfit is applied at runtime by directive, which bypasses record-level
+        // template resolution entirely — so there is nothing to route around.
+        var mod = MutagenFixtures.NewMod("Test.esp");
+        var npc = TemplatedNpc(mod, NpcConfiguration.TemplateFlag.Inventory);
+        var settings = NewSettings(PatchingMode.CreateAndPatch, skyPatcher: true,
+            globalDefault: WigHandlingMode.ForwardToOutfit);
+
+        settings.OutfitFieldIsInert(npc).Should().BeFalse();
+        settings.GetEffectiveWigModeForNpc(ModWithWig(), npc).Should().Be(WigHandlingMode.ForwardToOutfit);
+    }
+
+    [Theory]
+    [InlineData(WigHandlingMode.ForwardToSkin)]
+    [InlineData(WigHandlingMode.ConvertToHeadParts)]
+    [InlineData(WigHandlingMode.None)]
+    public void OtherModes_AreUnaffectedByAnInertOutfit(WigHandlingMode mode)
+    {
+        var mod = MutagenFixtures.NewMod("Test.esp");
+        var npc = TemplatedNpc(mod, NpcConfiguration.TemplateFlag.Inventory);
+        var settings = NewSettings(PatchingMode.CreateAndPatch, globalDefault: mode);
+
+        settings.GetEffectiveWigModeForNpc(ModWithWig(), npc)
+            .Should().Be(settings.GetEffectiveWigMode(ModWithWig()),
+                "the downgrade exists only to rescue ForwardToOutfit from a dead field");
+    }
+
+    [Fact]
+    public void NullRecord_FallsBackToTheModLevelMode()
+    {
+        var settings = NewSettings(PatchingMode.CreateAndPatch, globalDefault: WigHandlingMode.ForwardToOutfit);
+
+        settings.OutfitFieldIsInert(null).Should().BeFalse();
+        settings.GetEffectiveWigModeForNpc(ModWithWig(), null).Should().Be(WigHandlingMode.ForwardToOutfit);
+    }
+}

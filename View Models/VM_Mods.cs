@@ -1,0 +1,4824 @@
+﻿using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Reactive;
+using System.Reactive.Concurrency;
+using System.Reactive.Disposables;
+using System.Reactive.Linq; // Added for Throttle, ObserveOn
+using System.Reactive.Subjects; // Added for Subject
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks; // Added for Task
+using System.Windows;
+using System.Windows.Media;
+using DynamicData;
+using Microsoft.Build.Experimental.BuildCheck;
+using Mutagen.Bethesda.Archives; // For MessageBox
+using Mutagen.Bethesda.Plugins;
+using Mutagen.Bethesda.Plugins.Cache;
+using Mutagen.Bethesda.Skyrim;
+using Noggog;
+using NPC_Plugin_Chooser_2.BackEnd;
+using NPC_Plugin_Chooser_2.BackEnd.CharacterViewerHost;
+using NPC_Plugin_Chooser_2.Models;
+using NPC_Plugin_Chooser_2.Views;
+using ReactiveUI;
+using ReactiveUI.Fody.Helpers;
+using NPC_Plugin_Chooser_2.Localization;
+using Splat; // For Locator
+
+
+namespace NPC_Plugin_Chooser_2.View_Models;
+
+public class VM_Mods : ReactiveObject, ISearchFilterHost
+{
+    private readonly Settings _settings;
+    private readonly EnvironmentStateProvider _environmentStateProvider;
+    private readonly VM_NpcSelectionBar _npcSelectionBar; // To access AllNpcs and navigate
+    private readonly NpcConsistencyProvider _consistencyProvider;
+    private readonly Lazy<VM_MainWindow> _lazyMainWindowVm; // *** NEW: To switch tabs ***
+    private readonly Lazy<VM_Settings> _lazySettingsVM;
+    private readonly Auxilliary _aux;
+    private readonly PluginProvider _pluginProvider;
+    private readonly BsaHandler _bsaHandler;
+    private readonly ImagePacker _imagePacker;
+    private readonly ConcurrentDictionary<(string pluginSourcePath, ModKey modKey), bool> _overridesCache = new();
+
+    // Caches the appearance/non-appearance classification of a master plugin by ModKey.
+    // FindAndAddMissingMasters runs per-mod (in parallel during the initial scan), and the same popular
+    // master (e.g. a shared appearance-resource mod) is referenced by many mods, so classifying it once
+    // and reusing avoids repeated record enumeration. Cleared at the start of each full scan / refresh so
+    // it never outlives the load order it describes.
+    private readonly ConcurrentDictionary<ModKey, bool> _masterAppearanceClassificationCache = new();
+
+    private CancellationTokenSource? _mugshotLoadingCts;
+    // Per-load mugshot-generation state (gate + completion counter + dedupe set).
+    // Recreated by ShowMugshotsAsync; consumed by TriggerAsyncMugshotGeneration.
+    private MugshotGenerationBatch? _mugshotGenerationBatch;
+    private TaskCompletionSource<PackingResult> _packingCompletionSource;
+    private IDisposable? _packingCompletedSubscription;
+
+    private readonly CompositeDisposable _disposables = new();
+
+    public const string BaseGameModSettingName = "Base Game";
+    public const string CreationClubModsettingName = "Creation Club";
+    const string tokenFileName = "NPC_Token.json";
+
+    private readonly ObservableAsPropertyHelper<PatchingMode> _currentPatchingMode;
+    public PatchingMode CurrentPatchingMode => _currentPatchingMode.Value;
+
+    // Subject and Observable for scroll requests
+    private readonly BehaviorSubject<VM_ModSetting?> _requestScrollToModSubject =
+        new BehaviorSubject<VM_ModSetting?>(null);
+
+    public IObservable<VM_ModSetting?> RequestScrollToModObservable => _requestScrollToModSubject.AsObservable();
+
+    // --- Filtering Properties (Left Panel) ---
+    [Reactive] public string NameFilterText { get; set; } = string.Empty;
+    [Reactive] public string PluginFilterText { get; set; } = string.Empty;
+    [Reactive] public ModNpcSearchType SelectedNpcSearchType { get; set; } = ModNpcSearchType.Name;
+    [Reactive] public string NpcSearchText { get; set; } = string.Empty;
+    public Array AvailableNpcSearchTypes => Enum.GetValues(typeof(ModNpcSearchType));
+    [Reactive] public bool ShowMugshotOnlyMods { get; set; } = true;
+    [Reactive] public bool IsLoadingNpcData { get; private set; }
+
+    // --- Data Lists (Left Panel) ---
+    private List<VM_ModSetting> _allModSettingsInternal = new();
+    public IReadOnlyList<VM_ModSetting> AllModSettings => _allModSettingsInternal; // Public access
+    public ObservableCollection<VM_ModSetting> ModSettingsList { get; } = new();
+
+    // --- Right Panel Properties ---
+    [Reactive] public VM_ModSetting? SelectedModForMugshots { get; private set; }
+    public ObservableCollection<VM_ModsMenuMugshot> CurrentModNpcMugshots { get; } = new();
+
+    [Reactive] public bool IsLoadingMugshots { get; private set; }
+    [Reactive] public string TotalModsLoadedText { get; private set; } = "0 mods loaded";
+
+    // This property will be set to true by the View (ModsView.xaml.cs) when the user
+    // directly interacts with zoom (Ctrl+Scroll, +/- buttons).
+    [Reactive] public bool ModsViewHasUserManuallyZoomed { get; set; } = false;
+
+    // Subject for triggering right panel image refresh
+    private readonly Subject<Unit> _refreshMugshotSizesSubject = new Subject<Unit>();
+    public IObservable<Unit> RefreshMugshotSizesObservable => _refreshMugshotSizesSubject.AsObservable();
+    
+    // Record for Refresh All Mods
+    private record ModSettingsBackup(
+        List<string> MugShotFolderPaths,
+        // Refresh All discards every VM and re-derives the mod list from disk, so locked folders have
+        // to be carried across by hand. The ordered folder snapshot is the anchor list that
+        // LockedFolderOrdering needs to restore each locked folder's relative position.
+        List<string> CorrespondingFolderPaths,
+        List<string> LockedFolderPaths,
+        bool MergeInDependencyRecords,
+        bool HasAlteredMergeLogic,
+        bool IncludeOutfits,
+        bool HandleInjectedRecords,
+        bool HasAlteredHandleInjectedRecordsLogic,
+        RecordOverrideHandlingMode? OverrideRecordOverrideHandlingMode
+    );
+    
+    // --- Batch Action Controls ---
+    [Reactive] public bool ShouldRescanNonAppearanceMods { get; set; } = false;
+    public ReactiveCommand<Unit, Unit> RefreshAllModsCommand { get; }
+    public ReactiveCommand<Unit, Unit> BatchEnableMergeInCommand { get; }
+    public ReactiveCommand<Unit, Unit> BatchForceEnableMergeInCommand { get; }
+    public ReactiveCommand<Unit, Unit> BatchDisableMergeInCommand { get; }
+    public ReactiveCommand<Unit, Unit> BatchIncludeOutfitsCommand { get; }
+    public ReactiveCommand<Unit, Unit> BatchExcludeOutfitsCommand { get; }
+    public ReactiveCommand<Unit, Unit> BatchEnableInjectedRecordsCommand { get; }
+    public ReactiveCommand<Unit, Unit> BatchDisableInjectedRecordsCommand { get; }
+    public ReactiveCommand<Unit, Unit> BatchEnableCopyAssetsCommand { get; }
+    public ReactiveCommand<Unit, Unit> BatchDisableCopyAssetsCommand { get; }
+    
+    [Reactive] public string CotRKeyword { get; set; }
+    public ReactiveCommand<Unit, Unit> ApplyCotRKeywordCommand { get; }
+    public ReactiveCommand<Unit, Unit> WriteRsvExclusionCommand { get; }
+
+    // --- NEW: Zoom Control Properties & Commands for ModsView ---
+    [Reactive] public double ModsViewZoomLevel { get; set; }
+    [Reactive] public bool ModsViewIsZoomLocked { get; set; }
+    public ReactiveCommand<Unit, Unit> ZoomInModsCommand { get; }
+    public ReactiveCommand<Unit, Unit> ZoomOutModsCommand { get; }
+    public ReactiveCommand<Unit, Unit> ResetZoomModsCommand { get; }
+    private const double _minZoomPercentage = 1.0;
+    private const double _maxZoomPercentage = 1000.0;
+    private const double _zoomStepPercentage = 2.5; // For +/- buttons and scroll wheel
+
+    /// <summary>
+    /// Persisted pixel width of the left (mod list) panel — i.e. the GridSplitter
+    /// position. Read once when the view loads and written back on drag; 0 means the
+    /// user has never dragged it, so the view falls back to its 25%-of-width default.
+    /// Not [Reactive]: nothing binds to it, the view drives it directly.
+    /// </summary>
+    public double LeftPanelWidth
+    {
+        get => _settings.ModsViewLeftPanelWidth;
+        set => _settings.ModsViewLeftPanelWidth = value;
+    }
+
+    // --- New: Other Display Controls
+    public bool NormalizeImageDimensions => _settings.NormalizeImageDimensions;
+    public int MaxMugshotsToFit => _settings.MaxMugshotsToFit;
+
+    // --- NEW: Source Plugin Disambiguation (Right Panel - Above Mugshots, below Mod Name) ---
+    [Reactive] public ModKey? SelectedSourcePluginForDisambiguation { get; set; }
+    [ObservableAsProperty] public bool ShowSourcePluginControls { get; }
+    [ObservableAsProperty] public ObservableCollection<ModKey> AvailableSourcePluginsForSelectedMod { get; }
+    public ReactiveCommand<Unit, Unit> SetGlobalSourcePluginCommand { get; }
+
+    // --- Placeholder Image Configuration --- 
+    private const string PlaceholderResourceRelativePath = @"Resources\No Mugshot.png";
+
+    public static readonly string FullPlaceholderPath =
+        Path.Combine(AppContext.BaseDirectory, PlaceholderResourceRelativePath);
+
+    private static readonly bool PlaceholderExists = File.Exists(FullPlaceholderPath);
+
+    // --- Commands ---
+    public ReactiveCommand<VM_ModSetting, Unit> ShowMugshotsCommand { get; }
+    public ReactiveCommand<Unit, Unit> CancelMugshotLoadCommand { get; }
+
+    // Expose for binding in VM_ModSetting commands
+    public string ModsFolderSetting => _settings.ModsFolder;
+    public string MugshotsFolderSetting => _settings.MugshotsFolder; // Needed for BrowseMugshotFolder
+    public SkyrimRelease SkyrimRelease => _settings.SkyrimRelease;
+    public EnvironmentStateProvider EnvironmentStateProvider => _environmentStateProvider;
+
+    // Concurrency management
+    private bool _isPopulatingModSettings = false;
+
+    // -------------------------------------------------------------------------
+    // Targeted cleanup tracing: when a specific mod is suspected of pulling in a
+    // foundation folder it shouldn't, set the display name below to that mod and
+    // the [CLEANUP-TRACE] lines fire only for it. Empty string disables tracing
+    // entirely (current default). Output goes to Debug.WriteLine so it shows up
+    // in the IDE Output window without needing the StartupLogger trigger file.
+    private const string CleanupTraceTarget = "";
+
+    private static bool ShouldTraceCleanup(VM_ModSetting vm) =>
+        !string.IsNullOrEmpty(CleanupTraceTarget) &&
+        string.Equals(vm.DisplayName, CleanupTraceTarget, StringComparison.OrdinalIgnoreCase);
+
+    private static void CleanupTrace(VM_ModSetting vm, string message)
+    {
+        if (ShouldTraceCleanup(vm))
+        {
+            Debug.WriteLine($"[CLEANUP-TRACE] '{vm.DisplayName}' {message}");
+        }
+    }
+    // -------------------------------------------------------------------------
+    
+    public bool SuppressPopupWarnings => _settings.SuppressPopupWarnings;
+
+    // Factory fields
+    private readonly VM_ModSetting.FromModelFactory _modSettingFromModelFactory;
+    private readonly VM_ModSetting.FromMugshotPathFactory _modSettingFromMugshotPathFactory;
+    private readonly VM_ModSetting.FromModFolderFactory _modSettingFromModFolderFactory;
+    private readonly VM_ModsMenuMugshot.Factory _mugshotFactory;
+    
+    // Helpers
+    public  static readonly Regex MugshotNameRegex =
+        new(@"^(?<hex>[0-9A-F]{8})\.(png|jpg|jpeg|bmp)$",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    // *** Updated Constructor Signature ***
+    public VM_Mods(Settings settings, EnvironmentStateProvider environmentStateProvider,
+        VM_NpcSelectionBar npcSelectionBar, NpcConsistencyProvider consistencyProvider,
+        Lazy<VM_MainWindow> lazyMainWindowVm, Lazy<VM_Settings> lazySettingsVm, Auxilliary aux, 
+        PluginProvider pluginProvider, BsaHandler bsaHandler,
+        VM_ModSetting.FromModelFactory modSettingFromModelFactory,
+        VM_ModSetting.FromMugshotPathFactory modSettingFromMugshotPathFactory,
+        VM_ModSetting.FromModFolderFactory modSettingFromModFolderFactory,
+        ImagePacker imagePacker, VM_ModsMenuMugshot.Factory mugshotFactory)
+    {
+        _settings = settings;
+        _environmentStateProvider = environmentStateProvider;
+        _npcSelectionBar = npcSelectionBar;
+        _consistencyProvider = consistencyProvider;
+        _lazyMainWindowVm = lazyMainWindowVm;
+        _lazySettingsVM = lazySettingsVm;
+        _aux = aux;
+        _pluginProvider = pluginProvider;
+        _bsaHandler = bsaHandler;
+        _modSettingFromModelFactory = modSettingFromModelFactory;
+        _modSettingFromMugshotPathFactory = modSettingFromMugshotPathFactory;
+        _modSettingFromModFolderFactory = modSettingFromModFolderFactory;
+        _imagePacker = imagePacker;
+        _mugshotFactory = mugshotFactory;
+
+        ModSettingsList.CollectionChanged += (_, _) =>
+            TotalModsLoadedText = $"{ModSettingsList.Count} mod{(ModSettingsList.Count == 1 ? "" : "s")} loaded";
+
+        RefreshAllModsCommand = ReactiveCommand.CreateFromTask(() => RefreshAllModSettingsAsync(null)).DisposeWith(_disposables);
+        RefreshAllModsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error refreshing all mods: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+
+        ShowMugshotsCommand = ReactiveCommand.CreateFromTask<VM_ModSetting>(ShowMugshotsAsync).DisposeWith(_disposables);
+        ShowMugshotsCommand.ThrownExceptions.Subscribe(ex =>
+        {
+            ScrollableMessageBox.ShowError($"Error loading mugshots: {ExceptionLogger.GetExceptionStack(ex)}");
+            IsLoadingMugshots = false;
+        }).DisposeWith(_disposables);
+        
+        CancelMugshotLoadCommand = ReactiveCommand.Create(() =>
+        {
+            _mugshotLoadingCts?.Cancel();
+            IsLoadingMugshots = false; // Set UI state immediately for responsiveness
+        }).DisposeWith(_disposables);
+        CancelMugshotLoadCommand.ThrownExceptions.Subscribe(ex =>
+        {
+            ScrollableMessageBox.ShowError($"Error cancelling mugshot load: {ExceptionLogger.GetExceptionStack(ex)}");
+        }).DisposeWith(_disposables);
+        
+        CotRKeyword = _settings.CotRKeyword;
+        this.WhenAnyValue(x => x.CotRKeyword)
+            .Skip(1)
+            .Throttle(TimeSpan.FromMilliseconds(300))
+            .Subscribe(keyword =>
+            {
+                _settings.CotRKeyword = keyword ?? "CotR";
+            })
+            .DisposeWith(_disposables);
+
+        // --- NEW: Initialize Zoom Settings from _settings ---
+        ModsViewZoomLevel =
+            Math.Max(_minZoomPercentage,
+                Math.Min(_maxZoomPercentage, _settings.ModsViewZoomLevel)); // Clamp initial load
+        ModsViewIsZoomLocked = _settings.ModsViewIsZoomLocked;
+        Debug.WriteLine(
+            $"VM_Mods.Constructor: Initial ZoomLevel: {ModsViewZoomLevel:F2}, IsZoomLocked: {ModsViewIsZoomLocked}");
+
+        // --- NEW: Zoom Commands ---
+        ZoomInModsCommand = ReactiveCommand.Create(() =>
+        {
+            Debug.WriteLine("VM_Mods: ZoomInModsCommand executed.");
+            ModsViewHasUserManuallyZoomed = true;
+            ModsViewZoomLevel = Math.Min(_maxZoomPercentage, ModsViewZoomLevel + _zoomStepPercentage);
+        }).DisposeWith(_disposables);
+        ZoomOutModsCommand = ReactiveCommand.Create(() =>
+        {
+            Debug.WriteLine("VM_Mods: ZoomOutModsCommand executed.");
+            ModsViewHasUserManuallyZoomed = true;
+            ModsViewZoomLevel = Math.Max(_minZoomPercentage, ModsViewZoomLevel - _zoomStepPercentage);
+        }).DisposeWith(_disposables);
+        ResetZoomModsCommand = ReactiveCommand.Create(() =>
+        {
+            Debug.WriteLine("VM_Mods: ResetZoomModsCommand executed.");
+            ModsViewIsZoomLocked = false;
+            ModsViewHasUserManuallyZoomed = false; // This allows packer to take over
+            // The key is that the VIEW needs to be told to re-evaluate its layout
+            // BEFORE the packer uses the ScrollViewer's dimensions.
+            // So, just signaling the subject might not be enough if the view's layout
+            // isn't guaranteed to be updated first.
+            // This subject will trigger RefreshMugshotImageSizes in the view.
+            _refreshMugshotSizesSubject.OnNext(Unit.Default);
+        }).DisposeWith(_disposables);
+        // ... (exception handlers for commands) ...
+        ZoomInModsCommand.ThrownExceptions
+            .Subscribe(ex => Debug.WriteLine($"Error ZoomInModsCommand: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+        ZoomOutModsCommand.ThrownExceptions
+            .Subscribe(ex => Debug.WriteLine($"Error ZoomOutModsCommand: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+        ResetZoomModsCommand.ThrownExceptions
+            .Subscribe(ex => Debug.WriteLine($"Error ResetZoomModsCommand: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .DisposeWith(_disposables);
+        
+        Observable.FromEventPattern<ImagePacker.PackingCompletedEventArgs>(
+                _imagePacker, nameof(ImagePacker.PackingCompleted))
+            .Throttle(TimeSpan.FromMilliseconds(100))
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(evt => {
+                // Complete the TaskCompletionSource if we're waiting for it
+                if (_packingCompletionSource != null && !_packingCompletionSource.Task.IsCompleted)
+                {
+                    var result = evt.EventArgs.Result;
+                    _packingCompletionSource.SetResult(result);
+                }
+        
+                // Then trigger async generation as before
+                this.TriggerAsyncMugshotGeneration();
+            })
+            .DisposeWith(_disposables);
+
+        // --- Source Plugin Disambiguation Logic ---
+        this.WhenAnyValue(x => x.SelectedModForMugshots)
+            .Select(mod => mod != null && mod.CorrespondingModKeys.Count > 1 && mod.AmbiguousNpcFormKeys.Any())
+            .ToPropertyEx(this, x => x.ShowSourcePluginControls)
+            .DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.SelectedModForMugshots)
+            .Select(mod => mod != null && mod.CorrespondingModKeys.Count > 1
+                ? new ObservableCollection<ModKey>(mod.CorrespondingModKeys.OrderBy(mk => mk.FileName.String))
+                : new ObservableCollection<ModKey>())
+            .ToPropertyEx(this, x => x.AvailableSourcePluginsForSelectedMod)
+            .DisposeWith(_disposables);
+
+        // When SelectedModForMugshots changes, reset the SelectedSourcePluginForDisambiguation
+        this.WhenAnyValue(x => x.SelectedModForMugshots)
+            .Subscribe(_ => SelectedSourcePluginForDisambiguation = null) // Reset dropdown selection
+            .DisposeWith(_disposables);
+
+        // Command for setting the global source plugin
+        var canSetGlobalSource = this.WhenAnyValue(
+            x => x.SelectedModForMugshots,
+            x => x.SelectedSourcePluginForDisambiguation,
+            (mod, selectedPlugin) => mod != null && selectedPlugin.HasValue && !selectedPlugin.Value.IsNull &&
+                                     mod.CorrespondingModKeys.Count > 1);
+
+        SetGlobalSourcePluginCommand = ReactiveCommand.Create(() =>
+        {
+            if (SelectedModForMugshots != null && SelectedSourcePluginForDisambiguation.HasValue &&
+                !SelectedSourcePluginForDisambiguation.Value.IsNull)
+            {
+                // SetSourcePluginForAllApplicableNpcs now returns a list of changed FormKeys
+                List<FormKey> changedKeys =
+                    SelectedModForMugshots.SetSourcePluginForAllApplicableNpcs(SelectedSourcePluginForDisambiguation
+                        .Value);
+
+                if (changedKeys.Any())
+                {
+                    // Manually update the CurrentSourcePlugin for displayed mugshots
+                    // This ensures their context menu checkmarks are correct without a full panel reload.
+                    foreach (var mugshotVM in CurrentModNpcMugshots)
+                    {
+                        if (changedKeys.Contains(mugshotVM.NpcFormKey))
+                        {
+                            mugshotVM.CurrentSourcePlugin = SelectedSourcePluginForDisambiguation;
+                        }
+                    }
+
+                    Debug.WriteLine(
+                        $"VM_Mods: Updated CurrentSourcePlugin for {changedKeys.Count} displayed mugshots after global source set.");
+                }
+            }
+        }, canSetGlobalSource).DisposeWith(_disposables); // canSetGlobalSource is the WhenAnyValue observable
+
+        SetGlobalSourcePluginCommand.ThrownExceptions.Subscribe(ex =>
+        {
+            ScrollableMessageBox.ShowError($"Error setting global source plugin: {ExceptionLogger.GetExceptionStack(ex)}");
+        }).DisposeWith(_disposables);
+        // --- END: Source Plugin Disambiguation Logic ---
+
+        // --- Setup Filter Reaction ---
+        // Throttle widens when mugshot autogeneration is enabled: intermediate
+        // typed strings would otherwise trigger renders for partial matches
+        // that the final filter result discards.
+        this.WhenAnyValue(x => x.NameFilterText, x => x.PluginFilterText, x => x.NpcSearchText,
+                x => x.SelectedNpcSearchType, x => x.ShowMugshotOnlyMods)
+            .Throttle(_ => Observable.Timer(
+                _settings.UsePortraitCreatorFallback
+                    ? TimeSpan.FromMilliseconds(500)
+                    : TimeSpan.FromMilliseconds(300),
+                RxApp.MainThreadScheduler))
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(_ => ApplyFilters())
+            .DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.NameFilterText, x => x.PluginFilterText, x => x.NpcSearchText,
+                x => x.SelectedNpcSearchType)
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(_ =>
+            {
+                if (SelectedModForMugshots != null && !ModSettingsList.Contains(SelectedModForMugshots))
+                {
+                    SelectedModForMugshots = null;
+                    DisposeAndClearMugshots();
+                }
+            })
+            .DisposeWith(_disposables);
+
+        // --- NEW: Persist Zoom Settings and Trigger Refresh ---
+        this.WhenAnyValue(x => x.ModsViewZoomLevel)
+            .Skip(1)
+            .Throttle(TimeSpan.FromMilliseconds(100))
+            .Subscribe(zoom =>
+            {
+                bool isFromPackerUpdate = !ModsViewIsZoomLocked && !ModsViewHasUserManuallyZoomed;
+                Debug.WriteLine(
+                    $"VM_Mods: ModsViewZoomLevel RAW input {zoom:F2}. IsFromPacker: {isFromPackerUpdate}, IsLocked: {ModsViewIsZoomLocked}, ManualZoom: {ModsViewHasUserManuallyZoomed}");
+
+                double previousVmZoomLevel = _settings.ModsViewZoomLevel;
+                double newClampedZoom = Math.Max(_minZoomPercentage, Math.Min(_maxZoomPercentage, zoom));
+
+                if (Math.Abs(_settings.ModsViewZoomLevel - newClampedZoom) > 0.001)
+                {
+                    _settings.ModsViewZoomLevel = newClampedZoom;
+                    Debug.WriteLine($"VM_Mods: Settings.ModsViewZoomLevel updated to {newClampedZoom:F2}.");
+                }
+
+                if (Math.Abs(newClampedZoom - zoom) > 0.001)
+                {
+                    Debug.WriteLine(
+                        $"VM_Mods: ZoomLevel IS being clamped from {zoom:F2} to {newClampedZoom:F2}. Updating property.");
+                    ModsViewZoomLevel = newClampedZoom;
+                    return;
+                }
+
+                if (ModsViewIsZoomLocked || ModsViewHasUserManuallyZoomed)
+                {
+                    Debug.WriteLine(
+                        $"VM_Mods: ZoomLevel processed. IsLocked or ManualZoom. Triggering refresh. Value: {newClampedZoom:F2}");
+                    _refreshMugshotSizesSubject.OnNext(Unit.Default);
+                }
+                else
+                {
+                    Debug.WriteLine(
+                        $"VM_Mods: ZoomLevel processed. Unlocked & not manual. No VM-initiated refresh. Value: {newClampedZoom:F2}");
+                }
+            })
+            .DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.ModsViewIsZoomLocked)
+            .Skip(1)
+            .Subscribe(isLocked =>
+            {
+                Debug.WriteLine($"VM_Mods: ModsViewIsZoomLocked changed to {isLocked}.");
+                _settings.ModsViewIsZoomLocked = isLocked;
+                ModsViewHasUserManuallyZoomed = false;
+                Debug.WriteLine("VM_Mods: ModsViewIsZoomLocked changed - Triggering _refreshMugshotSizesSubject.");
+                _refreshMugshotSizesSubject.OnNext(Unit.Default);
+            })
+            .DisposeWith(_disposables);
+
+        // MODIFIED: When SelectedModForMugshots changes, reset manual zoom state if not locked.
+        this.WhenAnyValue(x => x.SelectedModForMugshots)
+            .Skip(1)
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(selectedMod =>
+            {
+                Debug.WriteLine(
+                    $"VM_Mods: SelectedModForMugshots changed to {selectedMod?.DisplayName ?? "null"}.");
+                if (!ModsViewIsZoomLocked)
+                {
+                    Debug.WriteLine(
+                        "VM_Mods: SelectedModForMugshots changed - Zoom not locked, setting ModsViewHasUserManuallyZoomed = false");
+                    ModsViewHasUserManuallyZoomed = false;
+                }
+                // ShowMugshotsAsync (called when this property changes, typically via command) will trigger _refreshMugshotSizesSubject
+            })
+            .DisposeWith(_disposables);
+
+        // When SelectedModForMugshots changes (which happens when ShowMugshotsCommand is executed),
+        // signal a scroll request for this newly selected mod.
+        this.WhenAnyValue(x => x.SelectedModForMugshots)
+            .Skip(1) // Skip initial null or first value
+            .ObserveOn(RxApp
+                .MainThreadScheduler) // Ensure subject is updated on UI thread if needed, though OnNext is thread-safe
+            .Subscribe(modToScrollTo =>
+            {
+                if (modToScrollTo != null)
+                {
+                    Debug.WriteLine(
+                        $"VM_Mods: SelectedModForMugshots changed to {modToScrollTo.DisplayName}. Signaling scroll.");
+                    _requestScrollToModSubject.OnNext(modToScrollTo);
+                }
+                else
+                {
+                    _requestScrollToModSubject.OnNext(null); // Clear scroll request if selection is cleared
+                }
+
+                // Reset manual zoom flag if not locked (existing logic)
+                if (!ModsViewIsZoomLocked)
+                {
+                    ModsViewHasUserManuallyZoomed = false;
+                }
+            })
+            .DisposeWith(_disposables);
+        
+        this.WhenAnyValue(x => x._lazySettingsVM.Value.SelectedPatchingMode)
+            .ToProperty(this, x => x.CurrentPatchingMode, out _currentPatchingMode);
+        
+        // --- NEW: Initialize Batch Action Commands ---
+        BatchIncludeOutfitsCommand = ReactiveCommand.Create(() =>
+        {
+            const string message = "Modifying NPC outfits on an existing save can lead to NPCs unequipping their outifts entirely. Are you sure you want to enable outfit modification?";
+
+            if (!_settings.SuppressPopupWarnings && !ScrollableMessageBox.Confirm(message, "Confirm Outfit Forwarding"))
+            {
+                return;
+            }
+            
+            foreach (var modSetting in _allModSettingsInternal)
+            {
+                modSetting.IsPerformingBatchAction = true;
+                modSetting.IncludeOutfits = true;
+                modSetting.IsPerformingBatchAction = false;
+            }
+        }).DisposeWith(_disposables);
+
+        BatchExcludeOutfitsCommand = ReactiveCommand.Create(() =>
+        {
+            foreach (var modSetting in _allModSettingsInternal)
+            {
+                modSetting.IsPerformingBatchAction = true;
+                modSetting.IncludeOutfits = false;
+                modSetting.IsPerformingBatchAction = false;
+            }
+        }).DisposeWith(_disposables);
+        
+        BatchEnableInjectedRecordsCommand = ReactiveCommand.Create(() =>
+        {
+            const string message = "Searching for injected records makes patching take longer, and most appearance mods don't need it. Are you sure you want to enable this for all mods?";
+
+            if (!_settings.SuppressPopupWarnings && !ScrollableMessageBox.Confirm(message, "Confirm Injected Record Search"))
+            {
+                return;
+            }
+            
+            foreach (var modSetting in _allModSettingsInternal)
+            {
+                if (modSetting.MergeInDependencyRecords)
+                {
+                    modSetting.IsPerformingBatchAction = true;
+                    modSetting.HandleInjectedRecords = true;
+                    modSetting.IsPerformingBatchAction = false;
+                }
+            }
+        }).DisposeWith(_disposables);
+
+        BatchDisableInjectedRecordsCommand = ReactiveCommand.Create(() =>
+        {
+            foreach (var modSetting in _allModSettingsInternal)
+            {
+                modSetting.IsPerformingBatchAction = true;
+                modSetting.HandleInjectedRecords = false;
+                modSetting.IsPerformingBatchAction = false;
+            }
+        }).DisposeWith(_disposables);
+        
+        BatchEnableMergeInCommand = ReactiveCommand.Create(() =>
+        {
+            foreach (var modSetting in _allModSettingsInternal)
+            {
+                if (!modSetting.HasAlteredMergeLogic)
+                {
+                    modSetting.MergeInDependencyRecords = true;
+                }
+            }
+        }).DisposeWith(_disposables);
+
+        BatchForceEnableMergeInCommand = ReactiveCommand.Create(() =>
+        {
+            const string message = "WARNING: Forcing 'Merge Dependencies' ON for all mods is not recommended.\n\n" +
+                                   "This feature is intended for mods you plan to disable after patching. Merging in large mods that remain in your load order can cause patcher freezes and is unnecessary.\n\n" +
+                                   "Are you sure you want to enable this for all mods, including those automatically flagged as non-appearance mods?";
+
+            if (ScrollableMessageBox.Confirm(message, "Confirm Force Enable Merge-in"))
+            {
+                foreach (var modSetting in _allModSettingsInternal)
+                {
+                    modSetting.MergeInDependencyRecords = true;
+                }
+            }
+        }).DisposeWith(_disposables);
+
+        BatchDisableMergeInCommand = ReactiveCommand.Create(() =>
+        {
+            foreach (var modSetting in _allModSettingsInternal)
+            {
+                modSetting.MergeInDependencyRecords = false;
+            }
+        }).DisposeWith(_disposables);
+        
+        BatchEnableCopyAssetsCommand = ReactiveCommand.Create(() =>
+        {
+            foreach (var modSetting in _allModSettingsInternal)
+            {
+                modSetting.IsPerformingBatchAction = true;
+                modSetting.CopyAssets = true;
+                modSetting.IsPerformingBatchAction = false;
+            }
+        }).DisposeWith(_disposables);
+        
+        BatchDisableCopyAssetsCommand = ReactiveCommand.Create(() =>
+        {
+            const string message =
+                "Disabling asset copying for ALL mods means only FaceGen files (.nif/.dds) will be transferred for every NPC.\n\n" +
+                "It becomes your responsibility to ensure that all other required assets (meshes, textures for armor, hair, eyes, etc.) are still available, though you can disable or hide the source mod plugins.\n\n" +
+                "Are you sure you want to disable asset copying for all mods?";
+
+            if (ScrollableMessageBox.Confirm(message, "Confirm Disable All Asset Copying"))
+            {
+                foreach (var modSetting in _allModSettingsInternal)
+                {
+                    modSetting.IsPerformingBatchAction = true;
+                    modSetting.CopyAssets = false;
+                    modSetting.IsPerformingBatchAction = false;
+                }
+            }
+        }).DisposeWith(_disposables);
+        
+        BatchIncludeOutfitsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error including outfits: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+        BatchExcludeOutfitsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error excluding outfits: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+        BatchEnableInjectedRecordsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error enabling injected record handling: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+        BatchDisableInjectedRecordsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error disabling injected record handling: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+        BatchEnableMergeInCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error enabling merge-in: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+        BatchForceEnableMergeInCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error force-enabling merge-in: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+        BatchDisableMergeInCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error disabling merge-in: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+        BatchEnableCopyAssetsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error enabling asset copying: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+        BatchDisableCopyAssetsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error disabling asset copying: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+        ApplyCotRKeywordCommand = ReactiveCommand.Create(ApplyCotRKeyword).DisposeWith(_disposables);
+        ApplyCotRKeywordCommand.ThrownExceptions
+            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error applying CotR keyword: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .DisposeWith(_disposables);
+
+        WriteRsvExclusionCommand = ReactiveCommand.Create(WriteRsvExclusion).DisposeWith(_disposables);
+        WriteRsvExclusionCommand.ThrownExceptions
+            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error writing RSV exclusion: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .DisposeWith(_disposables);
+        
+        ApplyFilters(); // Apply initial filter
+    }
+    
+    private void TriggerAsyncMugshotGeneration()
+    {
+        // Always runs on the UI thread (the PackingCompleted subscription is
+        // ObserveOn(MainThreadScheduler)), so the per-load batch state below is
+        // accessed single-threaded — no lock needed except the Interlocked
+        // counter the worker tasks decrement.
+        var batch = _mugshotGenerationBatch;
+        if (batch == null || batch.Token.IsCancellationRequested) return;
+        if (CurrentModNpcMugshots == null || CurrentModNpcMugshots.Count == 0) return;
+
+        // Collect placeholder tiles not already kicked for THIS load. The packer
+        // raises PackingCompleted more than once per load (initial pack, then
+        // again whenever it re-runs — e.g. the vertical scrollbar appearing as a
+        // large mod's tiles fill changes the viewport width), and the large-mod
+        // population path adds tiles in batches after the first pack. The Kicked
+        // set makes each tile fire exactly once while still letting these later
+        // calls pick up newly-added tiles.
+        var newTiles = new List<VM_ModsMenuMugshot>();
+        foreach (var vm in CurrentModNpcMugshots)
+        {
+            if (!vm.HasMugshot && batch.Kicked.Add(vm)) newTiles.Add(vm);
+        }
+        if (newTiles.Count == 0)
+        {
+            // Nothing new to generate. If nothing is in flight either (e.g. a
+            // mod whose tiles are all already curated/cached), the load is done
+            // — clear the flag ShowMugshotsAsync set so the Cancel button hides.
+            if (Volatile.Read(ref batch.ActiveCount) == 0) IsLoadingMugshots = false;
+            return;
+        }
+
+        Debug.WriteLine($"Mods Menu: kicking bounded generation for {newTiles.Count} new tile(s).");
+
+        // ActiveCount drives IsLoadingMugshots (and thus the Cancel button's
+        // visibility): it stays up until every kicked tile completes, across all
+        // the repeated trigger calls above — previously the button vanished as
+        // soon as population finished, while generation was still running.
+        Interlocked.Add(ref batch.ActiveCount, newTiles.Count);
+        IsLoadingMugshots = true;
+
+        foreach (var mugshotVM in newTiles)
+        {
+            var vmCapture = mugshotVM;
+            // Per-tile worker. Bound the fan-out via the load's shared gate:
+            // each tile blocks on WaitAsync before LoadRealImageAsync sets
+            // IsLoading=true, so only MaxParallelPortraitRenders tiles spin /
+            // run their pipeline at once even though hundreds are queued. Token
+            // is NOT passed to Task.Run so the body always runs and the finally
+            // decrements the counter even when cancelled before acquiring.
+            _ = Task.Run(async () =>
+            {
+                bool acquired = false;
+                try
+                {
+                    await batch.Gate.WaitAsync(batch.Token);
+                    acquired = true;
+                    await vmCapture.LoadRealImageAsync();
+                }
+                catch (OperationCanceledException) { /* load superseded */ }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Mugshot generation failed: {ExceptionLogger.GetExceptionStack(ex)}");
+                }
+                finally
+                {
+                    if (acquired) batch.Gate.Release();
+                    OnTileGenerationComplete(batch);
+                }
+            });
+        }
+    }
+
+    /// <summary>Decrements the batch's in-flight counter; when it reaches zero
+    /// the whole load's generation is done. Clears <see cref="IsLoadingMugshots"/>
+    /// (hiding the Cancel button) and fires one final packer pass so the
+    /// freshly-generated mugshots — displayed at their placeholder's size until
+    /// now (see VM_ModsMenuMugshot.SetImageSource) — adopt their correct packed
+    /// size. Guards on the batch's own token so a superseded load (new mod
+    /// selected) doesn't clobber the current one's loading state.</summary>
+    private void OnTileGenerationComplete(MugshotGenerationBatch batch)
+    {
+        if (Interlocked.Decrement(ref batch.ActiveCount) != 0) return;
+
+        Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            if (batch.Token.IsCancellationRequested) return;
+            // Another trigger may have queued more tiles between our decrement
+            // and this dispatch (staggered large-mod population); if so, leave
+            // the loading state up — that batch will clear it when it finishes.
+            if (Volatile.Read(ref batch.ActiveCount) != 0) return;
+            IsLoadingMugshots = false;
+            _refreshMugshotSizesSubject.OnNext(Unit.Default);
+        });
+    }
+
+    /// <summary>Per-load generation state, recreated by ShowMugshotsAsync. Lets
+    /// in-flight worker tasks from a superseded load operate on their own
+    /// counter/gate/kicked-set instead of corrupting the new load's.</summary>
+    private sealed class MugshotGenerationBatch
+    {
+        public required SemaphoreSlim Gate { get; init; }
+        public required CancellationToken Token { get; init; }
+        public readonly HashSet<VM_ModsMenuMugshot> Kicked = new();
+        public int ActiveCount;
+    }
+
+    /// <summary>
+    /// Adds a new VM_ModSetting (typically created by Unlink operation) to the internal list
+    /// and refreshes dependent UI.
+    /// </summary>
+    public async Task AddAndRefreshModSettingAsync(VM_ModSetting newVm)
+    {
+        if (newVm == null || _allModSettingsInternal.Any(vm =>
+                vm.DisplayName.Equals(newVm.DisplayName, StringComparison.OrdinalIgnoreCase)))
+        {
+            Debug.WriteLine(
+                $"VM_Mods: Not adding VM '{newVm?.DisplayName}' either because it's null or a VM with that DisplayName already exists.");
+            // Optionally, if it exists, consider merging properties, but for unlink, it should be a new entry.
+            return;
+        }
+
+        _allModSettingsInternal.Add(newVm);
+        // Re-sort the internal list by DisplayName
+        SortVMsInPlace();
+
+        // Recalculate its mugshot validity (it might be a new mugshot-only entry)
+        RecalculateMugshotValidity(newVm);
+
+        // Refresh the filtered list in the UI
+        ApplyFilters();
+
+        // Asynchronously refresh its NPC lists if it might have mod data (though unlink usually makes it mugshot-only)
+        // For a new mugshot-only entry, RefreshNpcLists won't find much, but it's harmless.
+
+        var faceGenCache = await CacheFaceGenPathsOnLoadAsync(new[] { newVm }, null);
+
+        var modFolderPaths = newVm.CorrespondingFolderPaths.ToHashSet();
+        var plugins =
+            _pluginProvider.LoadPlugins(newVm.CorrespondingModKeys, modFolderPaths, out var loadedPaths);
+        await Task.Run(() => newVm.RefreshNpcLists(faceGenCache.allFaceGenLooseFiles, faceGenCache.allFaceGenBsaFiles, plugins, _settings.LocalizationLanguage));
+        newVm.ScanForWigs(plugins);
+        _pluginProvider.UnloadPlugins(loadedPaths);
+
+        await ScanForBaseGameAssetPathsAsync(newVm);
+    }
+
+    /// <summary>
+    /// Scans a mod's loose folders and its own BSAs for asset files that sit at base game /
+    /// Creation Club asset paths (excluding FaceGen, which is inherently per-NPC), and stores
+    /// the result on the VM (<see cref="VM_ModSetting.HasBaseGameAssetPaths"/> /
+    /// <see cref="VM_ModSetting.BaseGameAssetPathCount"/>, persisted via the model). The result
+    /// only controls whether the "Overwrite Base Game Assets" checkbox is shown in the Mods
+    /// menu — the patcher's skip decision is a live path test that never depends on this scan,
+    /// so a stale result can't cause wrong copying. Deliberately NOT run on every launch (it
+    /// enumerates the mod's whole folder tree): it runs on import, on refresh, and once via the
+    /// 2.2.2 migration.
+    /// </summary>
+    public async Task ScanForBaseGameAssetPathsAsync(VM_ModSetting? vm)
+    {
+        if (vm == null) return;
+        if (vm.IsAutoGenerated)
+        {
+            // The synthetic Base Game / Creation Club entries ARE the base game.
+            vm.HasBaseGameAssetPaths = false;
+            vm.BaseGameAssetPathCount = 0;
+            return;
+        }
+
+        try
+        {
+            var vanillaAssetPaths = await _bsaHandler.GetVanillaAssetPathsAsync();
+            if (vanillaAssetPaths.Count == 0)
+            {
+                return; // Environment not resolved — keep whatever the last successful scan found.
+            }
+
+            var overlaps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var folderPaths = vm.CorrespondingFolderPaths.ToList();
+            var modKeys = vm.CorrespondingModKeys.ToList();
+            await Task.Run(() =>
+            {
+                foreach (var folder in folderPaths.Where(Directory.Exists))
+                {
+                    var relPaths = Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories)
+                        .Select(f => Path.GetRelativePath(folder, f));
+                    CollectBaseGameAssetOverlaps(relPaths, vanillaAssetPaths, overlaps);
+                }
+
+                // A mod can also ship colliding assets packed in its own BSAs — those flow
+                // through the same copy pipeline (extracted loose into the output), so scan
+                // archive contents too.
+                var bsaContents = _bsaHandler.GetAllFilePathsForMod(modKeys, folderPaths,
+                    _settings.SkyrimRelease.ToGameRelease());
+                foreach (var containedPaths in bsaContents.Values)
+                {
+                    CollectBaseGameAssetOverlaps(containedPaths, vanillaAssetPaths, overlaps);
+                }
+            });
+
+            vm.HasBaseGameAssetPaths = overlaps.Count > 0;
+            vm.BaseGameAssetPathCount = overlaps.Count;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"ScanForBaseGameAssetPathsAsync failed for {vm.DisplayName}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Adds to <paramref name="results"/> every candidate data-relative path that collides with
+    /// a base game / Creation Club asset path, excluding FaceGen paths (always allowed to
+    /// overwrite). Paths are normalized to backslashes; <paramref name="vanillaAssetPaths"/> is
+    /// expected to be an OrdinalIgnoreCase set. Pure helper, unit-testable in isolation.
+    /// </summary>
+    public static void CollectBaseGameAssetOverlaps(IEnumerable<string> candidateRelPaths,
+        IReadOnlySet<string> vanillaAssetPaths, HashSet<string> results)
+    {
+        foreach (var candidate in candidateRelPaths)
+        {
+            if (string.IsNullOrEmpty(candidate)) continue;
+            string normalized = candidate.Replace('/', '\\');
+            if (!Auxilliary.IsFaceGenPath(normalized) && vanillaAssetPaths.Contains(normalized))
+            {
+                results.Add(normalized);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Sorts an input mod settings list alphabetically (except for base game and CC content)
+    /// </summary>
+    public List<VM_ModSetting> SortVMs(IEnumerable<VM_ModSetting> inputs)
+    {
+        var sorted = inputs
+            .OrderBy(vm => vm.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
+
+        var baseGameSetting = inputs.FirstOrDefault(x => x.DisplayName == BaseGameModSettingName);
+        var creationClubSetting =
+            inputs.FirstOrDefault(x => x.DisplayName == CreationClubModsettingName);
+
+        if (creationClubSetting != null)
+        {
+            sorted.Remove(creationClubSetting);
+            sorted.Insert(0, creationClubSetting);
+        }
+
+        if (baseGameSetting != null)
+        {
+            sorted.Remove(baseGameSetting);
+            sorted.Insert(0, baseGameSetting);
+        }
+
+        return sorted;
+    }
+
+    /// <summary>
+    /// Sorts the main mod settings list alphabetically (except for base game and CC content) in-place
+    /// </summary>
+    public void SortVMsInPlace()
+    {
+        var sorted = SortVMs(_allModSettingsInternal);
+        _allModSettingsInternal.Clear();
+        _allModSettingsInternal.AddRange(sorted);
+    }
+
+    /// <summary>
+    /// Requests the VM_NpcSelectionBar to refresh its current NPC's appearance sources.
+    /// </summary>
+    public void RequestNpcSelectionBarRefreshView()
+    {
+        // This relies on VM_NpcSelectionBar being accessible, e.g., if injected or via a message bus.
+        // Assuming _npcSelectionBar is the injected instance.
+        _npcSelectionBar?.RefreshCurrentNpcAppearanceSources();
+    }
+
+    /// <summary>
+    /// Forces the right-hand mugshot panel to rebuild its per-mugshot VMs for
+    /// the currently-selected mod. Each rebuilt VM re-walks
+    /// <see cref="Settings.MugshotSourcePriority"/> at load time, so callers
+    /// use this to make priority changes made on another tab visible on return.
+    /// </summary>
+    public void RefreshCurrentModMugshots()
+    {
+        if (SelectedModForMugshots != null)
+        {
+            ShowMugshotsCommand.Execute(SelectedModForMugshots).Subscribe().DisposeWith(_disposables);
+        }
+    }
+    
+    // In VM_Mods.cs
+
+    // Disposes every mugshot tile before clearing the collection. Each
+    // VM_ModsMenuMugshot holds a frozen BitmapImage and a subscription to the
+    // SingleInstance NpcConsistencyProvider, so a bare Clear() orphans the tiles
+    // while the singleton keeps them rooted -- leaking the bitmaps. Route every
+    // clear of CurrentModNpcMugshots through here so no site can bypass disposal.
+    private void DisposeAndClearMugshots()
+    {
+        CurrentModNpcMugshots.ForEach(vm => vm.Dispose());
+        CurrentModNpcMugshots.Clear();
+    }
+
+private Task ShowMugshotsAsync(VM_ModSetting selectedModSetting)
+{
+    _mugshotLoadingCts?.Cancel();
+    _mugshotLoadingCts?.Dispose(); // workers capture the token/batch, not the source
+    _mugshotLoadingCts = new CancellationTokenSource();
+    var token = _mugshotLoadingCts.Token;
+
+    if (selectedModSetting == null)
+    {
+        SelectedModForMugshots = null;
+        DisposeAndClearMugshots();
+        return Task.CompletedTask;
+    }
+
+    IsLoadingMugshots = true;
+    SelectedModForMugshots = selectedModSetting;
+    DisposeAndClearMugshots();
+
+    // Fresh generation batch for this load. Sized to MaxParallelPortraitRenders
+    // (the renderer's effective ceiling). Worker tasks capture this instance, so
+    // a superseded load's stragglers can't corrupt the new load's counter/gate.
+    int maxParallel = Math.Max(1, _settings.MaxParallelPortraitRenders);
+    _mugshotGenerationBatch = new MugshotGenerationBatch
+    {
+        Gate = new SemaphoreSlim(maxParallel, maxParallel),
+        Token = token,
+    };
+
+    if (!ModsViewIsZoomLocked)
+    {
+        ModsViewHasUserManuallyZoomed = false;
+    }
+
+    _ = Task.Run(async () =>
+    {
+        try
+        {
+            // --- REVISED Phase 1: Cancellable Data Gathering ---
+            var mugshotData = new List<(string ImagePath, FormKey NpcFormKey, string NpcDisplayName)>();
+
+            // 1. Pre-scan and cache all existing mugshot file paths for this mod into a lookup dictionary.
+            //    Mods view shows mugshots from any source the user has on disk for this mod:
+            //    user-configured MugShotFolderPaths (curated), plus the per-mod AutoGen and
+            //    FaceFinder cache folders. NPC2's main mugshot index only tracks curated paths;
+            //    the fallback folders are scanned here independently so this view can still
+            //    surface generated images without polluting the user's persisted MugShotFolderPaths.
+            var existingMugshots = new Dictionary<FormKey, string>();
+            var candidateFolders = (selectedModSetting.MugShotFolderPaths ?? Enumerable.Empty<string>())
+                .Concat(new[]
+                {
+                    BatchMugshotGenerator.GetAutoGenModFolder(_settings, selectedModSetting.DisplayName),
+                    BatchMugshotGenerator.GetFaceFinderModFolder(_settings, selectedModSetting.DisplayName),
+                });
+
+            var validFolders = candidateFolders
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Select(p => p.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Where(Directory.Exists)
+                .ToList();
+
+            if (validFolders.Any())
+            {
+                var imageFiles = validFolders
+                    .SelectMany(folder => Directory.EnumerateFiles(folder, "*.*", SearchOption.AllDirectories))
+                    .Where(f => MugshotNameRegex.IsMatch(Path.GetFileName(f)));
+
+                foreach (var imagePath in imageFiles)
+                {
+                    if (token.IsCancellationRequested) break;
+                    var fileName = Path.GetFileName(imagePath);
+                    var match = MugshotNameRegex.Match(fileName);
+                    if (!match.Success) continue;
+
+                    var hexPart = match.Groups["hex"].Value;
+                    var pluginName = new DirectoryInfo(Path.GetDirectoryName(imagePath)!).Name;
+                    var tail6 = hexPart.Length >= 6 ? hexPart[^6..] : hexPart;
+                    var formKeyString = $"{tail6}:{pluginName}";
+
+                    if (FormKey.TryFactory(formKeyString, out var npcFormKey) && !existingMugshots.ContainsKey(npcFormKey))
+                    {
+                        existingMugshots[npcFormKey] = imagePath;
+                    }
+                }
+            }
+            if (token.IsCancellationRequested) return;
+
+            // 2. Iterate through ALL NPCs that belong to this mod.
+            foreach (var (npcFormKey, npcDisplayName) in selectedModSetting.NpcFormKeysToDisplayName)
+            {
+                if (token.IsCancellationRequested) break;
+
+                // 3. For each NPC, use its real image path if it exists in our lookup, otherwise use the placeholder.
+                //    This ensures every NPC gets an entry.
+                if (existingMugshots.TryGetValue(npcFormKey, out var imagePath))
+                {
+                    mugshotData.Add((imagePath, npcFormKey, npcDisplayName));
+                }
+                else
+                {
+                    mugshotData.Add((FullPlaceholderPath, npcFormKey, npcDisplayName));
+                }
+            }
+
+            if (token.IsCancellationRequested || !mugshotData.Any())
+            {
+                 await Application.Current.Dispatcher.InvokeAsync(() => IsLoadingMugshots = false, System.Windows.Threading.DispatcherPriority.Normal, token);
+                 return;
+            }
+
+            // --- Phase 2: UI Population with Correct Sizing ---
+            int maxToFit = _settings.MaxMugshotsToFit;
+
+            // Sort all data once by name before processing
+            var sortedMugshotData = mugshotData.OrderBy(d => d.NpcDisplayName).ToList();
+
+            if (sortedMugshotData.Count <= maxToFit)
+            {
+                // ALGORITHM 1: Small Mod - Load all at once, then resize.
+                var vms = sortedMugshotData
+                    .Select(data => CreateMugshotVmFromData(selectedModSetting, data.ImagePath, data.NpcFormKey, data.NpcDisplayName, token))
+                    .ToList();
+
+                await Application.Current.Dispatcher.InvokeAsync(() => {
+                    if (token.IsCancellationRequested) return;
+                    foreach (var vm in vms) CurrentModNpcMugshots.Add(vm);
+                    _refreshMugshotSizesSubject.OnNext(Unit.Default); // Resize the entire batch
+                }, System.Windows.Threading.DispatcherPriority.Normal, token);
+            }
+            else
+            {
+                // ALGORITHM 2: Large Mod - Two-phase loading to prevent layout issues.
+                
+                // 2a: Sizing Phase
+                var firstChunkData = sortedMugshotData.Take(maxToFit).ToList();
+                var firstChunkVMs = firstChunkData.Select(data => CreateMugshotVmFromData(selectedModSetting, data.ImagePath, data.NpcFormKey, data.NpcDisplayName, token)).ToList();
+                
+                _packingCompletionSource = new TaskCompletionSource<PackingResult>();
+
+                // Add the first batch to the UI and trigger the resize calculation
+                await Application.Current.Dispatcher.InvokeAsync(() => {
+                    if (token.IsCancellationRequested) return;
+                    foreach (var vm in firstChunkVMs) CurrentModNpcMugshots.Add(vm);
+                    _refreshMugshotSizesSubject.OnNext(Unit.Default);
+                }, System.Windows.Threading.DispatcherPriority.Normal, token);
+
+                // Asynchronously wait for the UI to report back with the definitive calculated size
+                PackingResult result = await _packingCompletionSource.Task;
+                if (token.IsCancellationRequested) return;
+
+                // 2b: Population Phase
+                var remainingData = sortedMugshotData.Skip(maxToFit);
+                const int batchSize = 100;
+                var batchVms = new List<VM_ModsMenuMugshot>(batchSize);
+
+                foreach (var data in remainingData)
+                {
+                    if (token.IsCancellationRequested) break;
+
+                    var vm = CreateMugshotVmFromData(selectedModSetting, data.ImagePath, data.NpcFormKey, data.NpcDisplayName, token);
+
+                    // CRITICAL: Apply the definitive size BEFORE adding to the UI
+                    if (result.DefinitiveWidth > 0 && result.DefinitiveHeight > 0)
+                    {
+                        vm.ImageWidth = result.DefinitiveWidth;
+                        vm.ImageHeight = result.DefinitiveHeight;
+                    }
+                    
+                    batchVms.Add(vm);
+
+                    if (batchVms.Count >= batchSize)
+                    {
+                        await Application.Current.Dispatcher.InvokeAsync(() => {
+                            if (!token.IsCancellationRequested) foreach(var item in batchVms) CurrentModNpcMugshots.Add(item);
+                        }, System.Windows.Threading.DispatcherPriority.Normal, token);
+                        batchVms.Clear();
+                        await Task.Yield(); // Allow UI to remain responsive
+                    }
+                }
+                
+                // Add the final batch
+                if (batchVms.Any() && !token.IsCancellationRequested)
+                {
+                    await Application.Current.Dispatcher.InvokeAsync(() => {
+                        foreach(var item in batchVms) CurrentModNpcMugshots.Add(item);
+                    }, System.Windows.Threading.DispatcherPriority.Normal, token);
+                }
+            }
+        }
+        catch (TaskCanceledException) { /* Suppress cancellation error */ }
+        catch (Exception ex)
+        {
+            // Population failed, so TriggerAsyncMugshotGeneration won't run to
+            // clear the flag — clear it here so the Cancel button doesn't hang.
+            await Application.Current.Dispatcher.InvokeAsync(() => {
+                IsLoadingMugshots = false;
+                ScrollableMessageBox.ShowWarning($"Failed to load mugshot data for {selectedModSetting.DisplayName}:\n{ExceptionLogger.GetExceptionStack(ex)}", TranslationServiceProvider.GetService()?.GetString("mugshotLoadError") ?? "Mugshot Load Error");
+            });
+        }
+        // NOTE: no finally clearing IsLoadingMugshots here. On the success path
+        // generation outlives population — OnTileGenerationComplete clears the
+        // flag (and runs the final repack) once the last tile finishes.
+    }, token);
+
+    return Task.CompletedTask;
+}
+
+// Helper method used by both algorithms
+private VM_ModsMenuMugshot CreateMugshotVmFromData(VM_ModSetting modSetting, string imagePath, FormKey npcFormKey, string npcDisplayName, CancellationToken token)
+{
+    bool isAmbiguous = modSetting.AmbiguousNpcFormKeys.Contains(npcFormKey);
+    var availableModKeys = modSetting.AvailablePluginsForNpcs.TryGetValue(npcFormKey, out var keys) ? keys : new List<ModKey>();
+    var currentSource = modSetting.NpcPluginDisambiguation.TryGetValue(npcFormKey, out var source) ? (ModKey?)source : availableModKeys.FirstOrDefault();
+    
+    var vm = _mugshotFactory(
+        imagePath, 
+        npcFormKey, 
+        npcDisplayName, 
+        this, 
+        isAmbiguous, 
+        availableModKeys, 
+        currentSource, 
+        modSetting,
+        token
+    );
+    
+    return vm;
+}
+
+    // --- NEW or MODIFIED IF NEEDED: Dispose method for cleaning up subscriptions ---
+    public void Dispose() // If VM_Mods needs to be disposable
+    {
+        _disposables.Dispose();
+        DisposeAndClearMugshots();
+        _mugshotLoadingCts?.Cancel();
+        _mugshotLoadingCts?.Dispose();
+        _requestScrollToModSubject.Dispose(); // Dispose the subject
+    }
+
+    // *** NEW: Method to handle navigation triggered by VM_ModsMenuMugshot ***
+    // In VM_Mods.cs
+    public void NavigateToNpc(FormKey npcFormKey)
+    {
+        _lazyMainWindowVm.Value.IsNpcsTabSelected = true;
+
+        // Use a slightly longer initial delay to ensure tab switch UI operations can start
+        RxApp.MainThreadScheduler.Schedule(TimeSpan.FromMilliseconds(100), () =>
+        {
+            var npcToSelect = _npcSelectionBar.AllNpcs.FirstOrDefault(npc => npc.NpcFormKey == npcFormKey);
+            if (npcToSelect != null)
+            {
+                Debug.WriteLine(
+                    $"VM_Mods.NavigateToNpc: Found NPC {npcToSelect.DisplayName}. Initiating navigation sequence.");
+                _npcSelectionBar.IsProgrammaticNavigationInProgress = true; // Set flag BEFORE clearing filters
+
+                // Clear filters. This will reactively trigger _npcSelectionBar.ApplyFilter.
+                // ApplyFilter will see IsProgrammaticNavigationInProgress = true and will NOT auto-select.
+                _npcSelectionBar.SearchText1 = "";
+                _npcSelectionBar.SearchText2 = "";
+                _npcSelectionBar.SearchText3 = "";
+
+                // Schedule the explicit selection and scroll signal to occur *after*
+                // the filter clearing has triggered ApplyFilter and ApplyFilter has updated FilteredNpcs.
+                // The WhenAnyValue for filters in VM_NpcSelectionBar is throttled by 300ms.
+                // So, we schedule this for slightly after that throttle period.
+                RxApp.MainThreadScheduler.Schedule(TimeSpan.FromMilliseconds(350), () =>
+                {
+                    Debug.WriteLine(
+                        $"VM_Mods.NavigateToNpc: Attempting to explicitly select {npcToSelect.DisplayName}.");
+
+                    // It's possible FilteredNpcs doesn't contain npcToSelect if ApplyFilter somehow
+                    // didn't include it (e.g., if ApplyFilter was triggered by something else very quickly).
+                    // A safeguard: if target not in list, ApplyFilter again (though this should be rare with blank filters).
+                    if (!_npcSelectionBar.FilteredNpcs.Contains(npcToSelect))
+                    {
+                        Debug.WriteLine(
+                            $"VM_Mods.NavigateToNpc: Target {npcToSelect.DisplayName} not in FilteredNpcs. Re-applying filter.");
+                        // This ApplyFilter will also see IsProgrammaticNavigationInProgress = true.
+                        _npcSelectionBar.ApplyFilter(false);
+                        // Give this ApplyFilter a moment if it was needed.
+                        RxApp.MainThreadScheduler.Schedule(TimeSpan.FromMilliseconds(50), SelectAndSignal);
+                    }
+                    else
+                    {
+                        SelectAndSignal();
+                    }
+
+                    void SelectAndSignal()
+                    {
+                        _npcSelectionBar.SelectedNpc = npcToSelect; // Explicitly set the selection
+                        Debug.WriteLine(
+                            $"VM_Mods.NavigateToNpc: _npcSelectionBar.SelectedNpc explicitly set to {npcToSelect.DisplayName}.");
+
+                        // Schedule the scroll signal with a small delay for the selection to bind in the UI
+                        RxApp.MainThreadScheduler.Schedule(TimeSpan.FromMilliseconds(5), () =>
+                        {
+                            if (_npcSelectionBar.SelectedNpc == npcToSelect) // Final check
+                            {
+                                Debug.WriteLine(
+                                    $"VM_Mods.NavigateToNpc: Signaling scroll for {npcToSelect.DisplayName}.");
+                                _npcSelectionBar.SignalScrollToNpc(npcToSelect);
+                            }
+                            else
+                            {
+                                Debug.WriteLine(
+                                    $"VM_Mods.NavigateToNpc: ERROR - SelectedNpc is now '{_npcSelectionBar.SelectedNpc?.DisplayName ?? "null"}' " +
+                                    $"but expected '{npcToSelect.DisplayName}' before signaling scroll. Scroll aborted.");
+                            }
+
+                            // Reset the flag AFTER all operations related to this navigation are complete.
+                            _npcSelectionBar.IsProgrammaticNavigationInProgress = false;
+                            Debug.WriteLine(
+                                $"VM_Mods.NavigateToNpc: IsProgrammaticNavigationInProgress set to false for {npcToSelect.DisplayName}.");
+                        });
+                    }
+                });
+            }
+            else
+            {
+                ScrollableMessageBox.ShowWarning(
+                    $"Could not find NPC with FormKey {npcFormKey} in the main NPC list.", "NPC Not Found");
+                // Ensure flag is reset even if NPC not found.
+                if (_npcSelectionBar != null) _npcSelectionBar.IsProgrammaticNavigationInProgress = false;
+            }
+        });
+    }
+
+    // RecalculateMugshotValidity now sets VM_ModSetting.HasValidMugshots
+    // based on whether *actual* mugshots can be found for its defined NPCs.
+    public void RecalculateMugshotValidity(VM_ModSetting modSetting)
+    {
+        modSetting.HasValidMugshots =
+            CheckMugshotValidity(modSetting.MugShotFolderPaths); // Pass the VM_ModSetting itself
+        // If this was the selected mod, refresh the right panel
+        if (SelectedModForMugshots == modSetting)
+        {
+            // Re-run ShowMugshotsAsync to reflect potential change from real to placeholder or vice-versa
+            ShowMugshotsCommand.Execute(modSetting).Subscribe().DisposeWith(_disposables);
+        }
+    }
+
+    private bool CheckMugshotValidity(IEnumerable<string>? mugshotFolderPaths)
+    {
+        if (mugshotFolderPaths is null) return false;
+
+        foreach (var raw in mugshotFolderPaths)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) continue;
+
+            var path = raw.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (!Directory.Exists(path)) continue;
+
+            try
+            {
+                // Valid if ANY file matches 8-hex + image extension AND sits in a plugin-like folder
+                var anyValid = Directory.EnumerateFiles(path, "*.*", SearchOption.AllDirectories)
+                    .Any(f =>
+                    {
+                        var fileName = Path.GetFileName(f);
+                        if (!MugshotNameRegex.IsMatch(fileName)) return false;
+
+                        var parent = new FileInfo(f).Directory?.Name ?? string.Empty;
+
+                        // Prefer strict plugin-like names; keep your old lenient check as fallback
+                        return parent.EndsWith(".esp", StringComparison.OrdinalIgnoreCase)
+                               || parent.EndsWith(".esm", StringComparison.OrdinalIgnoreCase)
+                               || parent.EndsWith(".esl", StringComparison.OrdinalIgnoreCase)
+                               || parent.Contains('.'); // fallback to previous behavior
+                    });
+
+                if (anyValid) return true; // short-circuit: any folder passing makes the whole set valid
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Error checking mugshot validity for path {path}: {ExceptionLogger.GetExceptionStack(ex)}");
+                // keep scanning other folders
+            }
+        }
+
+        return false;
+    }
+
+    public async Task PopulateModSettingsAsync(VM_SplashScreen? splashReporter)
+    {
+        _aux.ReinitializeModDependentProperties();
+
+        // Phase 0: Cache FaceGen
+        StartupLogger.LogPhase("Mod Population - Phase 0: FaceGen Caching");
+        splashReporter?.UpdateStep("Pre-caching asset file paths...");
+        StartupLogger.Log("Starting FaceGen path caching");
+        var faceGenCache = await CacheFaceGenPathsOnLoadAsync(null, splashReporter); // pass null to force full scan of mods folder
+        StartupLogger.Log("FaceGen path caching complete");
+
+        // Phase 1: Initialize and load data from disk
+        StartupLogger.LogPhase("Mod Population - Phase 1: Load From Disk");
+        StartupLogger.Log("Initializing population");
+        var (tempList, loadedDisplayNames, claimedMugshotPaths, warnings) = InitializePopulation(splashReporter);
+
+        StartupLogger.Log("Loading mods from settings");
+        LoadModsFromSettings(tempList, loadedDisplayNames, claimedMugshotPaths);
+
+        StartupLogger.Log("Scanning for mugshot-only mods");
+        var vmsFromMugshotsOnly =
+            ScanForMugshotOnlyMods(loadedDisplayNames, claimedMugshotPaths, warnings, splashReporter);
+
+        StartupLogger.Log("Starting mod folder scan");
+        await ScanForModsInModFolderAsync(tempList, vmsFromMugshotsOnly, loadedDisplayNames, faceGenCache.allFaceGenLooseFiles, faceGenCache.allFaceGenBsaFiles, claimedMugshotPaths,
+            splashReporter, warnings);
+        StartupLogger.Log("Mod folder scan complete");
+
+        // Phase 2: Consolidate and sort the gathered data
+        StartupLogger.LogPhase("Mod Population - Phase 2: Consolidate");
+        StartupLogger.Log("Finalizing mod list");
+        FinalizeModList(tempList, vmsFromMugshotsOnly);
+        AddBaseAndCreationClubMods(tempList);
+        _allModSettingsInternal.Clear();
+        _allModSettingsInternal.AddRange(SortVMs(tempList));
+        StartupLogger.Log($"Total mods after consolidation: {_allModSettingsInternal.Count}");
+
+        // Phase 3: Perform heavy analysis on the consolidated data
+        StartupLogger.LogPhase("Mod Population - Phase 3: Analysis");
+
+        try
+        {
+            var analysisFailedVms = await AnalyzeModSettingsAsync(splashReporter, faceGenCache, warnings);
+
+            PruneEmptyNewlyCreatedAppearanceMods(splashReporter, analysisFailedVms);
+
+            // Mirror the 2.1.6 migration sweep for first-time scans. Inside
+            // ProcessNewModFolderForParallelScanAsync, FindAndAddMissingMasters runs against
+            // a freshly-created temp VM whose NpcFormKeys is still empty, which means
+            // npcSourcePluginKeys is empty and foundation-mod folders (e.g. "Song of the
+            // Green") get attached as resources to replacers (e.g. "Auri-Replacer.esp")
+            // even though the foundation's NPCs are the very ones being templated by the
+            // replacer. AnalyzeModSettingsAsync has now run RefreshNpcLists, so NpcFormKeys
+            // is populated and CleanupCorrespondingFolders will produce the correct result.
+            await CleanupNewlyCreatedCorrespondingFoldersAsync(splashReporter, analysisFailedVms);
+
+            _aux.SaveRaceCache();
+        }
+        catch (AggregateException aggEx)
+        {
+            // Handle exceptions from the analysis phase
+            foreach (var ex in aggEx.Flatten().InnerExceptions)
+            {
+                StartupLogger.Log($"Mod population error: {ExceptionLogger.GetExceptionStack(ex)}", "ERROR");
+                Debug.WriteLine($"Async NPC list refresh error (outer): {ExceptionLogger.GetExceptionStack(ex)}");
+                Application.Current.Dispatcher.Invoke(() =>
+                    warnings.Add($"Async NPC list refresh error: {ExceptionLogger.GetExceptionStack(ex)}"));
+            }
+        }
+        catch (Exception ex)
+        {
+            StartupLogger.Log($"Mod population error: {ExceptionLogger.GetExceptionStack(ex)}", "ERROR");
+            Debug.WriteLine($"Error in PopulateModSettingsAsync after WhenAll: {ExceptionLogger.GetExceptionStack(ex)}");
+            Application.Current.Dispatcher.Invoke(() => warnings.Add($"Unexpected error: {ExceptionLogger.GetExceptionStack(ex)}"));
+        }
+        finally
+        {
+            // Phase 4 must ALWAYS run: it clears IsLoadingNpcData, applies the mod list to
+            // the UI, and shows any collected warnings. Skipping it on failure left the Mods
+            // tab permanently stuck on "Loading NPC data..." with the error invisible.
+            try
+            {
+                splashReporter?.UpdateStep("Finalizing mod settings...");
+                await FinalizeAndApplySettingsOnUI(warnings);
+            }
+            catch (Exception ex)
+            {
+                StartupLogger.Log($"FinalizeAndApplySettingsOnUI failed: {ExceptionLogger.GetExceptionStack(ex)}", "ERROR");
+                Debug.WriteLine($"FinalizeAndApplySettingsOnUI failed: {ExceptionLogger.GetExceptionStack(ex)}");
+            }
+
+            splashReporter?.UpdateStep("Mod settings populated.");
+        }
+    }
+    
+    // In VM_Mods.cs
+
+    /// <summary>
+    /// True if any of the supplied mod folder paths contains an NPC_Token.json marker — i.e. the folder is
+    /// this app's own patch output. Such a folder must never be treated as an appearance mod even though its
+    /// output plugin genuinely contains NPC + FaceGen data by content. Mirrors the token check in the
+    /// new-folder discovery scan, but applied to an already-existing (persisted or refreshed) entry so it
+    /// can be evicted rather than only skipped at first discovery.
+    /// </summary>
+    private static bool FolderPathsContainOwnOutputToken(IEnumerable<string> folderPaths)
+    {
+        return folderPaths.Any(p =>
+            !string.IsNullOrWhiteSpace(p) && File.Exists(Path.Combine(p, tokenFileName)));
+    }
+
+    public const string OwnOutputFailureReason = "Folder is this app's own output (NPC_Token.json present)";
+
+    public async Task<(bool Success, string FailureReason)> RefreshSingleModSettingAsync(VM_ModSetting vmToRefresh)
+    {
+        if (vmToRefresh == null) return (false, "VM is null");
+
+        // Clear this mod's analysis logs up front rather than after the analysis: both of the paths
+        // below that DROP the mod (own patch output, and nothing appearance-like left) return before
+        // RefreshNpcLists runs, so cleanup placed at the end would never fire for exactly the mods
+        // whose logs most need to go. LoadingErrors is covered too because its writers append —
+        // without this, a re-run stacks a fresh stack trace on top of the last one indefinitely.
+        AnalysisLogCleaner.ClearForMod(vmToRefresh.DisplayName);
+
+        // If this entry's folder is this app's own patch output (identified by the NPC_Token.json marker),
+        // it must not be treated as an appearance mod, even though the output plugin contains NPC + FaceGen
+        // data by content. Evict it here so a Refresh drops an entry that was adopted before the marker
+        // existed; the content-based classification below would otherwise always keep it. Auto-generated
+        // entries (Base Game / Creation Club) carry no folder paths and are unaffected.
+        if (!vmToRefresh.IsAutoGenerated && FolderPathsContainOwnOutputToken(vmToRefresh.CorrespondingFolderPaths))
+        {
+            foreach (var path in vmToRefresh.CorrespondingFolderPaths)
+            {
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    _settings.CachedNonAppearanceMods.TryAdd(path, OwnOutputFailureReason);
+                }
+            }
+            Debug.WriteLine($"[Refresh:{vmToRefresh.DisplayName}] REMOVING mod: folder is this app's own output (NPC_Token.json present).");
+            RemoveModSetting(vmToRefresh);
+            return (false, OwnOutputFailureReason);
+        }
+
+        // The appearance classification is keyed by ModKey against the current load order; drop any cached
+        // verdicts so a refresh after an environment change re-evaluates against the live state.
+        _masterAppearanceClassificationCache.Clear();
+
+        var dbgTag = $"[Refresh:{vmToRefresh.DisplayName}]";
+        Debug.WriteLine($"{dbgTag} === Refresh start ===");
+        Debug.WriteLine($"{dbgTag} Folder paths ({vmToRefresh.CorrespondingFolderPaths.Count}): {string.Join(" | ", vmToRefresh.CorrespondingFolderPaths)}");
+        Debug.WriteLine($"{dbgTag} Mugshot paths ({vmToRefresh.MugShotFolderPaths.Count}): {string.Join(" | ", vmToRefresh.MugShotFolderPaths)}");
+        Debug.WriteLine($"{dbgTag} ModKeys before update ({vmToRefresh.CorrespondingModKeys.Count}): {string.Join(", ", vmToRefresh.CorrespondingModKeys.Select(k => k.FileName))}");
+        Debug.WriteLine($"{dbgTag} ResourceOnlyModKeys before update ({vmToRefresh.ResourceOnlyModKeys.Count}): {string.Join(", ", vmToRefresh.ResourceOnlyModKeys.Select(k => k.FileName))}");
+
+        // 1. Generate caches for the specific mod being refreshed.
+        var faceGenCache = await CacheFaceGenPathsOnLoadAsync(new[] { vmToRefresh }, null); // No splash screen
+        var faceGenLooseCount = faceGenCache.allFaceGenLooseFiles.Sum(kvp => kvp.Value.Count);
+        var faceGenBsaCount = faceGenCache.allFaceGenBsaFiles.TryGetValue(vmToRefresh.DisplayName, out var bsaSet) ? bsaSet.Count : 0;
+        Debug.WriteLine($"{dbgTag} FaceGen cache: loose={faceGenLooseCount}, bsa={faceGenBsaCount}");
+
+        // 2. Update the mod keys based on current folder contents
+        vmToRefresh.UpdateCorrespondingModKeys();
+        Debug.WriteLine($"{dbgTag} ModKeys after update ({vmToRefresh.CorrespondingModKeys.Count}): {string.Join(", ", vmToRefresh.CorrespondingModKeys.Select(k => k.FileName))}");
+        Debug.WriteLine($"{dbgTag} ResourceOnlyModKeys after update ({vmToRefresh.ResourceOnlyModKeys.Count}): {string.Join(", ", vmToRefresh.ResourceOnlyModKeys.Select(k => k.FileName))}");
+
+        // Find and add any missing masters before proceeding with analysis.
+        if (!string.IsNullOrWhiteSpace(_settings.ModsFolder) && Directory.Exists(_settings.ModsFolder))
+        {
+            var allModDirectories = Directory.EnumerateDirectories(_settings.ModsFolder).ToList();
+            var warnings = new ConcurrentBag<InitializationWarning>(); // Warnings will be logged to debug output.
+            FindAndAddMissingMasters(vmToRefresh, allModDirectories, warnings);
+            if (warnings.Any())
+            {
+                Debug.WriteLine(
+                    $"Warnings during master discovery for '{vmToRefresh.DisplayName}':\n{string.Join("\n", warnings)}");
+            }
+        }
+
+        // 3. Load the necessary plugins for this mod
+        var modFolderPathsForVm = vmToRefresh.CorrespondingFolderPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var plugins = _pluginProvider.LoadPlugins(vmToRefresh.CorrespondingModKeys, modFolderPathsForVm, out var loadedPluginPaths);
+        Debug.WriteLine($"{dbgTag} Loaded {plugins.Count} plugin(s): {string.Join(", ", plugins.Select(p => $"{p.ModKey.FileName}(npcs={p.Npcs.Count})"))}");
+        Debug.WriteLine($"{dbgTag} Loaded plugin paths: {string.Join(" | ", loadedPluginPaths)}");
+
+        try
+        {
+            var originalContainedNpcs = vmToRefresh.NpcFormKeysToDisplayName.Keys.ToHashSet();
+
+            // 4a. Re-evaluate the mod's fundamental type (Appearance vs. Non-Appearance)
+
+            // Step 1: Check if plugins provide appearance data
+            bool hasAppearancePlugins = false;
+            if (vmToRefresh.CorrespondingModKeys.Any())
+            {
+                hasAppearancePlugins =
+                    await ContainsAppearancePluginsAsync(vmToRefresh.CorrespondingModKeys, modFolderPathsForVm);
+            }
+
+            // Step 2: Check if FaceGen files exist
+            bool hasFaceGen = faceGenCache.allFaceGenLooseFiles.Any() ||
+                              (faceGenCache.allFaceGenBsaFiles.TryGetValue(vmToRefresh.DisplayName, out var bsaFiles) &&
+                               bsaFiles.Any());
+            Debug.WriteLine($"{dbgTag} Type checks: hasAppearancePlugins={hasAppearancePlugins}, hasFaceGen={hasFaceGen}");
+
+            // Step 3: Branching Logic
+            if (hasAppearancePlugins)
+            {
+                // It is a valid plugin-based appearance mod
+                vmToRefresh.IsFaceGenOnlyEntry = false;
+                Debug.WriteLine($"{dbgTag} Classified as: plugin-based appearance mod");
+            }
+            else if (hasFaceGen)
+            {
+                // It has no valid appearance plugins, but has FaceGen. Treat as FaceGen-Only.
+                vmToRefresh.IsFaceGenOnlyEntry = true;
+                Debug.WriteLine($"{dbgTag} Classified as: FaceGen-only entry");
+            }
+            else
+            {
+                // Neither valid plugins nor FaceGen. It's no longer an appearance mod.
+                string failureReason = "No FaceGen files found";
+                Debug.WriteLine($"{dbgTag} REMOVING mod: no appearance plugins and no FaceGen. Reason='{failureReason}'");
+
+                // Cache the folder paths as non-appearance so they aren't automatically re-scanned next launch.
+                foreach (var path in vmToRefresh.CorrespondingFolderPaths)
+                {
+                    if (!string.IsNullOrWhiteSpace(path))
+                    {
+                        _settings.CachedNonAppearanceMods.TryAdd(path, failureReason);
+                    }
+                }
+
+                // Remove the VM from the list and exit.
+                RemoveModSetting(vmToRefresh);
+                return (false, failureReason); // Return failure and the specific reason
+            }
+
+            if (vmToRefresh.IsFaceGenOnlyEntry)
+            {
+                var scanResult = FaceGenScanner.CreateFaceGenScanResultFromCache(vmToRefresh,
+                    faceGenCache.allFaceGenLooseFiles, faceGenCache.allFaceGenBsaFiles);
+
+                vmToRefresh.FaceGenOnlyNpcFormKeys.Clear();
+                foreach (var (pluginName, npcIds) in scanResult.FaceGenFiles)
+                {
+                    foreach (var id in npcIds.Where(id => id.Length == 8))
+                    {
+                        if (FormKey.TryFactory($"{id.Substring(2, 6)}:{pluginName}", out var formKey))
+                        {
+                            vmToRefresh.FaceGenOnlyNpcFormKeys.Add(formKey);
+                        }
+                    }
+                }
+            }
+
+            // 4b. Re-run the core analysis functions
+            vmToRefresh.RefreshNpcLists(faceGenCache.allFaceGenLooseFiles, faceGenCache.allFaceGenBsaFiles, plugins,
+                _settings.LocalizationLanguage);
+            Debug.WriteLine($"{dbgTag} After RefreshNpcLists: NpcFormKeys.Count={vmToRefresh.NpcFormKeys.Count}, FaceGenOnlyNpcFormKeys.Count={vmToRefresh.FaceGenOnlyNpcFormKeys.Count}, AvailablePluginsForNpcs.Count={vmToRefresh.AvailablePluginsForNpcs.Count}");
+
+            var analysisTasks = new List<Task>
+            {
+                Task.Run(() => vmToRefresh.CheckMergeInSuitability(null)),
+                vmToRefresh.FindPluginsWithOverrides(_pluginProvider),
+                ScanForBaseGameAssetPathsAsync(vmToRefresh)
+            };
+
+            if (!vmToRefresh.IsFaceGenOnlyEntry)
+            {
+                analysisTasks.Add(vmToRefresh.CheckForInjectedRecords(null, _settings.LocalizationLanguage));
+            }
+
+            await Task.WhenAll(analysisTasks);
+
+            var environmentEditorIdMap = _environmentStateProvider.LoadOrder.PriorityOrder.Npc().WinningOverrides()
+                .Where(npc => !string.IsNullOrWhiteSpace(npc.EditorID))
+                .GroupBy(npc => npc.EditorID!, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key,
+                    g => g.Select(npc => npc.FormKey).ToHashSet(),
+                    StringComparer.OrdinalIgnoreCase);
+
+            var modEditorIdMap = plugins.SelectMany(x => x.Npcs)
+                .Where(npc => !string.IsNullOrWhiteSpace(npc.EditorID))
+                .GroupBy(npc => npc.EditorID!, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(g => g.Key,
+                    g => g.Select(npc => npc.FormKey).ToHashSet(),
+                    StringComparer.OrdinalIgnoreCase);
+
+            var guests = await vmToRefresh.GetSkyPatcherImportsAsync(environmentEditorIdMap, modEditorIdMap);
+            foreach (var (target, source, modDisplayName, npcDisplayName) in guests)
+            {
+                // An NPC pointed at itself is not a share (see AddGuestAppearanceToSettings);
+                // skip before the template flag, which would otherwise hide a real NPC from
+                // the NPC list on behalf of a share that doesn't exist.
+                if (target.Equals(source)) continue;
+                _settings.CachedSkyPatcherTemplates.Add(source);
+                AddGuestAppearanceToSettings(target, source, modDisplayName, npcDisplayName);
+            }
+
+            // Reconcile persisted shares now that the NPC lists are rebuilt: a donor NPC
+            // deleted from this mod (records + FaceGen + ini) must also drop off any target
+            // NPCs it was shared onto, or it lingers as a dead placeholder tile. Raw plugin
+            // records are included so a donor that was merely rejected during analysis is
+            // not mistaken for deleted; donors the ini scan above just re-registered are
+            // exempt because they may resolve via the load order rather than this mod's own
+            // plugins. Skipped when nothing is provably live (e.g. plugins failed to load),
+            // where sweeping would act on absence of evidence.
+            var liveDonorKeys = plugins.SelectMany(p => p.Npcs).Select(n => n.FormKey)
+                .Concat(vmToRefresh.NpcFormKeysToDisplayName.Keys)
+                .ToHashSet();
+            var freshDonorKeys = guests.Select(g => g.SourceNpc).ToHashSet();
+            if (liveDonorKeys.Count > 0 || freshDonorKeys.Count > 0)
+            {
+                _npcSelectionBar.PruneStaleGuestAppearances(vmToRefresh.DisplayName, liveDonorKeys, freshDonorKeys);
+            }
+
+            // Mirror the analysis-time cache so a subsequent CleanupCorrespondingFolders
+            // call recognises SkyPatcher-targeted foundations as NPC sources to exclude.
+            // Widened lookup catches foundations on disk but not in the user's LO.
+            vmToRefresh.SkyPatcherTargetModKeys =
+                await vmToRefresh.GetSkyPatcherTargetModKeysAsync(environmentEditorIdMap, modEditorIdMap);
+
+            // Prune dependency folders that FindAndAddMissingMasters would not re-add now that
+            // NpcFormKeys reflects the post-Refresh state (so plugins whose NPCs this mod patches
+            // are correctly classified as NPC source plugins and excluded). This is the same
+            // post-analysis cleanup the initial scan runs via CleanupNewlyCreatedCorrespondingFoldersAsync.
+            var cleanupWarnings = new ConcurrentBag<InitializationWarning>();
+            var foldersBeforeCleanup = vmToRefresh.CorrespondingFolderPaths.ToList();
+            CleanupCorrespondingFolders(vmToRefresh, cleanupWarnings);
+            var droppedFolders = foldersBeforeCleanup
+                .Except(vmToRefresh.CorrespondingFolderPaths, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (droppedFolders.Any())
+            {
+                Debug.WriteLine($"{dbgTag} CleanupCorrespondingFolders dropped {droppedFolders.Count} folder(s): {string.Join(", ", droppedFolders.Select(Path.GetFileName))}");
+            }
+            if (cleanupWarnings.Any())
+            {
+                Debug.WriteLine($"{dbgTag} CleanupCorrespondingFolders warnings: {string.Join(" | ", cleanupWarnings)}");
+            }
+
+            // 5. Update UI-dependent properties
+            RecalculateMugshotValidity(vmToRefresh);
+
+            // 6. Update NPC selection Bar
+            var toUpdate = _npcSelectionBar.AllNpcs.Where(npc =>
+                vmToRefresh.NpcFormKeysToDisplayName.Keys.Contains(npc.NpcFormKey)).ToList();
+            foreach (var npc in toUpdate)
+            {
+                if (!npc.AppearanceMods.Contains(vmToRefresh))
+                {
+                    npc.AppearanceMods.Add(vmToRefresh);
+                }
+            }
+
+            var removedNpcs = originalContainedNpcs
+                .Where(formKey => !vmToRefresh.NpcFormKeysToDisplayName.Keys.Contains(formKey)).ToList();
+            var toRemove = _npcSelectionBar.AllNpcs.Where(npc =>
+                removedNpcs.Contains(npc.NpcFormKey)).ToList();
+
+            foreach (var npc in toRemove)
+            {
+                if (npc.AppearanceMods.Contains(vmToRefresh))
+                {
+                    npc.AppearanceMods.Remove(vmToRefresh);
+                }
+            }
+
+            // Unlinking AppearanceMods above only takes the tile away; an NPC this mod no longer
+            // provides can still hold a SELECTION naming it, which then dangles exactly like a
+            // selection of a deleted entry -- the NPC counts as chosen with nothing able to supply
+            // its face at patch time. Swept to the same standard as the share prune above: only
+            // NPCs with no trace left in the mod (not merely rejected by this pass's analysis,
+            // which is not evidence of deletion), and nothing at all when nothing is provably live
+            // -- e.g. plugins failed to load, where every NPC would look deleted.
+            if (liveDonorKeys.Count > 0 || freshDonorKeys.Count > 0)
+            {
+                var goneForGood = removedNpcs.Where(formKey => !liveDonorKeys.Contains(formKey)).ToHashSet();
+                int clearedSelections = _npcSelectionBar.ClearSelectionsFromMod(vmToRefresh.DisplayName, goneForGood);
+                if (clearedSelections > 0)
+                {
+                    Debug.WriteLine($"{dbgTag} Cleared {clearedSelections} selection(s) for NPC(s) this mod no longer provides.");
+                }
+            }
+
+            RequestNpcSelectionBarRefreshView();
+            return (true, string.Empty); // Valid
+        }
+        catch (Exception ex)
+        {
+            ScrollableMessageBox.ShowError(
+                $"Failed to refresh '{vmToRefresh.DisplayName}':\n{ExceptionLogger.GetExceptionStack(ex)}");
+            return (true, string.Empty); // Treat as valid (don't delete) on exception
+        }
+        finally
+        {
+            // 6. Unload the plugins
+            _pluginProvider.UnloadPlugins(loadedPluginPaths);
+        }
+    }
+
+    private (List<VM_ModSetting> tempList, HashSet<string> loadedDisplayNames, HashSet<string> claimedMugshotPaths,
+        List<string> warnings)
+        InitializePopulation(VM_SplashScreen? splashReporter)
+    {
+        // Dispose the previous population's VMs before dropping them. Each
+        // VM_ModSetting subscribes to the SingleInstance VM_Settings (and other
+        // singletons), which roots it; without disposal every VM from every prior
+        // population (Refresh All / environment change) leaks for the life of the
+        // app. Population always rebuilds fresh VMs via the factory below, so these
+        // instances are never reused. No-op on the first population (empty list).
+        foreach (var oldVm in _allModSettingsInternal)
+        {
+            oldVm.Dispose();
+        }
+        _allModSettingsInternal.Clear();
+        _overridesCache.Clear();
+        _masterAppearanceClassificationCache.Clear(); // load order is re-resolved per scan
+        IsLoadingNpcData = true;
+        var warnings = new List<string>();
+
+        if (_environmentStateProvider.Status != EnvironmentStateProvider.EnvironmentStatus.Valid ||
+            _environmentStateProvider.LoadOrder == null)
+        {
+            splashReporter?.ShowMessagesOnClose("Mods Menu: InitializePopulation: Environment is not valid. Cannot accurately link plugins. You should only see this message if you launch this program and you don't have Skyrim SE/AE installed in your SteamApps directory. Go to your settings and point them at your correct Data folder and Game version.");
+        }
+
+        splashReporter?.UpdateStep("Processing configured mod settings...");
+
+        return (new List<VM_ModSetting>(),
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+            warnings);
+    }
+
+    private void LoadModsFromSettings(List<VM_ModSetting> tempList, HashSet<string> loadedDisplayNames,
+        HashSet<string> claimedMugshotPaths)
+    {
+        using (ContextualPerformanceTracer.Trace("PopulateMods.FromSettings"))
+        {
+            foreach (var settingModel in _settings.ModSettings)
+            {
+                if (string.IsNullOrWhiteSpace(settingModel.DisplayName)) continue;
+
+                // Skip a persisted entry whose folder is this app's own patch output (NPC_Token.json marker).
+                // Such an entry can exist if it was adopted as an appearance mod before the marker was written;
+                // its output plugin contains NPC + FaceGen data by content, so nothing else would evict it, and
+                // it would keep being consumed as an appearance mod across restarts. Cache the folder(s) as
+                // non-appearance so the folder scan does not re-add it either. Auto-generated entries
+                // (Base Game / Creation Club) carry no folder paths and are unaffected.
+                if (!settingModel.IsAutoGenerated &&
+                    FolderPathsContainOwnOutputToken(settingModel.CorrespondingFolderPaths))
+                {
+                    foreach (var path in settingModel.CorrespondingFolderPaths)
+                    {
+                        if (!string.IsNullOrWhiteSpace(path))
+                        {
+                            _settings.CachedNonAppearanceMods.TryAdd(path, OwnOutputFailureReason);
+                        }
+                    }
+                    StartupLogger.Log($"Skipping own-output entry '{settingModel.DisplayName}' (NPC_Token.json present).");
+                    continue;
+                }
+
+                var vm = _modSettingFromModelFactory(settingModel, this);
+
+                bool hasMugShots = false;
+                foreach (var mugShotFolderPath in vm.MugShotFolderPaths)
+                {
+                    if (!string.IsNullOrWhiteSpace(mugShotFolderPath) && Directory.Exists(mugShotFolderPath))
+                    {
+                        claimedMugshotPaths.Add(mugShotFolderPath);
+                        hasMugShots = true;
+                    }
+                }
+
+                if (!hasMugShots)
+                {
+                    if (!string.IsNullOrWhiteSpace(_settings.MugshotsFolder) &&
+                        Directory.Exists(_settings.MugshotsFolder))
+                    {
+                        string potentialPathByName = Path.Combine(_settings.MugshotsFolder, vm.DisplayName);
+                        if (Directory.Exists(potentialPathByName) && !claimedMugshotPaths.Contains(potentialPathByName))
+                        {
+                            vm.MugShotFolderPaths.Add(potentialPathByName);
+                            claimedMugshotPaths.Add(potentialPathByName);
+                        }
+                    }
+                }
+
+                tempList.Add(vm);
+                loadedDisplayNames.Add(vm.DisplayName);
+            }
+        }
+    }
+
+    private List<VM_ModSetting> ScanForMugshotOnlyMods(HashSet<string> loadedDisplayNames,
+        HashSet<string> claimedMugshotPaths, List<string> warnings, VM_SplashScreen? splashReporter)
+    {
+        //splashReporter?.UpdateStep("Scanning for new Mugshots...");
+        var vmsFromMugshotsOnly = new List<VM_ModSetting>();
+        using (ContextualPerformanceTracer.Trace("PopulateMods.ScanMugshots"))
+        {
+            if (!string.IsNullOrWhiteSpace(_settings.MugshotsFolder) && Directory.Exists(_settings.MugshotsFolder))
+            {
+                try
+                {
+                    foreach (var dirPath in Directory.EnumerateDirectories(_settings.MugshotsFolder).ToList())
+                    {
+                        if (!claimedMugshotPaths.Contains(dirPath))
+                        {
+                            string folderName = Path.GetFileName(dirPath);
+                            if (!loadedDisplayNames.Contains(folderName))
+                                vmsFromMugshotsOnly.Add(_modSettingFromMugshotPathFactory(folderName, dirPath, this));
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    warnings.Add(
+                        $"Error scanning Mugshots folder '{_settings.MugshotsFolder}': {Environment.NewLine}{ExceptionLogger.GetExceptionStack(ex)}");
+                }
+            }
+        }
+
+        return vmsFromMugshotsOnly;
+    }
+
+    #region Mod Folder Scan Result Types
+
+    /// <summary>
+    /// Base class for different outcomes of scanning a single mod folder.
+    /// </summary>
+    private abstract record ModFolderScanResult
+    {
+    }
+
+    /// <summary>
+    /// Represents a newly discovered mod that needs to be added to the list.
+    /// </summary>
+    private record NewVmResult(VM_ModSetting vm) : ModFolderScanResult
+    {
+        public VM_ModSetting Vm { get; } = vm;
+    }
+
+    /// <summary>
+    /// Represents an action to upgrade an existing VM with a new mod folder path and plugins.
+    /// </summary>
+    private record UpgradeVmResult(string vmDisplayName, string modFolderPath, List<ModKey> modKeys)
+        : ModFolderScanResult
+    {
+        public string VmDisplayName { get; } = vmDisplayName;
+        public string ModFolderPath { get; } = modFolderPath;
+        public List<ModKey> ModKeys { get; } = modKeys;
+    }
+
+    /// <summary>
+    /// Represents a folder that should be cached as a non-appearance mod and skipped in the future.
+    /// </summary>
+    private record CacheNonAppearanceResult(string modFolderPath, string reason) : ModFolderScanResult
+    {
+        public string ModFolderPath { get; } = modFolderPath;
+        public string Reason { get; } = reason;
+    }
+    
+    /// <summary>
+    /// A data-transfer object holding the necessary information to create a VM_ModSetting on the UI thread.
+    /// </summary>
+    private record NewVmCreationData(
+        string ModFolderPath,
+        List<ModKey> ModKeys,
+        bool IsFaceGenOnly,
+        HashSet<FormKey> FaceGenFormKeys,
+        bool ShouldDisableMergeIn, // Result from CheckMergeInSuitability
+        string MergeInTooltip,     // Result from CheckMergeInSuitability
+        bool FoundInjectedRecords, // Result from CheckForInjectedRecords
+        string InjectedTooltip,     // Result from CheckForInjectedRecords
+        List<string> AllFolderPaths, // The final list of all paths
+        HashSet<ModKey> ResourceOnlyKeys, // The final set of resource keys
+        List<string> UnresolvedMastersAtScan // Master plugins not found in any mod folder during FindAndAddMissingMasters
+    ) : ModFolderScanResult;
+
+    #endregion
+
+    /// <summary>
+    /// Parses an MO2 modlist.txt and returns the set of enabled mod folder names (lines starting with '+').
+    /// Returns null if the file cannot be read or filtering is not enabled.
+    /// </summary>
+    private HashSet<string>? GetEnabledModNamesFromModlist()
+    {
+        if (!_settings.FilterByActiveModsMO2 ||
+            string.IsNullOrWhiteSpace(_settings.MO2ModlistPath) ||
+            !File.Exists(_settings.MO2ModlistPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var enabledMods = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var line in File.ReadLines(_settings.MO2ModlistPath))
+            {
+                if (line.StartsWith('+'))
+                {
+                    enabledMods.Add(line.Substring(1).Trim());
+                }
+            }
+            StartupLogger.Log($"MO2 modlist filter: {enabledMods.Count} enabled mods loaded from {_settings.MO2ModlistPath}");
+            return enabledMods;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Error reading MO2 modlist: {ExceptionLogger.GetExceptionStack(ex)}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Returns mod directories from the ModsFolder, optionally filtered by the MO2 modlist.
+    /// </summary>
+    private List<string> GetModDirectories()
+    {
+        if (string.IsNullOrWhiteSpace(_settings.ModsFolder) || !Directory.Exists(_settings.ModsFolder))
+            return new List<string>();
+
+        var allDirs = Directory.EnumerateDirectories(_settings.ModsFolder).ToList();
+        var enabledMods = GetEnabledModNamesFromModlist();
+        if (enabledMods == null) return allDirs;
+
+        var filtered = allDirs.Where(dir => enabledMods.Contains(Path.GetFileName(dir))).ToList();
+        StartupLogger.Log($"MO2 modlist filter: {filtered.Count}/{allDirs.Count} mod folders passed filter");
+        return filtered;
+    }
+
+    private async Task ScanForModsInModFolderAsync(List<VM_ModSetting> tempList,
+        List<VM_ModSetting> vmsFromMugshotsOnly, HashSet<string> loadedDisplayNames,
+        Dictionary<string, HashSet<string>> allFaceGenLooseFiles, Dictionary<string, HashSet<string>> allFaceGenBsaFiles,
+        HashSet<string> claimedMugshotPaths, VM_SplashScreen? splashReporter, List<string> warnings)
+    {
+        if (string.IsNullOrWhiteSpace(_settings.ModsFolder) || !Directory.Exists(_settings.ModsFolder)) return;
+
+        var modDirectories = GetModDirectories();
+        if (!modDirectories.Any()) return;
+
+        // Use a thread-safe bag to collect results from all parallel tasks.
+        var scanResults = new ConcurrentBag<ModFolderScanResult>();
+        var scannedModFolders = 0;
+
+        var cachedNonAppearanceDirs = _settings.CachedNonAppearanceMods.Keys.ToHashSet();
+        var ignoredMods = _settings.IgnoredMods;
+
+        StartupLogger.Log($"Scanning {modDirectories.Count} mod folders (parallel)");
+        splashReporter?.UpdateStep($"Scanning {modDirectories.Count} folders for new appearance mods",
+            modDirectories.Count);
+
+        // Create a collection of tasks, one for each mod directory.
+        var processingTasks = modDirectories.Select(modFolderPath => Task.Run(async () =>
+        {
+            // -- This entire block runs in parallel for each folder. --
+
+            string modFolderName = Path.GetFileName(modFolderPath);
+
+            // Update progress in a thread-safe manner.
+            var currentProgress = (double)Interlocked.Increment(ref scannedModFolders) / modDirectories.Count * 100.0;
+
+            if (File.Exists(Path.Combine(modFolderPath, tokenFileName)) ||
+                cachedNonAppearanceDirs.Contains(modFolderPath) ||
+                ignoredMods.Contains(modFolderPath))
+            {
+                splashReporter?.IncrementProgress($"Scanned: {modFolderName}");
+                return; // Skip this directory.
+            }
+
+            StartupLogger.Log($"Scanning mod folder: {modFolderName}");
+
+            var modKeysInFolder = _aux.GetModKeysInDirectory(modFolderPath, warnings, false);
+
+            // Perform READ-ONLY checks against the original lists. This is thread-safe.
+            var existingVmFromSettings = tempList.FirstOrDefault(vm =>
+                vm.DisplayName.Equals(modFolderName, StringComparison.OrdinalIgnoreCase));
+            var mugshotOnlyVmToUpgrade = vmsFromMugshotsOnly.FirstOrDefault(vm =>
+                vm.DisplayName.Equals(modFolderName, StringComparison.OrdinalIgnoreCase));
+
+            if (existingVmFromSettings != null)
+            {
+                scanResults.Add(new UpgradeVmResult(existingVmFromSettings.DisplayName, modFolderPath,
+                    modKeysInFolder));
+            }
+            else if (mugshotOnlyVmToUpgrade != null)
+            {
+                scanResults.Add(new UpgradeVmResult(mugshotOnlyVmToUpgrade.DisplayName, modFolderPath,
+                    modKeysInFolder));
+            }
+            else
+            {
+                // This helper is called to create a new VM if warranted.
+                var newVmResult =
+                    await ProcessNewModFolderForParallelScanAsync(modFolderPath, modKeysInFolder, claimedMugshotPaths,
+                        allFaceGenLooseFiles, allFaceGenBsaFiles, splashReporter, modDirectories);
+                if (newVmResult != null)
+                {
+                    scanResults.Add(newVmResult);
+                }
+            }
+
+            // Unload plugins used only in this task's scope.
+            _pluginProvider.UnloadPlugins(modKeysInFolder, new HashSet<string> { modFolderPath });
+
+            splashReporter?.IncrementProgress($"Scanned: {modFolderName}");
+        })).ToList();
+
+        // Await all parallel tasks to complete.
+        try
+        {
+            await Task.WhenAll(processingTasks);
+        }
+        catch (AggregateException aex) // Catch the specific AggregateException
+        {
+            // Flatten the exception tree and log every single error that occurred.
+            var flattenedExceptions = aex.Flatten();
+            foreach (var innerEx in flattenedExceptions.InnerExceptions)
+            {
+                warnings.Add(
+                    $"An error occurred during parallel mod scanning: {Environment.NewLine}{ExceptionLogger.GetExceptionStack(innerEx)}");
+            }
+        }
+        catch (Exception ex)
+        {
+            warnings.Add(
+                $"An error occurred during parallel mod scanning: {Environment.NewLine}{ExceptionLogger.GetExceptionStack(ex)}");
+        }
+
+        // -- All parallel work is done. Now, process the results sequentially. --
+
+        // Create a lookup for fast access.
+        var mugshotVmLookup = vmsFromMugshotsOnly.ToDictionary(vm => vm.DisplayName, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var result in scanResults)
+        {
+            switch (result)
+            {
+                case UpgradeVmResult upgrade:
+                    var vmToUpgrade = tempList.FirstOrDefault(vm => vm.DisplayName == upgrade.VmDisplayName)
+                                      ?? mugshotVmLookup.GetValueOrDefault(upgrade.VmDisplayName);
+
+                    if (vmToUpgrade != null)
+                    {
+                        UpgradeVmWithPathAndPlugins(vmToUpgrade, upgrade.ModFolderPath, upgrade.ModKeys);
+
+                        // If it was a mugshot-only VM, it now needs to be moved to the main list.
+                        if (mugshotVmLookup.ContainsKey(upgrade.VmDisplayName))
+                        {
+                            tempList.Add(vmToUpgrade);
+                            vmsFromMugshotsOnly.Remove(vmToUpgrade);
+                            mugshotVmLookup.Remove(upgrade.VmDisplayName); // Prevent re-adding
+                        }
+                    }
+
+                    break;
+
+                case NewVmCreationData newData:
+                    // This code now runs on the UI thread. It's safe to create the VM here.
+                    var newVm = _modSettingFromModFolderFactory(newData.ModFolderPath, newData.ModKeys, this);
+                    
+                    // Replace the folder and key lists with the correctly ordered ones from the analysis.
+                    // This preserves the dependency priority (dependencies first, main mod folder last).
+                    newVm.CorrespondingFolderPaths.Clear();
+                    foreach (var path in newData.AllFolderPaths)
+                    {
+                        newVm.CorrespondingFolderPaths.Add(path);
+                    }
+
+                    newVm.CorrespondingModKeys.Clear();
+                    foreach (var modKey in newData.ModKeys)
+                    {
+                        newVm.CorrespondingModKeys.Add(modKey);
+                    }
+
+
+                    newVm.ResourceOnlyModKeys = newData.ResourceOnlyKeys;
+                    newVm.IsNewlyCreated = true;
+                    // Carry the unresolved-master record forward so PruneEmptyNewlyCreatedAppearanceMods
+                    // can encode the "missing master" reason in CachedMissingMasterMods + the warnings popup.
+                    newVm.UnresolvedMastersAtScan = newData.UnresolvedMastersAtScan.ToList();
+
+                    // Apply the pre-calculated analysis results from the DTO
+                    if (newData.ShouldDisableMergeIn)
+                    {
+                        newVm.MergeInDependencyRecords = false;
+                        newVm.MergeInToolTip = newData.MergeInTooltip;
+                        newVm.HasAlteredMergeLogic = true; // keeps the text color from being overwritten
+                    }
+                    if (newData.FoundInjectedRecords)
+                    {
+                        newVm.IsPerformingBatchAction = true; // suppress warning popup that would appear if user changes the setting manually
+                        newVm.HandleInjectedRecords = true;
+                        newVm.HandleInjectedOverridesToolTip = newData.InjectedTooltip;
+                        newVm.IsPerformingBatchAction = false;
+                    }
+                    if (newData.IsFaceGenOnly)
+                    {
+                        newVm.IsFaceGenOnlyEntry = true;
+                        newVm.FaceGenOnlyNpcFormKeys = newData.FaceGenFormKeys;
+                    }
+            
+                    // Link to existing mugshot folder if one exists
+                    string potentialMugshotPath = Path.Combine(_settings.MugshotsFolder, newVm.DisplayName);
+                    if (Directory.Exists(potentialMugshotPath) && !claimedMugshotPaths.Contains(potentialMugshotPath))
+                    {
+                        newVm.MugShotFolderPaths.Add(potentialMugshotPath);
+                        claimedMugshotPaths.Add(potentialMugshotPath);
+                    }
+
+                    tempList.Add(newVm);
+                    loadedDisplayNames.Add(newVm.DisplayName);
+                    break;
+
+                case CacheNonAppearanceResult cache:
+                    _settings.CachedNonAppearanceMods.TryAdd(cache.ModFolderPath, cache.Reason);
+                    break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// A modified version of ProcessNewModFolderAsync designed to return a result object
+    /// instead of directly modifying collections, making it safe for parallel execution.
+    /// </summary>
+    private async Task<ModFolderScanResult?> ProcessNewModFolderForParallelScanAsync(string modFolderPath,
+        List<ModKey> modKeysInFolder, ICollection<string> claimedMugshotPaths, Dictionary<string, HashSet<string>> allFaceGenLooseFiles, 
+        Dictionary<string, HashSet<string>> allFaceGenBsaFiles, VM_SplashScreen? splashReporter,
+        IReadOnlyCollection<string> allModDirectories)
+    {
+        // This VM will be discarded and never touches the UI.
+        string modFolderName = Path.GetFileName(modFolderPath);
+        var tempVmForAnalysis = _modSettingFromModFolderFactory(modFolderPath, modKeysInFolder, this);
+        tempVmForAnalysis.IsNewlyCreated = true;
+
+        StartupLogger.Log($"  [{modFolderName}] Checking FaceGen cache");
+        var scanResult = FaceGenScanner.CreateFaceGenScanResultFromCache(tempVmForAnalysis, allFaceGenLooseFiles, allFaceGenBsaFiles);
+
+        // Pre-Condition: If no FaceGen exists at all, we reject it immediately.
+        // This handles cases like "Sword Mods" with no FaceGen assets.
+        if (!scanResult.AnyFilesFound)
+        {
+            return new CacheNonAppearanceResult(modFolderPath, "No FaceGen Files Found");
+        }
+
+        StartupLogger.Log($"  [{modFolderName}] Loading plugins");
+        _pluginProvider.LoadPlugins(modKeysInFolder, new HashSet<string> { modFolderPath });
+
+        // Find missing masters (Resources)
+        StartupLogger.Log($"  [{modFolderName}] Finding missing masters");
+        var warnings = new ConcurrentBag<InitializationWarning>();
+        FindAndAddMissingMasters(tempVmForAnalysis, allModDirectories, warnings);
+        if (splashReporter != null && !warnings.IsEmpty)
+        {
+            foreach (var warning in warnings)
+            {
+                splashReporter.ReportWarning(warning);
+            }
+        }
+    
+        // Determine if the plugin explicitly modifies NPCs (Standard Appearance Mod)
+        StartupLogger.Log($"  [{modFolderName}] Checking for appearance plugins");
+        bool isStandardAppearanceMod = false;
+        if (modKeysInFolder.Any())
+        {
+            isStandardAppearanceMod = await ContainsAppearancePluginsAsync(modKeysInFolder, new() { modFolderPath });
+        }
+
+        // PATH A: It is a valid, record-altering Appearance Mod
+        if (isStandardAppearanceMod)
+        {
+            StartupLogger.Log($"  [{modFolderName}] Identified as standard appearance mod, running analysis");
+            // Run analysis using the temporary VM
+            tempVmForAnalysis.CheckMergeInSuitability(
+                splashReporter == null ? null : splashReporter.ShowMessagesOnClose);
+            bool injectedFound =
+                await tempVmForAnalysis.CheckForInjectedRecords(splashReporter == null
+                    ? null
+                    : splashReporter.ReportWarning, _settings.LocalizationLanguage);
+
+            return new NewVmCreationData(
+                modFolderPath,
+                tempVmForAnalysis.CorrespondingModKeys.ToList(),
+                IsFaceGenOnly: false,
+                FaceGenFormKeys: new HashSet<FormKey>(),
+                ShouldDisableMergeIn: !tempVmForAnalysis.MergeInDependencyRecords,
+                MergeInTooltip: tempVmForAnalysis.MergeInToolTip,
+                FoundInjectedRecords: injectedFound,
+                InjectedTooltip: tempVmForAnalysis.HandleInjectedOverridesToolTip,
+                AllFolderPaths: tempVmForAnalysis.CorrespondingFolderPaths.ToList(),
+                ResourceOnlyKeys: new HashSet<ModKey>(tempVmForAnalysis.ResourceOnlyModKeys),
+                UnresolvedMastersAtScan: tempVmForAnalysis.UnresolvedMastersAtScan.ToList()
+            );
+        }
+        
+        // PATH B: Fallthrough (Nordic Faces Case)
+        // If we reach here, it's because:
+        // 1. There are NO plugins (Pure FaceGen mod)
+        // 2. There ARE plugins, but they are dummy/resource plugins (Nordic Faces)
+        // Since we passed the !scanResult.AnyFilesFound check at the top, we know FaceGen exists.
+        // We accept this as a FaceGen-Only entry.
+
+        var faceGenKeys = new HashSet<FormKey>();
+        foreach (var (pluginName, npcIds) in scanResult.FaceGenFiles)
+        {
+            foreach (var id in npcIds.Where(id => id.Length == 8))
+            {
+                if (FormKey.TryFactory($"{id.Substring(2, 6)}:{pluginName}", out var formKey))
+                {
+                    faceGenKeys.Add(formKey);
+                }
+            }
+        }
+
+        // Mark the temp VM before classifying so CheckMergeInSuitability's FaceGen-only
+        // early-out applies (its dummy/resource plugins must not be classified).
+        tempVmForAnalysis.IsFaceGenOnlyEntry = true;
+        tempVmForAnalysis.CheckMergeInSuitability(
+            splashReporter == null ? null : splashReporter.ShowMessagesOnClose);
+
+        // Return a DTO for a FaceGen-only mod
+        return new NewVmCreationData(
+            modFolderPath,
+            tempVmForAnalysis.CorrespondingModKeys.ToList(),
+            IsFaceGenOnly: true, // Explicitly mark as FaceGen Only
+            FaceGenFormKeys: faceGenKeys,
+            ShouldDisableMergeIn: !tempVmForAnalysis.MergeInDependencyRecords,
+            MergeInTooltip: tempVmForAnalysis.MergeInToolTip,
+            FoundInjectedRecords: false,
+            InjectedTooltip: tempVmForAnalysis.HandleInjectedOverridesToolTip,
+            AllFolderPaths: tempVmForAnalysis.CorrespondingFolderPaths.ToList(),
+            ResourceOnlyKeys: new HashSet<ModKey>(tempVmForAnalysis.ResourceOnlyModKeys),
+            UnresolvedMastersAtScan: tempVmForAnalysis.UnresolvedMastersAtScan.ToList()
+        );
+    }
+
+    private void UpgradeVmWithPathAndPlugins(VM_ModSetting vm, string modFolderPath, List<ModKey> modKeysInFolder)
+    {
+        if (!vm.CorrespondingFolderPaths.Contains(modFolderPath, StringComparer.OrdinalIgnoreCase))
+        {
+            vm.CorrespondingFolderPaths.Add(modFolderPath);
+        }
+
+        foreach (var key in modKeysInFolder)
+        {
+            if (!vm.CorrespondingModKeys.Contains(key))
+            {
+                vm.CorrespondingModKeys.Add(key);
+            }
+        }
+    }
+
+    private void FinalizeModList(List<VM_ModSetting> tempList, List<VM_ModSetting> vmsFromMugshotsOnly)
+    {
+        foreach (var mugshotVm in vmsFromMugshotsOnly)
+        {
+            if (!tempList.Any(existing =>
+                    existing.DisplayName.Equals(mugshotVm.DisplayName, StringComparison.OrdinalIgnoreCase)))
+            {
+                tempList.Add(mugshotVm);
+            }
+        }
+
+        foreach (var vm in tempList)
+        {
+            if (vm.IsMugshotOnlyEntry && (vm.CorrespondingFolderPaths.Any() || vm.CorrespondingModKeys.Any()))
+            {
+                vm.IsMugshotOnlyEntry = false;
+            }
+        }
+    }
+
+    private void AddBaseAndCreationClubMods(List<VM_ModSetting> tempList)
+    {
+        var baseGameModKeys = _environmentStateProvider.BaseGamePlugins ?? new();
+        var creationClubModKeys = _environmentStateProvider.CreationClubPlugins ?? new();
+
+        // Helper to determine if a plugin is "claimed" by a valid VM (one without the token file)
+        bool IsPluginClaimedByValidVm(ModKey modKey)
+        {
+            return tempList.Any(vm =>
+            {
+                if (vm.IsFaceGenOnlyEntry || vm.IsMugshotOnlyEntry) return false;
+                if (!vm.CorrespondingModKeys.Contains(modKey)) return false;
+
+                // Check each folder in the VM
+                foreach (var folderPath in vm.CorrespondingFolderPaths)
+                {
+                    if (string.IsNullOrWhiteSpace(folderPath) || !Directory.Exists(folderPath)) continue;
+
+                    // Does this folder contain the plugin?
+                    string potentialPluginPath = Path.Combine(folderPath, modKey.FileName.String);
+                    if (File.Exists(potentialPluginPath))
+                    {
+                        // Does it NOT have the token file?
+                        if (!File.Exists(Path.Combine(folderPath, tokenFileName)))
+                        {
+                            return true; // Valid claim found
+                        }
+                    }
+                }
+
+                return false;
+            });
+        }
+
+        baseGameModKeys.RemoveWhere(IsPluginClaimedByValidVm);
+        creationClubModKeys.RemoveWhere(IsPluginClaimedByValidVm);
+
+        // Ensure the synthetic auto-generated entry exists and is non-empty. This is
+        // self-healing: it adds the entry when missing, and repairs it when a prior
+        // pass left it present but with empty CorrespondingModKeys (which would cause
+        // SaveModSettingsToModel to silently drop it from disk). 'desiredKeys' is the
+        // unclaimed subset; 'fallbackKeys' is the full implicit set used when the
+        // unclaimed subset is empty so the entry is never created/left empty.
+        void EnsureAutoEntry(string displayName, IEnumerable<ModKey> desiredKeys, IEnumerable<ModKey> fallbackKeys)
+        {
+            var keys = desiredKeys.ToList();
+            if (!keys.Any())
+            {
+                keys = fallbackKeys.ToList();
+            }
+            if (!keys.Any())
+            {
+                return; // Nothing to assign (e.g. environment not resolved) — don't create an empty entry.
+            }
+
+            var existing = tempList.FirstOrDefault(vm =>
+                vm.DisplayName.Equals(displayName, StringComparison.OrdinalIgnoreCase));
+
+            if (existing != null)
+            {
+                // Promote/repair an entry that collided with a pre-existing entry of the
+                // same reserved name — most commonly a mugshot-only "Base Game" entry
+                // synthesized from a "Base Game" mugshot folder. Such an entry has
+                // IsAutoGenerated == false and no mod-folder paths, so RefreshNpcLists
+                // (gated on HasModPathsAssigned || IsAutoGenerated) never enumerates the
+                // synthetic mod's NPCs — leaving only mugshot-derived NPCs and breaking
+                // the NPC menu. Ensure keys exist, mark it auto-generated, and drop the
+                // mugshot-only flag while preserving its MugShotFolderPaths.
+                bool changed = false;
+                foreach (var key in keys)
+                {
+                    if (!existing.CorrespondingModKeys.Contains(key))
+                    {
+                        existing.CorrespondingModKeys.Add(key);
+                        changed = true;
+                    }
+                }
+                if (!existing.IsAutoGenerated) { existing.IsAutoGenerated = true; changed = true; }
+                if (existing.IsMugshotOnlyEntry) { existing.IsMugshotOnlyEntry = false; changed = true; }
+
+                if (changed)
+                {
+                    // Force re-analysis: the cache-validation pass treats a non-null
+                    // LastKnownState that matches the snapshot as a hit and skips
+                    // RefreshNpcLists, which would otherwise keep the stale (empty) NPC list.
+                    existing.LastKnownState = null;
+                    StartupLogger.Log($"Promoted existing '{displayName}' entry to auto-generated with {existing.CorrespondingModKeys.Count} plugin key(s); forcing re-analysis to repopulate NPCs.", "WARN");
+                }
+                return;
+            }
+
+            var model = new ModSetting()
+            {
+                DisplayName = displayName, CorrespondingModKeys = keys,
+                IsAutoGenerated = true, MergeInDependencyRecords = false
+            };
+            var vm = _modSettingFromModelFactory(model, this);
+            vm.MergeInDependencyRecordsVisible = false;
+            tempList.Add(vm);
+        }
+
+        // Creation Club keeps the original claimed-key gating (no full-list fallback) so
+        // CC plugins owned by a user mod aren't double-assigned to the synthetic entry.
+        EnsureAutoEntry(CreationClubModsettingName, creationClubModKeys, Enumerable.Empty<ModKey>());
+        // Base Game must always exist when the environment is resolved: the BSA adapter
+        // and NPC menu key off it. Fall back to the full implicit base-master set so the
+        // entry is never created/left empty even in the unlikely all-claimed case.
+        EnsureAutoEntry(BaseGameModSettingName, baseGameModKeys, _environmentStateProvider.BaseGamePlugins ?? new());
+    }
+
+    /// <returns>
+    /// The set of VMs whose analysis task threw. Callers must treat these as unanalyzed
+    /// (their NPC lists are empty or partial) rather than as genuinely empty mods.
+    /// </returns>
+    private async Task<HashSet<VM_ModSetting>> AnalyzeModSettingsAsync(VM_SplashScreen? splashReporter,
+        (Dictionary<string,HashSet<string>> allFaceGenLooseFiles, Dictionary<string, HashSet<string>> allFaceGenBsaFiles) faceGenCache,
+        List<string> warnings)
+    {
+        var maxParallelism = Environment.ProcessorCount;
+        var semaphore = new SemaphoreSlim(maxParallelism);
+        
+        // --- NEW: Setup for SkyPatcher import ---
+        var environmentEditorIdMap = _environmentStateProvider.LoadOrder.PriorityOrder.Npc().WinningOverrides()
+            .Where(npc => !string.IsNullOrWhiteSpace(npc.EditorID))
+            .GroupBy(npc => npc.EditorID!, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, 
+                g => g.Select(npc => npc.FormKey).ToHashSet(), 
+                StringComparer.OrdinalIgnoreCase);
+
+        var allSkyPatcherGuests = new ConcurrentBag<(FormKey Target, FormKey Source, string ModDisplayName, string SourceNpcDisplayName)>();
+
+        // Donor NPCs each re-analyzed mod can still vouch for (raw plugin records + rebuilt
+        // NPC list). Only mods that get far enough through analysis land here, so cache-hit
+        // and mugshot-only entries are naturally excluded from the stale-share
+        // reconciliation that runs after the SkyPatcher import below.
+        var analyzedDonorKeys = new ConcurrentDictionary<VM_ModSetting, HashSet<FormKey>>();
+
+        var allVMs = _allModSettingsInternal.ToList(); // Create a copy to iterate over
+        var vmsToAnalyze = new List<VM_ModSetting>();
+
+        var modSettingsToLogCount = _allModSettingsInternal.Count(x => x.IsNewlyCreated);
+        var analyzedCount = 0;
+        splashReporter?.UpdateStep($"Preparing to analyze data for {modSettingsToLogCount} Mods...");
+
+        // --- CACHING LOGIC ---
+        using (ContextualPerformanceTracer.Trace("AnalyzeModSettings.CacheValidation"))
+        {
+            foreach (var vm in allVMs)
+            {
+                // Don't use cache for newly discovered mods or facegen-only entries
+                if (vm.IsNewlyCreated || vm.IsFaceGenOnlyEntry)
+                {
+                    vm.LastKnownState = null; // Ensure no old state is saved
+                    vmsToAnalyze.Add(vm);
+                    continue;
+                }
+
+                var currentSnapshot = vm.GenerateSnapshot();
+                if (currentSnapshot != null && vm.LastKnownState != null && currentSnapshot.Equals(vm.LastKnownState))
+                {
+                    // CACHE HIT: The mod is unchanged. Do nothing.
+                    Debug.WriteLine($"Cache HIT for: {vm.DisplayName}");
+                    // The VM was already populated from the model, so we are done with it.
+                    vm.LastKnownState = currentSnapshot; // Keep the snapshot updated in the VM to save it again.
+                }
+                else
+                {
+                    // CACHE MISS: Mod has changed or snapshot failed. Needs analysis.
+                    Debug.WriteLine($"Cache MISS for: {vm.DisplayName}");
+                    vmsToAnalyze.Add(vm);
+                    vm.LastKnownState = currentSnapshot; // Store the NEW snapshot to be saved after analysis
+                }
+            }
+        }
+        // --- END CACHING LOGIC ---
+
+        StartupLogger.Log($"Analyzing {vmsToAnalyze.Count} mods (cache misses), {allVMs.Count - vmsToAnalyze.Count} cache hits, parallelism: {maxParallelism}");
+
+        // One failed mod must not abort the whole population: a fault that escapes a task
+        // propagates through Task.WhenAll and skips FinalizeAndApplySettingsOnUI, leaving
+        // the Mods tab permanently stuck on "Loading NPC data..." with no error surfaced.
+        var analysisFailures = new ConcurrentBag<(VM_ModSetting Vm, string Error)>();
+
+        var refreshTasks = vmsToAnalyze.Select(async vm =>
+        {
+            await semaphore.WaitAsync();
+            try
+            {
+                await Task.Run(async () =>
+                {
+                    StartupLogger.Log($"Analyzing mod: {vm.DisplayName}");
+                    var modFolderPathsForVm = vm.CorrespondingFolderPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    var plugins = _pluginProvider.LoadPlugins(vm.CorrespondingModKeys, modFolderPathsForVm, out var loadedPluginPathsForVm);
+                    try
+                    {
+                        using (ContextualPerformanceTracer.Trace("RefreshNpcLists"))
+                        {
+                            vm.RefreshNpcLists(faceGenCache.allFaceGenLooseFiles, faceGenCache.allFaceGenBsaFiles,
+                                plugins, _settings.LocalizationLanguage);
+                        }
+
+                        if (!vm.IsMugshotOnlyEntry)
+                        {
+                            if (vm.IsNewlyCreated)
+                            {
+                                using (ContextualPerformanceTracer.Trace("FindPluginsWithOverrides"))
+                                {
+                                    await vm.FindPluginsWithOverrides(_pluginProvider);
+                                }
+                            }
+
+                            // --- NEW: Parse SkyPatcher files while plugins are loaded ---
+                            // Make sure to profile this and gate behind IsNewlyCreated if necessary.
+                            var modEditorIdMap = plugins.SelectMany(x => x.Npcs)
+                                .Where(npc => !string.IsNullOrWhiteSpace(npc.EditorID))
+                                .GroupBy(npc => npc.EditorID!, StringComparer.OrdinalIgnoreCase)
+                                .ToDictionary(g => g.Key, 
+                                    g => g.Select(npc => npc.FormKey).ToHashSet(), 
+                                    StringComparer.OrdinalIgnoreCase);
+
+                            var guests = await vm.GetSkyPatcherImportsAsync(environmentEditorIdMap, modEditorIdMap);
+                            foreach (var guest in guests)
+                            {
+                                allSkyPatcherGuests.Add(guest);
+                            }
+
+                            analyzedDonorKeys[vm] = plugins.SelectMany(x => x.Npcs)
+                                .Select(n => n.FormKey)
+                                .Concat(vm.NpcFormKeysToDisplayName.Keys)
+                                .ToHashSet();
+
+                            // Cache target ModKeys for the cleanup pass: SkyPatcher templates
+                            // don't override foundation NPCs at the record level, so without
+                            // this signal FindAndAddMissingMasters would re-attach the
+                            // foundation folder during CleanupCorrespondingFolders. Use the
+                            // widened lookup (env→mod fallback) because the foundation may
+                            // be attached as a VM resource without being in the user's LO.
+                            vm.SkyPatcherTargetModKeys =
+                                await vm.GetSkyPatcherTargetModKeysAsync(environmentEditorIdMap, modEditorIdMap);
+                        }
+
+                        // Only runs for cache-miss / newly-imported mods (this loop), so unchanged
+                        // mods never pay the folder enumeration on ordinary launches.
+                        using (ContextualPerformanceTracer.Trace("ScanForBaseGameAssetPaths"))
+                        {
+                            await ScanForBaseGameAssetPathsAsync(vm);
+                        }
+
+                        // Same cache-miss-only lifecycle: wig/antler detection needs the
+                        // mod's plugins, which are still loaded here.
+                        using (ContextualPerformanceTracer.Trace("ScanForWigs"))
+                        {
+                            vm.ScanForWigs(plugins);
+                        }
+                    }
+                    finally
+                    {
+                        _pluginProvider.UnloadPlugins(loadedPluginPathsForVm);
+                        var currentAnalyzed = Interlocked.Increment(ref analyzedCount);
+                        var progress = modSettingsToLogCount > 0
+                            ? (double)currentAnalyzed / modSettingsToLogCount * 100.0
+                            : 0;
+                        splashReporter?.UpdateProgress(progress, $"Analyzed: {vm.DisplayName}");
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                // Unguarded throw sites include PluginProvider.LoadPlugins (rethrows plugin
+                // parse failures) and link-cache resolution inside RefreshNpcLists' FaceGen-only
+                // branch. Record and continue so the remaining mods still analyze.
+                // Null the snapshot: it was pre-assigned during cache validation, so if it
+                // persisted, the next launch would treat this mod's empty/partial NPC lists
+                // as a valid cache hit and never re-analyze it.
+                vm.LastKnownState = null;
+                StartupLogger.Log($"  [{vm.DisplayName}] ANALYSIS FAILED: {ExceptionLogger.GetExceptionStack(ex)}", "ERROR");
+                analysisFailures.Add((vm,
+                    $"Mod '{vm.DisplayName}' failed analysis and may be missing from the Mods menu or missing NPCs:\n{ExceptionLogger.GetExceptionStack(ex)}"));
+            }
+            finally
+            {
+                semaphore.Release();
+            }
+        }).ToList();
+
+        await Task.WhenAll(refreshTasks);
+        StartupLogger.Log(analysisFailures.IsEmpty
+            ? "All mod analysis tasks complete"
+            : $"Mod analysis complete with {analysisFailures.Count} failed mod(s)", analysisFailures.IsEmpty ? "INFO" : "ERROR");
+        warnings.AddRange(analysisFailures.Select(f => f.Error));
+
+        // --- Resolve and apply the collected SkyPatcher data after all analysis is done ---
+        if (!allSkyPatcherGuests.IsEmpty)
+        {
+            await ResolveAndApplySkyPatcherGuests(allSkyPatcherGuests.ToList());
+        }
+
+        var analysisFailedVms = analysisFailures.Select(f => f.Vm).ToHashSet();
+
+        // Reconcile persisted shares for every mod that was actually re-analyzed: a donor
+        // NPC deleted from a mod (records + FaceGen + ini) must also drop off any target
+        // NPCs it was shared onto, or it lingers as a dead placeholder tile. Failed mods
+        // are skipped (their empty NPC lists mean "not analyzed", not "donors deleted"),
+        // as are mods with no provably-live donors at all — sweeping there would act on
+        // absence of evidence (e.g. an invalid environment). Runs after
+        // ResolveAndApplySkyPatcherGuests so live ini donors are already re-registered.
+        var freshDonorsByMod = allSkyPatcherGuests
+            .GroupBy(g => g.ModDisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.Select(x => x.Source).ToHashSet(),
+                StringComparer.OrdinalIgnoreCase);
+        foreach (var (vm, liveDonorKeys) in analyzedDonorKeys)
+        {
+            if (analysisFailedVms.Contains(vm)) continue;
+            var freshDonorKeys = freshDonorsByMod.TryGetValue(vm.DisplayName, out var fresh)
+                ? fresh
+                : new HashSet<FormKey>();
+            if (liveDonorKeys.Count == 0 && freshDonorKeys.Count == 0) continue;
+            _npcSelectionBar.PruneStaleGuestAppearances(vm.DisplayName, liveDonorKeys, freshDonorKeys);
+        }
+
+        return analysisFailedVms;
+    }
+
+    /// <summary>
+    /// Removes newly-discovered plugin-based appearance mods that ended up with zero
+    /// usable NPCs after <see cref="AnalyzeModSettingsAsync"/>. RefreshNpcLists may
+    /// reject every NPC in a plugin (e.g. all NPCs use a custom race whose definition
+    /// is not in the active load order), leaving an empty VM that confuses the UI and
+    /// produces a left-panel entry with no mugshots. Caches the folders as
+    /// non-appearance so the next launch doesn't re-scan them; the user can clear the
+    /// cache from settings if the situation changes (e.g. a missing master is added
+    /// to the load order). Only newly-created VMs are eligible -- previously-saved
+    /// user mods are preserved even if currently empty, since they may be in a
+    /// transient bad state due to load-order drift.
+    /// VMs whose analysis task threw (<paramref name="analysisFailedVms"/>) are excluded:
+    /// their empty NPC list means "not analyzed", and pruning them would cache their
+    /// folders as non-appearance with a misleading reason, hiding them on every
+    /// subsequent launch even though the underlying failure may be transient.
+    /// </summary>
+    private void PruneEmptyNewlyCreatedAppearanceMods(VM_SplashScreen? splashReporter,
+        IReadOnlySet<VM_ModSetting> analysisFailedVms)
+    {
+        var emptyVms = _allModSettingsInternal
+            .Where(vm => vm.IsNewlyCreated
+                         && !analysisFailedVms.Contains(vm)
+                         && !vm.IsFaceGenOnlyEntry
+                         && !vm.IsMugshotOnlyEntry
+                         && vm.CorrespondingModKeys.Any()
+                         && vm.NpcFormKeysToDisplayName.Count == 0)
+            .ToList();
+
+        if (!emptyVms.Any()) return;
+
+        foreach (var vm in emptyVms)
+        {
+            bool hasUnresolvedMasters = vm.UnresolvedMastersAtScan.Any();
+
+            string failureReason = hasUnresolvedMasters
+                ? $"Could not be analyzed because the following masters were not found in any mod folder: {string.Join(", ", vm.UnresolvedMastersAtScan)}. Install the missing masters as separate mod folders and click the refresh button next to this entry to re-scan."
+                : "All NPCs were rejected during analysis (e.g. no FaceGen, or template chain terminates in a Leveled NPC). See Rejected NPCs/<mod>.txt for per-NPC reasons.";
+
+            Debug.WriteLine(
+                $"Discarded appearance mod '{vm.DisplayName}' [{string.Join(", ", vm.CorrespondingModKeys)}] -- "
+                + (hasUnresolvedMasters
+                    ? $"missing masters: {string.Join(", ", vm.UnresolvedMastersAtScan)}"
+                    : "all NPCs rejected during analysis"));
+
+            if (hasUnresolvedMasters)
+            {
+                // Routed to the splash screen's catch-all "Initialization Warning" popup
+                // so missing-master cases share the same surface as other init warnings
+                // (e.g. multi-source-master notices) rather than spawning a separate dialog.
+                splashReporter?.ReportWarning(new SkippedMissingMasterWarning(
+                    RequestingMod: vm.DisplayName,
+                    UnresolvedMasters: vm.UnresolvedMastersAtScan.ToList()));
+            }
+
+            foreach (var path in vm.CorrespondingFolderPaths)
+            {
+                if (string.IsNullOrWhiteSpace(path)) continue;
+                _settings.CachedNonAppearanceMods.TryAdd(path, failureReason);
+                if (hasUnresolvedMasters)
+                {
+                    _settings.CachedMissingMasterMods[path] = vm.UnresolvedMastersAtScan.ToList();
+                }
+            }
+
+            _allModSettingsInternal.Remove(vm);
+            // Shares referencing this discarded entry (typically registered moments ago by
+            // the SkyPatcher import in AnalyzeModSettingsAsync) would otherwise orphan
+            // immediately as dead placeholder tiles.
+            _npcSelectionBar.PruneStaleGuestAppearances(vm.DisplayName,
+                new HashSet<FormKey>(), new HashSet<FormKey>());
+            vm.Dispose(); // pruned (non-appearance) mod; discarded, so release its subscriptions
+        }
+    }
+    
+    public async Task<(bool Success, string FailureReason)> RescanSingleModFolderAsync(string modFolderPath)
+    {
+        if (string.IsNullOrWhiteSpace(modFolderPath) || !Directory.Exists(modFolderPath))
+        {
+            return (false, "Path does not exist");
+        }
+
+        string modFolderName = Path.GetFileName(modFolderPath);
+        if (_allModSettingsInternal.Any(vm => vm.DisplayName.Equals(modFolderName, StringComparison.OrdinalIgnoreCase)))
+        {
+            ScrollableMessageBox.ShowWarning($"An appearance mod named '{modFolderName}' already exists. Cannot re-import from cached list.", TranslationServiceProvider.GetService()?.GetString("modAlreadyExists") ?? "Mod Already Exists");
+            return (false, "Mod already exists in the list");
+        }
+
+        var modKeysInFolder = _aux.GetModKeysInDirectory(modFolderPath, new List<string>(), false);
+        var newVm = _modSettingFromModFolderFactory(modFolderPath, modKeysInFolder, this);
+        newVm.IsNewlyCreated = true;
+
+        _allModSettingsInternal.Add(newVm);
+        SortVMsInPlace();
+    
+        // Capture the result and reason from the refresh logic
+        var (isValid, failureReason) = await RefreshSingleModSettingAsync(newVm);
+
+        // RefreshSingleModSettingAsync handles the removal of the VM if it's invalid.
+    
+        ApplyFilters();
+
+        // Return the tuple
+        return (isValid, failureReason);
+    }
+    
+    // This NEW helper method contains the logic to resolve and save guest appearances.
+    // It is called only once by AnalyzeModSettingsAsync.
+    private async Task ResolveAndApplySkyPatcherGuests(IReadOnlyCollection<(FormKey TargetNpc, FormKey SourceNpc, string ModDisplayName, string SourceNpcDisplayName)> guests)
+    {
+        Debug.WriteLine($"Resolving {guests.Count} discovered SkyPatcher guest appearances...");
+        int addedCount = 0;
+        foreach (var (targetNpcKey, sourceNpcKey, modDisplayName, npcDisplayName) in guests)
+        {
+            if (AddGuestAppearanceToSettings(targetNpcKey, sourceNpcKey, modDisplayName, npcDisplayName))
+            {
+                _settings.CachedSkyPatcherTemplates.Add(sourceNpcKey);
+                addedCount++;
+            }
+        }
+        Debug.WriteLine($"Finished processing SkyPatcher imports. Added {addedCount} new guest appearances.");
+    }
+
+    private async Task FinalizeAndApplySettingsOnUI(List<string> warnings)
+    {
+        StartupLogger.Log($"Applying {_allModSettingsInternal.Count} mod settings to UI ({warnings.Count} warning(s))");
+        await Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            foreach (var vm in _allModSettingsInternal)
+            {
+                RecalculateMugshotValidity(vm);
+            }
+
+            IsLoadingNpcData = false;
+            ApplyFilters();
+
+            if (warnings.Any())
+            {
+                ScrollableMessageBox.ShowWarning(string.Join("\n", warnings), "Mod Settings Population Warning");
+            }
+        });
+    }
+    
+    private async Task<(Dictionary<string, HashSet<string>> allFaceGenLooseFiles, Dictionary<string, HashSet<string>>
+            allFaceGenBsaFiles)>
+        CacheFaceGenPathsOnLoadAsync(IEnumerable<VM_ModSetting>? vmsToProcess, VM_SplashScreen? splashReporter)
+    {
+        var vmsToProcessList = vmsToProcess?.ToList();
+
+        // --- Part 1: Cache loose files ---
+        Debug.WriteLine("Caching loose FaceGen file paths...");
+        List<string> allPathsToScanForLooseFiles;
+        if (vmsToProcessList != null && vmsToProcessList.Any())
+        {
+            // Scenario 1: Specific VMs are provided. Scan only their folders.
+            allPathsToScanForLooseFiles = vmsToProcessList
+                .SelectMany(vm => vm.CorrespondingFolderPaths)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        else
+        {
+            // Scenario 2: No specific VMs provided. Scan all subdirectories in the main Mods folder.
+            allPathsToScanForLooseFiles = new List<string>();
+            try
+            {
+                allPathsToScanForLooseFiles.AddRange(GetModDirectories());
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Error enumerating ModsFolder for loose FaceGen caching: {ExceptionLogger.GetExceptionStack(ex)}");
+            }
+        }
+
+        var allFaceGenLooseFiles = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var modPath in allPathsToScanForLooseFiles)
+        {
+            if (!Directory.Exists(modPath)) continue;
+
+            var looseFilesInMod = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            var texturesPath = Path.Combine(modPath, "Textures");
+            if (Directory.Exists(texturesPath))
+            {
+                foreach (var file in Directory.EnumerateFiles(texturesPath, "*.dds", SearchOption.AllDirectories))
+                {
+                    looseFilesInMod.Add(Path.GetRelativePath(modPath, file).Replace('\\', '/'));
+                }
+            }
+
+            var meshesPath = Path.Combine(modPath, "Meshes");
+            if (Directory.Exists(meshesPath))
+            {
+                foreach (var file in Directory.EnumerateFiles(meshesPath, "*.nif", SearchOption.AllDirectories))
+                {
+                    looseFilesInMod.Add(Path.GetRelativePath(modPath, file).Replace('\\', '/'));
+                }
+            }
+
+            if (looseFilesInMod.Any())
+            {
+                allFaceGenLooseFiles[modPath] = looseFilesInMod;
+            }
+        }
+
+        Debug.WriteLine($"Cached loose file paths for {allFaceGenLooseFiles.Count} mod folders.");
+
+        // --- Part 2: Asynchronously cache BSA files with progress reporting ---
+        splashReporter?.UpdateStep("Pre-caching BSA file paths...");
+        Debug.WriteLine("Pre-caching all relevant BSA paths...");
+
+        var (vmBsaPathsCache, allRelevantBsaPaths) = await Task.Run(() =>
+        {
+            var localVmBsaPathsCache = new Dictionary<string, Dictionary<ModKey, HashSet<string>>>();
+            var localAllRelevantBsaPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            List<VM_ModSetting> vmsToIterate;
+            if (vmsToProcessList != null && vmsToProcessList.Any())
+            {
+                // Scenario 1: Specific VMs were provided.
+                vmsToIterate = vmsToProcessList;
+            }
+            else
+            {
+                // Scenario 2: Full scan. Create temporary VMs for every mod folder to discover their plugins and associated BSAs.
+                var tempVmsForFullScan = new List<VM_ModSetting>();
+                foreach (var modDir in GetModDirectories())
+                {
+                    var modKeys = _aux.GetModKeysInDirectory(modDir, new(), false);
+                    tempVmsForFullScan.Add(_modSettingFromModFolderFactory(modDir, modKeys, this));
+                }
+
+                // Also include Base Game and Creation Club in a full scan.
+                var baseGameModKeys = _environmentStateProvider.BaseGamePlugins ?? new();
+                if (baseGameModKeys.Any())
+                {
+                    var baseMod = new ModSetting()
+                    {
+                        DisplayName = BaseGameModSettingName, CorrespondingModKeys = baseGameModKeys.ToList(),
+                        IsAutoGenerated = true
+                    };
+                    tempVmsForFullScan.Add(_modSettingFromModelFactory(baseMod, this));
+                }
+
+                var creationClubModKeys = _environmentStateProvider.CreationClubPlugins ?? new();
+                if (creationClubModKeys.Any())
+                {
+                    var ccMod = new ModSetting()
+                    {
+                        DisplayName = CreationClubModsettingName, CorrespondingModKeys = creationClubModKeys.ToList(),
+                        IsAutoGenerated = true
+                    };
+                    tempVmsForFullScan.Add(_modSettingFromModelFactory(ccMod, this));
+                }
+
+                vmsToIterate = tempVmsForFullScan;
+            }
+
+            var totalVmCount = vmsToIterate.Count;
+            var processedVmCount = 0;
+
+            foreach (var vm in vmsToIterate)
+            {
+                var pathsToSearch = new HashSet<string>(vm.CorrespondingFolderPaths);
+                if (vm.IsAutoGenerated)
+                {
+                    pathsToSearch.Add(_environmentStateProvider.DataFolderPath);
+                }
+
+                var bsaDictForVm = _bsaHandler.GetBsaPathsForPluginsInDirs(vm.CorrespondingModKeys, pathsToSearch,
+                    _settings.SkyrimRelease.ToGameRelease());
+
+                localVmBsaPathsCache[vm.DisplayName] = bsaDictForVm;
+
+                foreach (var bsaPath in bsaDictForVm.Values.SelectMany(paths => paths))
+                {
+                    localAllRelevantBsaPaths.Add(bsaPath);
+                }
+
+                processedVmCount++;
+                var progress = totalVmCount > 0 ? (double)processedVmCount / totalVmCount * 100.0 : 100.0;
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    splashReporter?.UpdateProgress(progress, $"Analyzing assets: {vm.DisplayName}");
+                });
+            }
+
+            return (localVmBsaPathsCache, localAllRelevantBsaPaths);
+        });
+        Debug.WriteLine($"Found {allRelevantBsaPaths.Count} unique BSAs to process.");
+
+        splashReporter?.UpdateStep("Caching asset contents...");
+        var bsaContentCache = new ConcurrentDictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        var processingTasks = allRelevantBsaPaths.Select(bsaPath => Task.Run(() =>
+        {
+            var faceGenFilesInArchive = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var bsaReaders =
+                    _bsaHandler.OpenBsaArchiveReaders(new[] { bsaPath }, _settings.SkyrimRelease.ToGameRelease(), false);
+
+                if (bsaReaders.TryGetValue(bsaPath, out var reader) && reader.Files.Any())
+                {
+                    foreach (var fileRecord in reader.Files)
+                    {
+                        string path = fileRecord.Path.ToLowerInvariant().Replace('\\', '/');
+                        if (path.StartsWith("meshes/actors/character/facegendata/") ||
+                            path.StartsWith("textures/actors/character/facegendata/"))
+                        {
+                            faceGenFilesInArchive.Add(path);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    $"Failed to read BSA archive: {bsaPath}", ex);
+            }
+
+            bsaContentCache.TryAdd(bsaPath, faceGenFilesInArchive);
+        })).ToList();
+
+        await Task.WhenAll(processingTasks);
+
+        Debug.WriteLine("Finished caching content from all BSAs.");
+        splashReporter?.UpdateStep("Finalizing asset cache...");
+
+        // --- Part 3: Assemble the final dictionary for each VM using the caches ---
+        var allFaceGenBsaFiles = new Dictionary<string, HashSet<string>>();
+        foreach (var vmDisplayName in vmBsaPathsCache.Keys)
+        {
+            var bsaFilePathsForVm = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            if (vmBsaPathsCache.TryGetValue(vmDisplayName, out var bsaDict))
+            {
+                var uniqueBsaPathsForVm = bsaDict.Values.SelectMany(paths => paths)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var bsaPath in uniqueBsaPathsForVm)
+                {
+                    if (bsaContentCache.TryGetValue(bsaPath, out var cachedContent))
+                    {
+                        bsaFilePathsForVm.UnionWith(cachedContent);
+                    }
+                }
+            }
+
+            allFaceGenBsaFiles[vmDisplayName] = bsaFilePathsForVm;
+        }
+
+        Debug.WriteLine($"Assembled BSA file paths for {allFaceGenBsaFiles.Count} mod settings from cache.");
+        return (allFaceGenLooseFiles, allFaceGenBsaFiles);
+    }
+
+    /// <summary>
+    /// Scans the masters of a VM's plugins. If any masters are not in the load order or already part of the VM,
+    /// it searches all other mod directories to find them, adding the best candidate folder as a resource.
+    /// </summary>
+    /// <summary>
+    /// Returns true if the given (in-load-order) master plugin is itself an "appearance mod" by the same
+    /// <see cref="MergeInClassifier"/> provenance rule that drives the Merge Dependencies default.
+    /// Base-game and Creation Club masters short-circuit to false to avoid enumerating huge vanilla masters.
+    /// Results are cached by ModKey via <see cref="_masterAppearanceClassificationCache"/> for the scan.
+    /// </summary>
+    private bool IsMasterAppearanceMod(ModKey masterKey, HashSet<string> fallbackFolders)
+    {
+        return _masterAppearanceClassificationCache.GetOrAdd(masterKey, key =>
+        {
+            // Never treat base game / CC as an appearance dependency, and never enumerate their records.
+            if (_environmentStateProvider.BaseGamePlugins.Contains(key) ||
+                _environmentStateProvider.CreationClubPlugins.Contains(key))
+            {
+                return false;
+            }
+
+            // Prefer the already-resolved getter from the load order; fall back to the plugin provider.
+            ISkyrimModGetter? mod = _environmentStateProvider.LoadOrder?.PriorityOrder
+                .FirstOrDefault(x => x.ModKey.Equals(key))?.Mod;
+
+            if (mod == null)
+            {
+                _pluginProvider.TryGetPlugin(key, fallbackFolders, out mod);
+            }
+
+            if (mod == null)
+            {
+                // Couldn't load it; conservatively treat as non-appearance so we don't attach folders
+                // we can't justify.
+                return false;
+            }
+
+            try
+            {
+                // Same provenance classifier as VM_ModSetting.CheckMergeInSuitability (they must
+                // not diverge). A lone master is its own "internal set", and SkyPatcher INIs
+                // don't apply to a bare dependency plugin.
+                var counts = MergeInClassifier.CountPlugin(mod, new HashSet<ModKey> { key });
+                return MergeInClassifier.Classify(counts, skyPatcherTargets: 0) ==
+                       MergeInClassifier.Verdict.AppearanceReplacer;
+            }
+            catch
+            {
+                return false;
+            }
+        });
+    }
+
+    private void FindAndAddMissingMasters(
+        VM_ModSetting vm,
+        IReadOnlyCollection<string> allModDirectories,
+        ConcurrentBag<InitializationWarning> warnings,
+        bool excludeNpcSourcePlugins = true)
+    {
+        const string LogTag = "[FindAndAddMissingMasters]";
+        var loadOrderKeys = _environmentStateProvider.LoadOrderModKeys.ToHashSet();
+        // Start with the plugins we know about before this process began.
+        var knownPluginKeysInVm = new HashSet<ModKey>(vm.CorrespondingModKeys);
+        var currentFoldersInVm = vm.CorrespondingFolderPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        // Reset transient unresolved-masters bookkeeping for this scan; consumed by
+        // PruneEmptyNewlyCreatedAppearanceMods to drive the missing-master UX.
+        vm.UnresolvedMastersAtScan.Clear();
+
+        // Optional: source plugins of NPCs in this VM. When excludeNpcSourcePlugins is true,
+        // these are skipped as candidate missing masters since they are the NPC-providing
+        // plugins themselves rather than resources to be pulled in. Augmented with
+        // SkyPatcherTargetModKeys so SkyPatcher-style replacers (which don't override the
+        // foundation's NPC records, but do patch them at runtime via INI) get the same
+        // exclusion. SkyPatcherTargetModKeys is empty during the initial parallel scan and
+        // is only populated by AnalyzeModSettingsAsync, which means the initial run still
+        // attaches the foundation folder so Mutagen can resolve masters; the subsequent
+        // CleanupCorrespondingFolders pass then prunes it because the targets are now known.
+        var npcSourcePluginKeys = excludeNpcSourcePlugins
+            ? vm.NpcFormKeys.Select(fk => fk.ModKey)
+                .Concat(vm.SkyPatcherTargetModKeys)
+                .ToHashSet()
+            : new HashSet<ModKey>();
+
+        StartupLogger.Log($"{LogTag} '{vm.DisplayName}' enter; excludeNpcSourcePlugins={excludeNpcSourcePlugins}, NpcFormKeys.Count={vm.NpcFormKeys.Count}, SkyPatcherTargets.Count={vm.SkyPatcherTargetModKeys.Count}");
+        StartupLogger.Log($"{LogTag} '{vm.DisplayName}' currentFolders=[{string.Join(", ", currentFoldersInVm.Select(Path.GetFileName))}]");
+        StartupLogger.Log($"{LogTag} '{vm.DisplayName}' knownPluginKeysInVm=[{string.Join(", ", knownPluginKeysInVm.Select(k => k.FileName.String))}]");
+        StartupLogger.Log($"{LogTag} '{vm.DisplayName}' npcSourcePluginKeys ({npcSourcePluginKeys.Count})=[{string.Join(", ", npcSourcePluginKeys.Select(k => k.FileName.String))}]");
+
+        CleanupTrace(vm, $"FindAndAddMissingMasters enter; excludeNpcSourcePlugins={excludeNpcSourcePlugins}, NpcFormKeys.Count={vm.NpcFormKeys.Count}, SkyPatcherTargets.Count={vm.SkyPatcherTargetModKeys.Count}");
+        CleanupTrace(vm, $"  currentFolders=[{string.Join(", ", currentFoldersInVm.Select(Path.GetFileName))}]");
+        CleanupTrace(vm, $"  knownPluginKeysInVm=[{string.Join(", ", knownPluginKeysInVm.Select(k => k.FileName.String))}]");
+        CleanupTrace(vm, $"  SkyPatcherTargetModKeys ({vm.SkyPatcherTargetModKeys.Count})=[{string.Join(", ", vm.SkyPatcherTargetModKeys.Select(k => k.FileName.String))}]");
+        CleanupTrace(vm, $"  npcSourcePluginKeys ({npcSourcePluginKeys.Count})=[{string.Join(", ", npcSourcePluginKeys.Select(k => k.FileName.String))}]");
+
+        // Masters genuinely missing from the load order: if no source folder is found, this is a real
+        // unresolved master and must be surfaced to the missing-master UX.
+        var missingMastersToFind = new HashSet<ModKey>();
+
+        // In-load-order masters that are themselves appearance mods: attach their folder if one is found on
+        // disk, but they are already resolvable via the load order, so a missing folder is NOT an error and
+        // must not be flagged unresolved.
+        var appearanceMastersToAttach = new HashSet<ModKey>();
+
+        // Step 1: Find all missing masters from the VM's current set of plugins.
+        var plugins = _pluginProvider.LoadPlugins(vm.CorrespondingModKeys, currentFoldersInVm);
+        CleanupTrace(vm, $"  loaded {plugins.Count} plugin(s) for master scan: [{string.Join(", ", plugins.Select(p => p.ModKey.FileName.String))}]");
+        foreach (var plugin in plugins)
+        {
+            foreach (var masterRef in plugin.ModHeader.MasterReferences)
+            {
+                var masterKey = masterRef.Master;
+                bool inLoadOrder = loadOrderKeys.Contains(masterKey);
+                bool inKnown = knownPluginKeysInVm.Contains(masterKey);
+                bool inNpcSources = npcSourcePluginKeys.Contains(masterKey);
+
+                // Ordered so the foundation/NPC-source exclusion wins over the appearance-keep rule, and so
+                // the (relatively expensive) appearance classification is evaluated only for masters that are
+                // in the load order, not already known, and not an NPC source of this mod.
+                string classification;
+                if (inKnown)
+                {
+                    classification = "already in VM";
+                }
+                else if (inNpcSources)
+                {
+                    classification = "skipped (NPC source plugin)";
+                }
+                else if (!inLoadOrder)
+                {
+                    classification = "MISSING -> will search";
+                    missingMastersToFind.Add(masterKey);
+                }
+                else if (IsMasterAppearanceMod(masterKey, currentFoldersInVm))
+                {
+                    classification = "kept (appearance mod in load order)";
+                    appearanceMastersToAttach.Add(masterKey);
+                }
+                else
+                {
+                    classification = "in load order";
+                }
+
+                StartupLogger.Log($"{LogTag} '{vm.DisplayName}'   plugin={plugin.ModKey.FileName} master={masterKey.FileName} -> {classification}");
+                CleanupTrace(vm, $"    plugin={plugin.ModKey.FileName} master={masterKey.FileName} -> {classification} (inLoadOrder={inLoadOrder}, inKnown={inKnown}, inNpcSources={inNpcSources})");
+            }
+        }
+
+        if (!missingMastersToFind.Any() && !appearanceMastersToAttach.Any())
+        {
+            StartupLogger.Log($"{LogTag} '{vm.DisplayName}' no missing masters; exiting.");
+            CleanupTrace(vm, "  no missing masters; FindAndAddMissingMasters exits without changes");
+            return; // Nothing to do
+        }
+
+        StartupLogger.Log($"{LogTag} '{vm.DisplayName}' missingMastersToFind=[{string.Join(", ", missingMastersToFind.Select(k => k.FileName.String))}]");
+        CleanupTrace(vm, $"  missingMastersToFind=[{string.Join(", ", missingMastersToFind.Select(k => k.FileName.String))}]");
+        StartupLogger.Log($"{LogTag} '{vm.DisplayName}' appearanceMastersToAttach=[{string.Join(", ", appearanceMastersToAttach.Select(k => k.FileName.String))}]");
+        CleanupTrace(vm, $"  appearanceMastersToAttach=[{string.Join(", ", appearanceMastersToAttach.Select(k => k.FileName.String))}]");
+
+        // Step 2: Find potential source folders for the missing masters.
+        var foldersToSearch = allModDirectories.Where(d => !currentFoldersInVm.Contains(d)).ToList();
+        var newResourceFoldersToAdd = new Dictionary<string, List<ModKey>>(StringComparer.OrdinalIgnoreCase);
+
+        // Shared per-master folder search. reportUnresolvedIfMissing distinguishes genuinely-missing masters
+        // (flag as unresolved when no folder is found) from in-load-order appearance masters (already
+        // resolvable via the load order, so a missing folder is benign and must not be flagged).
+        void SearchAndStageMaster(ModKey master, bool reportUnresolvedIfMissing)
+        {
+            var candidates = new List<(string Path, DateTime LastWrite)>();
+            foreach (var folder in foldersToSearch)
+            {
+                string pluginPath = Path.Combine(folder, master.FileName.String);
+                if (File.Exists(pluginPath))
+                {
+                    candidates.Add((folder, File.GetLastWriteTimeUtc(pluginPath)));
+                }
+            }
+
+            if (candidates.Any())
+            {
+                var winner = candidates.OrderByDescending(c => c.LastWrite).First();
+                StartupLogger.Log($"{LogTag} '{vm.DisplayName}'   master '{master.FileName}' -> chose folder '{Path.GetFileName(winner.Path)}' from {candidates.Count} candidate(s): [{string.Join(", ", candidates.Select(c => Path.GetFileName(c.Path)))}]");
+                CleanupTrace(vm, $"    master '{master.FileName}' candidates ({candidates.Count})=[{string.Join(", ", candidates.Select(c => $"{Path.GetFileName(c.Path)}@{c.LastWrite:o}"))}], winner='{Path.GetFileName(winner.Path)}'");
+                if (candidates.Count > 1)
+                {
+                    warnings.Add(new MultiSourceMasterWarning(
+                        MasterFileName: master.FileName.String,
+                        CandidateSources: candidates.Select(c => Path.GetFileName(c.Path)).ToList(),
+                        ChosenSource: Path.GetFileName(winner.Path),
+                        RequestingMod: vm.DisplayName));
+                }
+
+                // If we haven't already decided to add this folder, add it now.
+                if (!newResourceFoldersToAdd.ContainsKey(winner.Path))
+                {
+                    var pluginsInWinnerFolder = _aux.GetModKeysInDirectory(winner.Path, new List<string>(), false);
+                    newResourceFoldersToAdd[winner.Path] = pluginsInWinnerFolder;
+                    CleanupTrace(vm, $"      will add folder '{Path.GetFileName(winner.Path)}' bringing plugins=[{string.Join(", ", pluginsInWinnerFolder.Select(k => k.FileName.String))}]");
+                }
+            }
+            else if (reportUnresolvedIfMissing)
+            {
+                StartupLogger.Log(
+                    $"{LogTag} '{vm.DisplayName}'   master '{master.FileName}' -> no local source found.");
+                CleanupTrace(vm, $"    master '{master.FileName}' -> no local source found");
+                vm.UnresolvedMastersAtScan.Add(master.FileName.String);
+            }
+            else
+            {
+                // In-load-order appearance master with no separate folder: rely on the load order; not unresolved.
+                StartupLogger.Log(
+                    $"{LogTag} '{vm.DisplayName}'   appearance master '{master.FileName}' -> no local source found; relying on load order (not flagged unresolved).");
+                CleanupTrace(vm, $"    appearance master '{master.FileName}' -> no local source found; relying on load order (not unresolved)");
+            }
+        }
+
+        foreach (var master in missingMastersToFind) SearchAndStageMaster(master, reportUnresolvedIfMissing: true);
+        foreach (var master in appearanceMastersToAttach) SearchAndStageMaster(master, reportUnresolvedIfMissing: false);
+
+        // Step 3: Apply the newly discovered folders and plugins to the VM.
+        if (newResourceFoldersToAdd.Any())
+        {
+            StartupLogger.Log($"{LogTag} '{vm.DisplayName}' adding {newResourceFoldersToAdd.Count} resource folder(s): [{string.Join(", ", newResourceFoldersToAdd.Keys.Select(Path.GetFileName))}]");
+            vm.IsPerformingBatchAction = true; // prevent popups
+            foreach (var (folderPath, pluginsInFolder) in newResourceFoldersToAdd)
+            {
+                if (!vm.CorrespondingFolderPaths.Contains(folderPath, StringComparer.OrdinalIgnoreCase))
+                {
+                    vm.CorrespondingFolderPaths.Insert(0, folderPath);
+                }
+
+                foreach (var pluginKey in pluginsInFolder)
+                {
+                    vm.ResourceOnlyModKeys.Add(pluginKey);
+                    if (!vm.CorrespondingModKeys.Contains(pluginKey))
+                    {
+                        vm.CorrespondingModKeys.Insert(0, pluginKey);
+                    }
+                }
+            }
+
+            vm.IsPerformingBatchAction = false;
+        }
+        else
+        {
+            StartupLogger.Log($"{LogTag} '{vm.DisplayName}' no resource folders to add.");
+        }
+    }
+
+    /// <summary>
+    /// Removes <see cref="VM_ModSetting.CorrespondingFolderPaths"/> entries that the *current*
+    /// <see cref="FindAndAddMissingMasters"/> would not re-add — typically left over from older
+    /// versions of the detector that added foundation-mod folders (e.g. "Interesting NPCs SE").
+    ///
+    /// Strategy: identify the primary folder (the one whose folder name matches the mod's
+    /// <see cref="VM_ModSetting.DisplayName"/>), reset the folder list to just the primary,
+    /// rebuild <c>CorrespondingModKeys</c>, and let the current detector re-add any folders
+    /// it actually needs. Anything not re-added drops out.
+    ///
+    /// No-op (defensive) when the primary folder cannot be unambiguously identified, when the
+    /// mod has only one folder, or for auto-generated entries — these are either safe already
+    /// or risky to mutate without user input.
+    /// </summary>
+    public void CleanupCorrespondingFolders(VM_ModSetting vm, ConcurrentBag<InitializationWarning>? warnings = null)
+    {
+        if (vm.IsAutoGenerated)
+        {
+            CleanupTrace(vm, "exit early: IsAutoGenerated=true");
+            return;
+        }
+        if (vm.CorrespondingFolderPaths.Count <= 1)
+        {
+            CleanupTrace(vm, $"exit early: only {vm.CorrespondingFolderPaths.Count} folder(s)");
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(_settings.ModsFolder) || !Directory.Exists(_settings.ModsFolder))
+        {
+            CleanupTrace(vm, "exit early: ModsFolder unset or missing");
+            return;
+        }
+
+        StartupLogger.Log($"[CleanupCorrespondingFolders] '{vm.DisplayName}' enter; folders=[{string.Join(", ", vm.CorrespondingFolderPaths.Select(Path.GetFileName))}]");
+
+        if (ShouldTraceCleanup(vm))
+        {
+            CleanupTrace(vm, $"enter; folders=[{string.Join(", ", vm.CorrespondingFolderPaths.Select(Path.GetFileName))}]");
+            CleanupTrace(vm, $"CorrespondingModKeys=[{string.Join(", ", vm.CorrespondingModKeys.Select(k => k.FileName.String))}]");
+            CleanupTrace(vm, $"NpcFormKeys.Count={vm.NpcFormKeys.Count}");
+
+            var npcSourceModKeys = vm.NpcFormKeys.Select(fk => fk.ModKey).Distinct().ToList();
+            CleanupTrace(vm, $"NpcFormKeys distinct ModKeys ({npcSourceModKeys.Count})=[{string.Join(", ", npcSourceModKeys.Select(k => k.FileName.String))}]");
+
+            var loadOrder = _environmentStateProvider.LoadOrderModKeys.ToHashSet();
+            CleanupTrace(vm, $"LoadOrder.Count={loadOrder.Count}");
+            foreach (var mk in vm.CorrespondingModKeys)
+            {
+                CleanupTrace(vm, $"  CMK '{mk.FileName}' inLoadOrder={loadOrder.Contains(mk)}");
+            }
+        }
+
+        // Identify the primary folder by name match against DisplayName.
+        var primary = vm.CorrespondingFolderPaths.FirstOrDefault(p =>
+            string.Equals(
+                Path.GetFileName(p.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)),
+                vm.DisplayName,
+                StringComparison.OrdinalIgnoreCase));
+        if (primary == null)
+        {
+            StartupLogger.Log($"[CleanupCorrespondingFolders] '{vm.DisplayName}' skipped — no folder name matches the mod name.");
+            CleanupTrace(vm, "exit: no folder name matched DisplayName, cleanup skipped");
+            return;
+        }
+        StartupLogger.Log($"[CleanupCorrespondingFolders] '{vm.DisplayName}' primary='{Path.GetFileName(primary)}'");
+        CleanupTrace(vm, $"primary='{Path.GetFileName(primary)}'");
+
+        var originalFolders = vm.CorrespondingFolderPaths.ToList();
+        if (originalFolders.Count == 1) return;
+
+        // Reset to primary only and rebuild keys.
+        vm.IsPerformingBatchAction = true;
+        try
+        {
+            vm.CorrespondingFolderPaths.Clear();
+            vm.CorrespondingFolderPaths.Add(primary);
+            vm.UpdateCorrespondingModKeys();
+            CleanupTrace(vm, $"after reset: folders=[{string.Join(", ", vm.CorrespondingFolderPaths.Select(Path.GetFileName))}], CorrespondingModKeys=[{string.Join(", ", vm.CorrespondingModKeys.Select(k => k.FileName.String))}]");
+
+            // Re-add only what the current detector says is genuinely needed.
+            var allModDirectories = Directory.EnumerateDirectories(_settings.ModsFolder).ToList();
+            var localWarnings = warnings ?? new ConcurrentBag<InitializationWarning>();
+            FindAndAddMissingMasters(vm, allModDirectories, localWarnings, true);
+
+            // Pin the user's locked folders back into the rebuilt list. Must run before the final
+            // UpdateCorrespondingModKeys so any plugins a locked folder does carry are picked up.
+            ReapplyLockedFolders(vm, originalFolders);
+
+            // UpdateCorrespondingModKeys (called inside FindAndAddMissingMasters' caller chain or
+            // implicitly via the additions) already re-derives ResourceOnlyModKeys via the wiring
+            // added in v2 — but call again to be safe in case the additions skipped that path.
+            vm.UpdateCorrespondingModKeys();
+            CleanupTrace(vm, $"after FindAndAddMissingMasters: folders=[{string.Join(", ", vm.CorrespondingFolderPaths.Select(Path.GetFileName))}], CorrespondingModKeys=[{string.Join(", ", vm.CorrespondingModKeys.Select(k => k.FileName.String))}]");
+        }
+        finally
+        {
+            vm.IsPerformingBatchAction = false;
+        }
+
+        var removed = originalFolders.Except(vm.CorrespondingFolderPaths, StringComparer.OrdinalIgnoreCase).ToList();
+        if (removed.Any())
+        {
+            Debug.WriteLine($"CleanupCorrespondingFolders: '{vm.DisplayName}' dropped {removed.Count} stale folder(s): " +
+                            string.Join(", ", removed.Select(Path.GetFileName)));
+        }
+        CleanupTrace(vm, $"exit; final folders=[{string.Join(", ", vm.CorrespondingFolderPaths.Select(Path.GetFileName))}]");
+    }
+
+    /// <summary>
+    /// Puts the mod's locked folders back into <see cref="VM_ModSetting.CorrespondingFolderPaths"/>
+    /// after a rebuild, at the position they held relative to their surviving neighbours.
+    ///
+    /// <para>Locking exists because <see cref="FindAndAddMissingMasters"/> can only find folders that
+    /// something in the master chain points at, so a "silent" dependency — a folder supplying meshes or
+    /// textures but no plugin — is invisible to it and gets dropped by the rebuild in
+    /// <see cref="CleanupCorrespondingFolders"/>. See <see cref="LockedFolderOrdering"/> for the
+    /// position-preservation rule.</para>
+    /// </summary>
+    /// <param name="originalOrder">The folder list as it stood immediately before the rebuild.</param>
+    private void ReapplyLockedFolders(VM_ModSetting vm, IReadOnlyList<string> originalOrder)
+    {
+        vm.PrunePrimaryFolderLocks();
+        if (vm.LockedFolderPaths.Count == 0) return;
+
+        var reconciled = LockedFolderOrdering.Reconcile(
+            vm.CorrespondingFolderPaths, originalOrder, vm.LockedFolderPaths);
+
+        if (reconciled.SequenceEqual(vm.CorrespondingFolderPaths, StringComparer.OrdinalIgnoreCase))
+        {
+            CleanupTrace(vm, "  locked folders already in place; no reordering needed");
+            return;
+        }
+
+        vm.CorrespondingFolderPaths.Clear();
+        foreach (var path in reconciled)
+        {
+            vm.CorrespondingFolderPaths.Add(path);
+        }
+
+        StartupLogger.Log($"[ReapplyLockedFolders] '{vm.DisplayName}' restored {vm.LockedFolderPaths.Count} locked folder(s); final order=[{string.Join(", ", reconciled.Select(Path.GetFileName))}]");
+        CleanupTrace(vm, $"  reapplied locked folders=[{string.Join(", ", vm.LockedFolderPaths.Select(Path.GetFileName))}]; final order=[{string.Join(", ", reconciled.Select(Path.GetFileName))}]");
+    }
+
+    /// <summary>
+    /// Initial-scan equivalent of the 2.1.6 migration sweep. Re-runs <see cref="CleanupCorrespondingFolders"/>
+    /// and <see cref="VM_ModSetting.RecomputeResourceOnlyPlugins"/> on every mod that was newly created during
+    /// this <see cref="PopulateModSettingsAsync"/> call, after analysis has populated <c>NpcFormKeys</c>.
+    ///
+    /// Why this lives here instead of being fixed inside <see cref="ProcessNewModFolderForParallelScanAsync"/>:
+    ///
+    /// The original "bug" surfaces because <see cref="FindAndAddMissingMasters"/> consults
+    /// <c>vm.NpcFormKeys</c> to build <c>npcSourcePluginKeys</c> — the set of plugins whose NPCs are templated
+    /// by this mod and therefore must NOT be re-attached as resource folders. During the initial parallel scan
+    /// the temp VM has no NPCs yet (NpcFormKeys is populated later by <c>RefreshNpcLists</c> inside
+    /// <see cref="AnalyzeModSettingsAsync"/>), so foundation-mod folders (e.g. "Song of the Green") get
+    /// attached to replacers (e.g. "Auri-Replacer.esp") even though they should be excluded.
+    ///
+    /// Three options were considered:
+    ///
+    ///   1. Populate <c>NpcFormKeys</c> on the temp VM before calling <see cref="FindAndAddMissingMasters"/>.
+    ///      This requires a full <c>RefreshNpcLists</c> per mod inside the parallel scan, which duplicates the
+    ///      heavy work that <see cref="AnalyzeModSettingsAsync"/> already does once with caching, race
+    ///      validation, FaceGen reconciliation, and parallelism control. Doing it twice would noticeably slow
+    ///      the first-launch path and create two sources of truth for NPC enumeration.
+    ///
+    ///   2. Inline a lightweight NPC-source extraction (read NPC FormKeys directly from the loaded plugins)
+    ///      and pass them into <see cref="FindAndAddMissingMasters"/> via a new parameter. This works but
+    ///      forks the missing-master logic between two slightly different code paths, and quietly diverges
+    ///      from the well-tested behaviour the 2.1.6 migration relies on. Future fixes to either path would
+    ///      have to be mirrored carefully.
+    ///
+    ///   3. (Chosen) Re-use <see cref="CleanupCorrespondingFolders"/> after analysis, exactly as the 2.1.6
+    ///      migration does. The cleanup is intentionally cheap (folder reset + a single re-scan per mod, which
+    ///      reuses the plugin provider's cache), it operates on the fully-analysed VM, and — crucially — it is
+    ///      the same code that runs on subsequent launches. First-launch users now converge on the same state
+    ///      that returning users already get, with no second source of truth.
+    ///
+    /// The 2.1.6 entry in <see cref="UpdateHandler"/> is intentionally left in place: it still needs to fix
+    /// users whose persisted <c>CorrespondingFolderPaths</c> were polluted by older builds before this fix
+    /// existed. Once a user's settings have been rewritten by either path, both paths become idempotent.
+    /// </summary>
+    private async Task CleanupNewlyCreatedCorrespondingFoldersAsync(VM_SplashScreen? splashReporter,
+        IReadOnlySet<VM_ModSetting> analysisFailedVms)
+    {
+        if (string.IsNullOrWhiteSpace(_settings.ModsFolder) || !Directory.Exists(_settings.ModsFolder))
+        {
+            return;
+        }
+
+        // Analysis-failed VMs are skipped: CleanupCorrespondingFolders keys off NpcFormKeys,
+        // which is empty/partial for them, so it would detach or re-attach folders wrongly
+        // (and CorrespondingFolderPaths is persisted).
+        var newlyCreated = _allModSettingsInternal
+            .Where(vm => vm.IsNewlyCreated && !analysisFailedVms.Contains(vm)).ToList();
+        if (!newlyCreated.Any())
+        {
+            return;
+        }
+
+        splashReporter?.UpdateStep($"Pruning stale corresponding folders for {newlyCreated.Count} new mod(s)...");
+
+        var warnings = new ConcurrentBag<InitializationWarning>();
+
+        await Task.Run(() =>
+        {
+            int processed = 0;
+            foreach (var vm in newlyCreated)
+            {
+                try
+                {
+                    CleanupCorrespondingFolders(vm, warnings);
+                    vm.RecomputeResourceOnlyPlugins();
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine(
+                        $"CleanupNewlyCreatedCorrespondingFoldersAsync: failed for {vm.DisplayName}: {ex.Message}");
+                }
+
+                processed++;
+                splashReporter?.UpdateProgress((double)processed / newlyCreated.Count * 100,
+                    $"Cleaning {vm.DisplayName}...");
+            }
+        });
+
+        if (!warnings.IsEmpty)
+        {
+            Debug.WriteLine("Initial corresponding-folder cleanup warnings:" + Environment.NewLine +
+                            string.Join(Environment.NewLine, warnings));
+        }
+    }
+
+    /// <summary>
+    /// Ctrl+Shift+C — blanks all three filter boxes. See
+    /// <see cref="ISearchFilterHost.ClearSearchFilters"/> for what is deliberately left alone;
+    /// here that is <see cref="SelectedNpcSearchType"/> (the field the NPC box searches, which
+    /// filters nothing on its own once the box is empty) and <see cref="ShowMugshotOnlyMods"/>
+    /// (a display toggle). The setters feed the throttled pipeline in the constructor, so this
+    /// coalesces into one <see cref="ApplyFilters"/> pass.
+    /// </summary>
+    public void ClearSearchFilters()
+    {
+        NameFilterText = string.Empty;
+        PluginFilterText = string.Empty;
+        NpcSearchText = string.Empty;
+    }
+
+    // Filtering Logic (Left Panel)
+    public void ApplyFilters()
+    {
+        // If data is actively being loaded, the underlying collection is unstable.
+        // Clear the public list and exit. The loading process will call this method again when complete.
+        if (IsLoadingNpcData)
+        {
+            ModSettingsList.Clear();
+            return;
+        }
+
+        IEnumerable<VM_ModSetting> filtered = _allModSettingsInternal;
+        
+        if (!ShowMugshotOnlyMods)
+        {
+            filtered = filtered.Where(vm => !vm.IsMugshotOnlyEntry);
+        }
+
+        if (!string.IsNullOrWhiteSpace(NameFilterText))
+        {
+            filtered = filtered.Where(vm =>
+                vm.DisplayName.Contains(NameFilterText, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (!string.IsNullOrWhiteSpace(PluginFilterText))
+        {
+            filtered = filtered.Where(vm => vm.CorrespondingModKeys.Any(key =>
+                key.FileName.String.Contains(PluginFilterText, StringComparison.OrdinalIgnoreCase) ||
+                key.ToString().Contains(PluginFilterText, StringComparison.OrdinalIgnoreCase)
+            ));
+        }
+
+        // *** Apply NPC Filter ***
+        if (!IsLoadingNpcData && !string.IsNullOrWhiteSpace(NpcSearchText))
+        {
+            string searchTextLower = NpcSearchText.Trim().ToLowerInvariant(); // Use invariant culture lowercase
+
+            switch (SelectedNpcSearchType)
+            {
+                case ModNpcSearchType.Name:
+                    filtered = filtered.Where(vm =>
+                        vm.NpcNames.Any(name =>
+                            name.Contains(searchTextLower, StringComparison.OrdinalIgnoreCase)) ||
+                        vm.NpcFormKeysToDisplayName.Values.Any(dName =>
+                            dName.Contains(searchTextLower,
+                                StringComparison.OrdinalIgnoreCase))); // Also check dictionary values
+                    break;
+                case ModNpcSearchType.EditorID:
+                    filtered = filtered.Where(vm =>
+                        vm.NpcEditorIDs.Any(
+                            eid => eid.Contains(searchTextLower, StringComparison.OrdinalIgnoreCase)));
+                    break;
+                case ModNpcSearchType.FormKey:
+                    // Compare string representations of FormKeys
+                    filtered = filtered.Where(vm => vm.NpcFormKeys.Any(fk =>
+                        fk.ToString().Contains(searchTextLower, StringComparison.OrdinalIgnoreCase)));
+                    break;
+            }
+        }
+        // *** End NPC Filter ***
+
+        var previouslySelectedMod = SelectedModForMugshots; // Preserve selection if possible
+
+        ModSettingsList.Clear();
+        var filteredList = filtered.ToList(); // Materialize the list
+        foreach (var vm in filteredList)
+        {
+            ModSettingsList.Add(vm);
+        }
+
+        // Check if the previously selected item for mugshots is still in the filtered list
+        if (previouslySelectedMod != null && !filteredList.Contains(previouslySelectedMod))
+        {
+            // It was filtered out, clear the right panel
+            SelectedModForMugshots = null;
+            DisposeAndClearMugshots();
+        }
+
+
+        System.Diagnostics.Debug.WriteLine(
+            $"ApplyFilters: Displaying {ModSettingsList.Count} of {_allModSettingsInternal.Count} items.");
+    }
+
+    // Add this helper to centralize the logic for adding a guest to settings.
+    // Rejects self-shares (target == guest): such an entry duplicates the NPC's own native
+    // appearance, so its tile is not flagged IsGuestAppearance and can never be unshared. It
+    // would also flag the NPC as a SkyPatcher template donor at the call sites, hiding a real
+    // NPC from the NPC list. Mirrors VM_NpcSelectionBar.AddGuestAppearance.
+    private bool AddGuestAppearanceToSettings(FormKey targetNpcKey, FormKey guestNpcKey, string guestModName, string guestDisplayStr)
+    {
+        if (targetNpcKey.Equals(guestNpcKey))
+        {
+            Debug.WriteLine($"Ignoring self-share of {targetNpcKey} from mod '{guestModName}': " +
+                            "an NPC cannot be shared with itself.");
+            return false;
+        }
+
+        if (!_settings.GuestAppearances.TryGetValue(targetNpcKey, out var guestSet))
+        {
+            guestSet = new HashSet<(string, FormKey, string)>();
+            _settings.GuestAppearances[targetNpcKey] = guestSet;
+        }
+        // The tuple now matches the required (string ModName, FormKey NpcFormKey, string NpcDisplayName) format.
+        return guestSet.Add((guestModName, guestNpcKey, guestDisplayStr));
+    }
+
+    public bool TryGetWinningNpc(FormKey fk, out INpcGetter? npcGetter)
+    {
+        var matchingNpc = _environmentStateProvider.LinkCache.TryResolve<INpcGetter>(fk, out npcGetter);
+        return matchingNpc;
+    }
+
+
+    /// <summary>Whether the user manually designated any antler head part IN
+    /// <paramref name="modName"/> (see
+    /// <see cref="Settings.ModHasManualAntlerDesignation"/>). Lets a per-mod VM
+    /// show its Antler Handling dropdown even when the scan detected no antlers.</summary>
+    public bool HasManualAntlerHeadParts(string? modName) =>
+        _settings.ModHasManualAntlerDesignation(modName);
+
+    /// <summary>Recomputes the HasAntlers flag of the mod named
+    /// <paramref name="modName"/> (so its Antler Handling dropdown appears/hides
+    /// after a manual head-part designation in the 3D preview).</summary>
+    public void RefreshModSettingAntlerState(string? modName)
+    {
+        if (string.IsNullOrEmpty(modName)) return;
+        _allModSettingsInternal.FirstOrDefault(m => m.DisplayName == modName)?.RecomputeHasAntlers();
+    }
+
+    /// <summary>Whether the user manually designated any wig armature IN
+    /// <paramref name="modName"/> (see
+    /// <see cref="Settings.ModHasManualWigDesignation"/>). Lets a per-mod VM
+    /// show its Wig Handling dropdown even when the scan detected no wigs.</summary>
+    public bool HasManualWigDesignations(string? modName) =>
+        _settings.ModHasManualWigDesignation(modName);
+
+    /// <summary>Recomputes the HasWigs flag of the mod named
+    /// <paramref name="modName"/> (so its Wig Handling dropdown appears/hides
+    /// after a manual wig designation in the 3D preview).</summary>
+    public void RefreshModSettingWigState(string? modName)
+    {
+        if (string.IsNullOrEmpty(modName)) return;
+        _allModSettingsInternal.FirstOrDefault(m => m.DisplayName == modName)?.RecomputeHasWigs();
+    }
+
+    // Save Logic
+    public void SaveModSettingsToModel()
+    {
+        int before = _settings.ModSettings.Count;
+        int internalCount = _allModSettingsInternal.Count;
+        NPC_Plugin_Chooser_2.BackEnd.BsaContentsDiag.Log($"SaveModSettingsToModel ENTER — _settings.ModSettings.Count={before} _allModSettingsInternal.Count={internalCount}");
+
+        // Guardrail: never let an invalid environment overwrite good on-disk settings.
+        // A population pass that runs while the environment is Invalid (e.g. the saved
+        // Skyrim release/path doesn't match the launched instance) can produce a
+        // degraded mod list; persisting it here would clobber the user's settings.
+        // Destructive persistence is reserved for a trusted (Valid) environment and the
+        // deliberate mods-folder / Refresh-All flows. A fresh install (no persisted
+        // ModSettings yet) is still allowed through so the startup sync works.
+        if (_environmentStateProvider.Status != EnvironmentStateProvider.EnvironmentStatus.Valid && before > 0)
+        {
+            var msg = $"SaveModSettingsToModel SKIPPED — environment status is {_environmentStateProvider.Status}; preserving {before} existing persisted ModSettings rather than overwriting from {internalCount} in-memory entries.";
+            NPC_Plugin_Chooser_2.BackEnd.BsaContentsDiag.Log(msg);
+            StartupLogger.Log(msg, "WARN");
+            return;
+        }
+
+        _settings.ModSettings.Clear();
+        foreach (var vm in _allModSettingsInternal) // Save from the full list
+        {
+            // Only save if it has meaningful data (Key, Folder Paths, or Mugshot Path)
+            if (!string.IsNullOrWhiteSpace(vm.DisplayName) &&
+                (vm.CorrespondingModKeys.Any() || vm.CorrespondingFolderPaths.Any())) // Check if any keys exist
+            {
+                // Create a new ModSetting model instance
+                var model = vm.SaveToModel();
+                _settings.ModSettings.Add(model);
+            }
+        }
+        NPC_Plugin_Chooser_2.BackEnd.BsaContentsDiag.Log($"SaveModSettingsToModel EXIT — _settings.ModSettings.Count={_settings.ModSettings.Count} (was {before}, internal source {internalCount})");
+
+        System.Diagnostics.Debug.WriteLine(
+            $"DEBUG: SaveModSettingsToModel preparing to save {_settings.ModSettings.Count} items.");
+
+        // Saving the main settings file is handled by VM_Settings on App Exit
+        // string settingsPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Settings.json");
+        // JSONhandler<Settings>.SaveJSONFile(_settings, settingsPath, out bool success, out string exception);
+        // if (!success) { MessageBox.Show($"Error saving settings: {exception}", "Save Error", MessageBoxButton.OK, MessageBoxImage.Error); }
+        // else { System.Diagnostics.Debug.WriteLine("DEBUG: Settings successfully updated in memory by SaveModSettingsToModel."); }
+    }
+
+    /// <summary>
+    /// NPC selections + shares that would be discarded by removing the entry named
+    /// <paramref name="displayName"/> (see <see cref="RemoveModSetting"/>). Exposed for the delete
+    /// confirmation, which lives on VM_ModSetting and has no direct route to the selection bar.
+    /// </summary>
+    public (int Selections, int Shares) CountNpcStateForMod(string displayName) =>
+        _npcSelectionBar.CountNpcStateFromMod(displayName);
+
+    /// <summary>
+    /// Removes the specified VM_ModSetting from the internal list and refreshes the filtered view.
+    /// Also clears the NPC state that referenced it: shares it sourced onto other NPCs, and every
+    /// selection naming it.
+    /// </summary>
+    /// <param name="modSettingToRemove">The VM_ModSetting to remove.</param>
+    /// <returns>True if the item was successfully found and removed; otherwise, false.</returns>
+    public bool RemoveModSetting(VM_ModSetting modSettingToRemove)
+    {
+        if (modSettingToRemove == null) return false;
+
+        bool removed = _allModSettingsInternal.Remove(modSettingToRemove);
+        if (removed)
+        {
+            Debug.WriteLine($"VM_Mods: Removed ModSetting '{modSettingToRemove.DisplayName}' from internal list.");
+            // If the removed mod was selected for mugshots, clear the selection
+            if (SelectedModForMugshots == modSettingToRemove)
+            {
+                SelectedModForMugshots = null;
+                DisposeAndClearMugshots();
+            }
+
+            // Also prune the now-stale reference from each NPC's per-NPC
+            // AppearanceMods snapshot. CreateMugShotViewModelsAsync's SOURCE 1
+            // iterates that snapshot, so without this cleanup the NPCs view
+            // would re-surface a placeholder tile (no AssociatedModSetting,
+            // no ImagePath) for every NPC the removed mod used to provide.
+            foreach (var npc in _npcSelectionBar.AllNpcs)
+            {
+                if (npc.AppearanceMods.Contains(modSettingToRemove))
+                {
+                    npc.AppearanceMods.Remove(modSettingToRemove);
+                }
+            }
+
+            // Persisted shares reference this entry by DisplayName; with the entry gone they
+            // are permanently dead placeholder tiles, so sweep them all (and any SkyPatcher
+            // template flags nothing references anymore) along with it.
+            _npcSelectionBar.PruneStaleGuestAppearances(modSettingToRemove.DisplayName,
+                new HashSet<FormKey>(), new HashSet<FormKey>());
+
+            // Selections name the mod by DisplayName as well, so any NPC still pointing at this
+            // entry (its own face, or a share the sweep above just removed) has to be deselected --
+            // otherwise the NPC keeps counting as "chosen" with nothing able to supply its
+            // appearance. Callers that RENAME rather than retire the mod (the mugshot-merge path in
+            // VM_NpcsMenuMugshot) re-point their selections BEFORE calling in, so they are unaffected.
+            _npcSelectionBar.ClearSelectionsFromMod(modSettingToRemove.DisplayName);
+
+            ApplyFilters(); // Refresh the ModSettingsList (left panel)
+
+            // Dispose the removed VM so its subscriptions to the SingleInstance VM_Settings (and the
+            // other singletons it observes) are severed. An undisposed VM_ModSetting stays rooted for
+            // the life of the app -- the leak class fixed in 2312cb6, which covered the population /
+            // prune / consolidation / blank-slate paths but left this one out. It matters more now
+            // that RefreshSingleModSettingAsync drops rejected entries (own-output token, no
+            // appearance data) through here, so it runs on every refresh, not just a manual delete.
+            //
+            // Deferred to the next scheduler tick rather than disposed inline: VM_ModSetting.Delete
+            // and VM_ModSetting.RefreshAsync both call this from INSIDE one of the VM's own
+            // ReactiveCommands, and those commands live in the composite being disposed -- tearing
+            // one down while its execution pipeline is still unwinding faults the command (and its
+            // ThrownExceptions channel is disposed too, so the fault escalates to the default
+            // handler). The membership re-check keeps a re-added instance from being disposed out
+            // from under the list.
+            var vmToDispose = modSettingToRemove;
+            RxApp.MainThreadScheduler.Schedule(() =>
+            {
+                if (!_allModSettingsInternal.Contains(vmToDispose))
+                {
+                    vmToDispose.Dispose();
+                }
+            });
+        }
+        else
+        {
+            Debug.WriteLine(
+                $"VM_Mods: ModSetting '{modSettingToRemove.DisplayName}' not found in internal list for removal.");
+        }
+
+        return removed;
+    }
+
+    /// <summary>
+    /// Tries to find an existing VM_ModSetting matching the plugin key.
+    /// It searches based on the CorrespondingModKey property of the VM_ModSettings.
+    /// </summary>
+    /// <param name="appearancePluginKey">The ModKey of the appearance plugin to search for.</param>
+    /// <param name="foundVms">Output: The found VM_ModSetting instances if a match exists; otherwise, empty list.</param>
+    /// <returns>True if a matching VM_ModSetting was found based on the CorrespondingModKey, false otherwise.</returns>
+    public bool TryGetModSettingForPlugin(ModKey appearancePluginKey, out List<VM_ModSetting> foundVms)
+    {
+        // Initialize output parameters
+        foundVms = new();
+
+        // Check if the input ModKey is valid (not null or default)
+        if (appearancePluginKey.IsNull)
+        {
+            Debug.WriteLine($"TryGetModSettingForPlugin: Received an invalid (IsNull) ModKey.");
+            // Keep foundVm as null and modDisplayName as the default set above.
+            return false; // Cannot find a match for an invalid key.
+        }
+
+        // Search the internal list of all loaded/created mod settings.
+        // Find the first VM where *any* of its CorrespondingModKeys matches the input key.
+        foundVms = _allModSettingsInternal.Where(vm =>
+            vm.CorrespondingModKeys.Any(key => key.Equals(appearancePluginKey))).ToList();
+
+        if (foundVms.Count > 1)
+        {
+            foundVms = foundVms.Where(x => !x.IsFaceGenOnlyEntry).ToList();
+        }
+
+        return foundVms.Any();
+    }
+
+    /// <summary>
+    /// Called after a Mod Folder Path or Mugshot Folder Path is potentially changed on a VM_ModSetting.
+    /// Checks if this change links it to another complementary VM (one with only mugshots, one with only mods)
+    /// and performs an automatic merge if conditions are met.
+    /// </summary>
+    /// <param name="modifiedVm">The VM that the user directly modified.</param>
+    /// <param name="addedOrSetPath">The specific path that was added or set.</param>
+    /// <param name="pathType">Indicates whether a ModFolder or MugshotFolder was changed.</param>
+    /// <param name="hadMugshotPathBefore">Did modifiedVm have a mugshot path BEFORE this change?</param>
+    /// <param name="hadModPathsBefore">Did modifiedVm have mod paths BEFORE this change?</param>
+    public async Task CheckForAndPerformMergeAsync(VM_ModSetting modifiedVm, string addedOrSetPath, PathType pathType,
+        bool hadMugshotPathBefore, bool hadModPathsBefore)
+    {
+        if (modifiedVm == null || string.IsNullOrEmpty(addedOrSetPath)) return;
+
+        VM_ModSetting? sourceVm = null; // The potential VM to merge *from*
+
+        // Find a potential source VM that contains the path added/set to the modified VM
+        foreach (var vm in _allModSettingsInternal)
+        {
+            if (vm == modifiedVm) continue; // Don't compare to self
+
+            bool pathMatches = false;
+            if (pathType == PathType.ModFolder &&
+                vm.CorrespondingFolderPaths.Contains(addedOrSetPath, StringComparer.OrdinalIgnoreCase))
+            {
+                pathMatches = true;
+            }
+            else if (pathType == PathType.MugshotFolder &&
+                     vm.MugShotFolderPaths.Contains(addedOrSetPath, StringComparer.OrdinalIgnoreCase))
+            {
+                pathMatches = true;
+            }
+
+            if (pathMatches)
+            {
+                sourceVm = vm;
+                break; // Found a potential source containing the path
+            }
+        }
+
+        if (sourceVm == null) return; // No other VM contains this specific path
+
+        // Now check if the merge conditions based on initial states are met
+        bool mergeConditionsMet = false;
+        VM_ModSetting winner = modifiedVm; // Assume the modified VM is the winner initially
+        VM_ModSetting loser = sourceVm;
+
+        if (pathType == PathType.ModFolder)
+        {
+            // User added a Mod Folder path to 'modifiedVm'
+            // Conditions:
+            // 1. 'modifiedVm' previously ONLY had mugshots (hadMugshotPathBefore=true, hadModPathsBefore=false)
+            // 2. 'sourceVm' previously ONLY had this specific mod path and NO mugshots
+            bool sourceHadOnlyThisModPath = sourceVm.CorrespondingFolderPaths.Count == 1 &&
+                                            sourceVm.CorrespondingFolderPaths.Contains(addedOrSetPath,
+                                                StringComparer.OrdinalIgnoreCase);
+            bool sourceHadNoMugshots = !sourceVm.MugShotFolderPaths.Any();
+
+            if (hadMugshotPathBefore && !hadModPathsBefore && sourceHadOnlyThisModPath && sourceHadNoMugshots)
+            {
+                mergeConditionsMet = true;
+                // Winner = modifiedVm, Loser = sourceVm (Correctly initialized)
+            }
+        }
+        else // pathType == PathType.MugshotFolder
+        {
+            // User set the Mugshot Folder path on 'modifiedVm'
+            // Conditions:
+            // 1. 'modifiedVm' previously ONLY had mod paths (hadMugshotPathBefore=false, hadModPathsBefore=true)
+            // 2. 'sourceVm' previously had this specific mugshot path and NO mod paths
+            bool sourceHadOnlyThisMugshot =
+                sourceVm.MugShotFolderPaths.Contains(addedOrSetPath, StringComparer.OrdinalIgnoreCase) &&
+                !sourceVm.HasModPathsAssigned; // Check current state is okay
+            bool sourceHadNoModPaths = !sourceVm.HasModPathsAssigned; // Redundant check, but clear
+
+            if (!hadMugshotPathBefore && hadModPathsBefore && sourceHadOnlyThisMugshot)
+            {
+                mergeConditionsMet = true;
+                // Winner = modifiedVm, Loser = sourceVm (Correctly initialized)
+            }
+        }
+
+
+        // Perform the merge if conditions are met
+        if (mergeConditionsMet)
+        {
+            Debug.WriteLine($"Merge Condition Met: Merging '{loser.DisplayName}' into '{winner.DisplayName}'");
+
+            // --- Perform Merge Actions ---
+            // 1. Transfer necessary data (loser -> winner)
+            // Mugshot Path (only if winner doesn't have one)
+            if (!winner.HasMugshotPathAssigned && loser.HasMugshotPathAssigned)
+            {
+                foreach (var path in loser.MugShotFolderPaths)
+                {
+                    winner.MugShotFolderPaths.Add(path);
+                }
+            }
+
+            // Mod Folder Paths (add paths from loser not already in winner)
+            foreach (var path in loser.CorrespondingFolderPaths)
+            {
+                if (!winner.CorrespondingFolderPaths.Contains(path, StringComparer.OrdinalIgnoreCase))
+                {
+                    winner.CorrespondingFolderPaths.Add(path);
+                }
+            }
+
+            // Carry the loser's folder locks across with the folders themselves — the winner now owns
+            // those paths, and an unlocked copy would be dropped by its next Refresh.
+            foreach (var lockedPath in loser.LockedFolderPaths.ToList())
+            {
+                winner.SetFolderLocked(lockedPath, true);
+            }
+
+            // Merge Corresponding Mod Keys (add keys from loser not already in winner)
+            foreach (var key in loser.CorrespondingModKeys)
+            {
+                if (!winner.CorrespondingModKeys.Contains(key))
+                {
+                    winner.CorrespondingModKeys.Add(key);
+                }
+            }
+
+            // Merge NpcPluginDisambiguation: Loser's choices might be relevant if winner didn't have them
+            foreach (var disambiguationEntry in loser.NpcPluginDisambiguation)
+            {
+                if (!winner.NpcPluginDisambiguation.ContainsKey(disambiguationEntry.Key))
+                {
+                    // Only add if the plugin is now part of the winner's CorrespondingModKeys
+                    if (winner.CorrespondingModKeys.Contains(disambiguationEntry.Value))
+                    {
+                        winner.NpcPluginDisambiguation[disambiguationEntry.Key] = disambiguationEntry.Value;
+                    }
+                }
+            }
+
+            // IsMugshotOnlyEntry should remain based on the WINNER's original status
+            // Although, if a merge happens, it's unlikely the winner was mugshot-only. Let's set it to false.
+            winner.IsMugshotOnlyEntry = false;
+
+            // Refresh NPC lists for the winner as its sources may have changed/**/
+
+            var faceGenCache = await CacheFaceGenPathsOnLoadAsync(new[] { winner }, null);
+
+            var winnerFolderPaths = winner.CorrespondingFolderPaths.ToHashSet();
+            var plugins = _pluginProvider.LoadPlugins(winner.CorrespondingModKeys,
+                winnerFolderPaths, out var loadedWinnerPaths);
+            Task.Run(() => winner.RefreshNpcLists(faceGenCache.allFaceGenLooseFiles, faceGenCache.allFaceGenBsaFiles, plugins, _settings.LocalizationLanguage));
+            _pluginProvider.UnloadPlugins(loadedWinnerPaths);
+
+            // 2. Update NPC Selections (_model.SelectedAppearanceMods via _consistencyProvider)
+            string loserName = loser.DisplayName;
+            string winnerName = winner.DisplayName;
+            var selectionsToUpdate = _settings.SelectedAppearanceMods
+                .Where(kvp => kvp.Value.ModName.Equals(loserName, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (selectionsToUpdate.Any())
+            {
+                Debug.WriteLine(
+                    $"Updating {selectionsToUpdate.Count} NPC selections from '{loserName}' to '{winnerName}'.");
+                foreach (var selection in selectionsToUpdate)
+                {
+                    var targetNpcKey = selection.Key;
+                    var originalSourceNpcKey = selection.Value.NpcFormKey;
+
+                    // Call SetSelectedMod with the new winner mod name, but the original source NPC key.
+                    _consistencyProvider.SetSelectedMod(targetNpcKey, winnerName, originalSourceNpcKey);
+                }
+            }
+
+            // 3. Update the stale data cache within the NPC view model's list
+            foreach (var npcVM in _npcSelectionBar.AllNpcs)
+            {
+                var modToRemove = npcVM.AppearanceMods.FirstOrDefault(m => m == loser);
+                if (modToRemove != null)
+                {
+                    npcVM.AppearanceMods.Remove(modToRemove);
+                    if (!npcVM.AppearanceMods.Contains(winner))
+                    {
+                        npcVM.AppearanceMods.Add(winner);
+                    }
+                }
+            }
+
+            // 4. Remove Loser VM
+            bool removed = _allModSettingsInternal.Remove(loser);
+            // References were redirected to the winner above, so the loser is now
+            // discarded -- dispose it to detach its singleton subscriptions.
+            loser.Dispose();
+            Debug.WriteLine($"Removed loser VM '{loserName}': {removed}");
+
+            // 5. Refresh UI
+            ApplyFilters(); // Refreshes the Mods view
+            _npcSelectionBar.RefreshCurrentNpcAppearanceSources();
+        }
+    }
+
+    public async Task RefreshAllModSettingsAsync(VM_SplashScreen? splashReporter)
+    {
+        bool createdSplashReporter = false;
+        if (splashReporter == null)
+        {
+            splashReporter = VM_SplashScreen.InitializeAndShow(App.ProgramVersion, keepTopMost: false);
+            createdSplashReporter = true;
+        }
+
+        try
+        {
+            splashReporter.UpdateStep("Backing up current settings...");
+            await Task.Delay(100); // give UI time to update
+
+            // a) Backup selections from the consistency provider
+            var selectionBackup =
+                new Dictionary<FormKey, (string ModName, FormKey NpcFormKey)>(_settings.SelectedAppearanceMods);
+
+            // b) Backup specific mod settings
+            var settingsBackup = _allModSettingsInternal.ToDictionary(
+                vm => vm.DisplayName,
+                vm => new ModSettingsBackup(
+                    new List<string>(vm.MugShotFolderPaths),
+                    new List<string>(vm.CorrespondingFolderPaths),
+                    new List<string>(vm.LockedFolderPaths),
+                    vm.MergeInDependencyRecords,
+                    vm.HasAlteredMergeLogic,
+                    vm.IncludeOutfits,
+                    vm.HandleInjectedRecords,
+                    vm.HasAlteredHandleInjectedRecordsLogic,
+                    vm.OverrideRecordOverrideHandlingMode
+                )
+            );
+            
+            if (ShouldRescanNonAppearanceMods)
+            {
+                splashReporter.UpdateStep("Clearing non-appearance mod cache...");
+                await Task.Delay(100);
+                _settings.CachedNonAppearanceMods.Clear();
+                _settings.CachedMissingMasterMods.Clear(); // Keyed on the above; orphans have nothing to describe.
+                ShouldRescanNonAppearanceMods = false; // Reset after use
+            }
+            else
+            {
+                PruneMissingNonAppearanceMods();
+            }
+
+            splashReporter.UpdateStep("Clearing existing mod data...");
+            await Task.Delay(100);
+
+            // Wipe the analysis logs wholesale rather than per mod: this rebuild discards every VM
+            // and re-derives the list from disk, so a mod that was renamed or removed is never
+            // visited again and its per-mod files would survive as phantom entries in the
+            // Settings > Rejected NPCs tree. Runs before the repopulation below writes new ones.
+            //
+            // Safe only because every mod is re-analysed on the way back: LastKnownState is
+            // persisted on the model, and _settings.ModSettings.Clear() below drops it, so the
+            // rebuilt VMs all miss the AnalyzeModSettingsAsync cache and rewrite their logs. If
+            // this path ever starts preserving the snapshots, cache-hit mods would skip
+            // RefreshNpcLists and this wipe would silently delete logs nothing regenerates.
+            AnalysisLogCleaner.ClearAll();
+
+            // c) Clear internal lists to generate a blank slate
+            _consistencyProvider.ClearAllSelections();
+            // Dispose before clearing: this reset clears the list before the
+            // repopulation below, so InitializePopulation's disposal won't see these.
+            foreach (var oldVm in _allModSettingsInternal)
+            {
+                oldVm.Dispose();
+            }
+            _allModSettingsInternal.Clear();
+            ModSettingsList.Clear();
+            SelectedModForMugshots = null;
+            DisposeAndClearMugshots();
+            _settings.ModSettings.Clear(); // Clear from the persistent model
+
+            // d) Repopulate all mods from scratch
+            await PopulateModSettingsAsync(splashReporter);
+
+            splashReporter.UpdateStep("Restoring user settings...");
+            await Task.Delay(100);
+
+            // Prepare to find and remove redundant mugshot-only entries
+            var redundantMugshotOnlyVmsToRemove = new HashSet<VM_ModSetting>();
+            var mugshotOnlyVmLookup = _allModSettingsInternal
+                .Where(vm => vm.IsMugshotOnlyEntry)
+                .ToDictionary(vm => vm.DisplayName, StringComparer.OrdinalIgnoreCase);
+
+            // e) Restore settings for each mod that still exists
+            foreach (var vm in _allModSettingsInternal)
+            {
+                if (settingsBackup.TryGetValue(vm.DisplayName, out var backup))
+                {
+                    try
+                    {
+                        // Suppress confirmation pop-ups during restoration
+                        vm.IsPerformingBatchAction = true;
+
+                        // Restore mugshot folders and check for redundancy
+                        foreach (var path in backup.MugShotFolderPaths)
+                        {
+                            if (!vm.MugShotFolderPaths.Contains(path, StringComparer.OrdinalIgnoreCase))
+                            {
+                                vm.MugShotFolderPaths.Add(path);
+                                string folderName = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar,
+                                    Path.AltDirectorySeparatorChar));
+                                if (!string.IsNullOrEmpty(folderName) &&
+                                    mugshotOnlyVmLookup.TryGetValue(folderName, out var redundantVm))
+                                {
+                                    redundantMugshotOnlyVmsToRemove.Add(redundantVm);
+                                }
+                            }
+                        }
+
+                        // Restore locked folders. This rebuild re-derived CorrespondingFolderPaths from
+                        // disk, so any folder the master-chain detector can't see (the silent resource
+                        // dependencies locking exists for) is missing from the fresh VM; put them back
+                        // where they sat relative to their surviving neighbours.
+                        RestoreLockedFoldersAfterFullRebuild(vm, backup);
+
+                        // Restore settings
+                        vm.OverrideRecordOverrideHandlingMode = backup.OverrideRecordOverrideHandlingMode;
+                        vm.IncludeOutfits = backup.IncludeOutfits;
+
+                        // Only restore merge/injected settings if they were manually altered by the user before
+                        if (backup.HasAlteredMergeLogic)
+                        {
+                            vm.MergeInDependencyRecords = backup.MergeInDependencyRecords;
+                            vm.HasAlteredMergeLogic = true;
+                        }
+
+                        if (backup.HasAlteredHandleInjectedRecordsLogic)
+                        {
+                            vm.HandleInjectedRecords = backup.HandleInjectedRecords;
+                            vm.HasAlteredHandleInjectedRecordsLogic = true;
+                        }
+                    }
+                    finally
+                    {
+                        // Ensure the flag is always reset
+                        vm.IsPerformingBatchAction = false;
+                    }
+                }
+            }
+
+            // Remove the identified redundant VMs from the master list
+            if (redundantMugshotOnlyVmsToRemove.Any())
+            {
+                _allModSettingsInternal.RemoveAll(redundantMugshotOnlyVmsToRemove.Contains);
+                foreach (var redundantVm in redundantMugshotOnlyVmsToRemove)
+                {
+                    redundantVm.Dispose(); // redundant mugshot-only VM; discarded
+                }
+                ApplyFilters(); // Refresh the UI list to reflect the removals
+            }
+
+            splashReporter.UpdateStep("Restoring NPC selections...");
+            await Task.Delay(100);
+
+            // Restore the backed-up NPC appearance selections
+            _consistencyProvider.RestoreSelections(selectionBackup);
+
+            // Rebuild the main NPC list based on the newly refreshed mod data
+            splashReporter.UpdateStep("Rebuilding NPC list...");
+            await _npcSelectionBar.InitializeAsync(splashReporter);
+
+            // The logs were wiped and rewritten above, so anything the Settings panels already
+            // parsed is describing mods and folders from before this refresh.
+            NotifyAnalysisLogsRewritten();
+
+            splashReporter.UpdateStep("Refresh complete.");
+            await Task.Delay(500); // let user see the final message
+        }
+        catch (Exception ex)
+        {
+            ScrollableMessageBox.ShowError($"An unexpected error occurred during the refresh process:\n\n{ExceptionLogger.GetExceptionStack(ex)}");
+        }
+        finally
+        {
+            if (createdSplashReporter)
+            {
+                await splashReporter.CloseSplashScreenAsync();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Re-applies a pre-Refresh-All lock set to a freshly rebuilt VM.
+    ///
+    /// <para>Unlike the single-mod path, there is no live "before" list to anchor against — the VM was
+    /// thrown away and rebuilt from disk — so the ordered folder snapshot taken in
+    /// <see cref="RefreshAllModSettingsAsync"/> serves as the anchor list instead. Auto-generated
+    /// entries are skipped: their folder lists are synthesised, not user-curated.</para>
+    /// </summary>
+    private void RestoreLockedFoldersAfterFullRebuild(VM_ModSetting vm, ModSettingsBackup backup)
+    {
+        if (vm.IsAutoGenerated || backup.LockedFolderPaths.Count == 0) return;
+
+        foreach (var lockedPath in backup.LockedFolderPaths)
+        {
+            vm.SetFolderLocked(lockedPath, true);
+        }
+
+        // Reconcile against the VM's own lock list, not the backup: SetFolderLocked drops locks that
+        // land on the rebuilt VM's primary folder, and that folder must not be repositioned.
+        if (vm.LockedFolderPaths.Count == 0) return;
+
+        var reconciled = LockedFolderOrdering.Reconcile(
+            vm.CorrespondingFolderPaths, backup.CorrespondingFolderPaths, vm.LockedFolderPaths);
+
+        if (reconciled.SequenceEqual(vm.CorrespondingFolderPaths, StringComparer.OrdinalIgnoreCase)) return;
+
+        vm.CorrespondingFolderPaths.Clear();
+        foreach (var path in reconciled)
+        {
+            vm.CorrespondingFolderPaths.Add(path);
+        }
+
+        vm.UpdateCorrespondingModKeys();
+        StartupLogger.Log($"[RefreshAll] '{vm.DisplayName}' restored {vm.LockedFolderPaths.Count} locked folder(s); final order=[{string.Join(", ", reconciled.Select(Path.GetFileName))}]");
+    }
+
+    /// <summary>
+    /// Drops cached non-appearance entries whose mod folder is gone from disk.
+    ///
+    /// <para>Deliberately narrower than clearing the whole cache: that dictionary is the skip list
+    /// in <see cref="ScanForModsInModFolderAsync"/>, so emptying it turns every Refresh All into a
+    /// full cold re-scan of every non-appearance folder — which is what the "rescan non-appearance
+    /// mods" checkbox exists to opt into. A path that no longer exists, though, can never be
+    /// re-derived by any future scan, so it is pure stale UI in Settings &gt; Mod Import Settings
+    /// and costs nothing to drop.</para>
+    /// </summary>
+    private void PruneMissingNonAppearanceMods()
+    {
+        // Directory.Exists is false for null/blank, so junk keys are pruned by the same test.
+        var missing = _settings.CachedNonAppearanceMods.Keys
+            .Where(path => !Directory.Exists(path))
+            .ToList();
+
+        foreach (var path in missing)
+        {
+            _settings.CachedNonAppearanceMods.Remove(path);
+            _settings.CachedMissingMasterMods.Remove(path); // Keyed on the above; keep the subset invariant.
+        }
+
+        if (missing.Any())
+        {
+            Debug.WriteLine($"[RefreshAll] Pruned {missing.Count} non-appearance cache entries whose folder no longer exists.");
+        }
+    }
+
+    /// <summary>
+    /// Re-syncs the Settings tab after the analysis logs and caches have been rebuilt. Both panels
+    /// snapshot their data (the Rejected NPCs tree parses the folder once; the non-appearance list
+    /// is a projection built at load), so without this a refresh leaves them showing the previous
+    /// scan's mods. Guarded on IsValueCreated so this never forces VM_Settings into existence.
+    ///
+    /// <para>Called from the two user-driven refreshes — Refresh All here, and a single mod's
+    /// Refresh in VM_ModSetting — but deliberately NOT from RefreshSingleModSettingAsync itself,
+    /// which also runs per-mod inside the UpdateHandler recovery loop and once per newly added
+    /// mod, where a reload per call would be pure churn.</para>
+    /// </summary>
+    public void NotifyAnalysisLogsRewritten()
+    {
+        if (!_lazySettingsVM.IsValueCreated)
+        {
+            return;
+        }
+
+        try
+        {
+            var settingsVm = _lazySettingsVM.Value;
+            settingsVm.RefreshNonAppearanceMods();
+            settingsVm.RejectedNpcs.Invalidate();
+        }
+        catch (Exception ex)
+        {
+            // Cosmetic resync — never let it fail the refresh the user actually asked for.
+            Debug.WriteLine($"Could not refresh Settings panels after mod analysis: {ExceptionLogger.GetExceptionStack(ex)}");
+        }
+    }
+
+    public void SignalScrollToMod(VM_ModSetting? modSetting)
+    {
+        if (modSetting != null)
+        {
+            Debug.WriteLine($"VM_Mods: Explicit signal to scroll to ModSetting {modSetting.DisplayName}");
+            _requestScrollToModSubject.OnNext(modSetting);
+        }
+        else
+        {
+            _requestScrollToModSubject.OnNext(null);
+        }
+    }
+
+    /// <summary>
+    /// Called by VM_ModSetting when a single NPC's source plugin has changed.
+    /// This might trigger a refresh of the mugshots if the display depends on the chosen source.
+    /// </summary>
+    public void NotifyNpcSourceChanged(VM_ModSetting modSetting, FormKey npcKey)
+    {
+        Debug.WriteLine(
+            $"VM_Mods: Notified that source for NPC {npcKey} changed in ModSetting '{modSetting.DisplayName}'.");
+        // If the affected modSetting is the one currently displayed for mugshots,
+        // and the mugshot display logic considers the *chosen* source, then refresh.
+        if (SelectedModForMugshots == modSetting)
+        {
+            // Reload mugshots for the selected mod
+            ShowMugshotsCommand.Execute(modSetting).Subscribe().DisposeWith(_disposables);
+        }
+    }
+
+    /// <summary>
+    /// Called by VM_ModSetting when multiple NPC source plugins might have changed (e.g., by global set).
+    /// </summary>
+    public void NotifyMultipleNpcSourcesChanged(VM_ModSetting modSetting)
+    {
+        Debug.WriteLine(
+            $"VM_Mods: Notified that multiple NPC sources may have changed in ModSetting '{modSetting.DisplayName}'.");
+        if (SelectedModForMugshots == modSetting)
+        {
+            ShowMugshotsCommand.Execute(modSetting).Subscribe().DisposeWith(_disposables);
+        }
+    }
+
+    // For passing plugin provider to sub-view-models (seems faster than doing it via AutoFac)
+    public PluginProvider GetPluginProvider()
+    {
+        return _pluginProvider;
+    }
+
+    /// <summary>
+    /// Asynchronously checks if any of the given mods in a folder modify NPC appearance.
+    /// </summary>
+    private async Task<bool> ContainsAppearancePluginsAsync(IEnumerable<ModKey> modKeysInMod,
+        HashSet<string> modFolderPaths)
+    {
+        foreach (var modKey in modKeysInMod)
+        {
+            if (_environmentStateProvider.BaseGamePlugins.Contains(modKey))
+            {
+                return true;
+            }
+
+            // TryGetPlugin is likely a fast, synchronous operation.
+            if (_pluginProvider.TryGetPlugin(modKey, modFolderPaths, out var plugin) && plugin != null)
+            {
+                StartupLogger.Log($"    Checking plugin: {modKey.FileName} for new NPCs");
+                bool pluginProvidesNewNpcs = false;
+                using (ContextualPerformanceTracer.Trace("PopulateMods.PluginProvidesNewNpcs"))
+                {
+                    if (await PluginProvidesNewNpcs(plugin))
+                    {
+                        return true;
+                    }
+                }
+
+                StartupLogger.Log($"    Checking plugin: {modKey.FileName} for appearance modifications");
+                using (ContextualPerformanceTracer.Trace("PopulateMods.PluginModifiesAppearanceAsync"))
+                {
+                    if (await PluginModifiesAppearanceAsync(plugin, modKeysInMod))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private Task<bool> PluginProvidesNewNpcs(ISkyrimModGetter mod)
+    {
+        // Use Task.Run to execute the synchronous, CPU-bound logic on a thread pool thread.
+        return Task.Run(() =>
+        {
+            foreach (var npc in mod.Npcs)
+            {
+                if (npc.FormKey.ModKey.Equals(mod.ModKey))
+                {
+                    return true; // not an overridden NPC
+                }
+            }
+
+            return false;
+        });
+    }
+
+    /// <summary>
+    /// Offloads the CPU-intensive work of checking for NPC appearance modifications to a background thread.
+    /// </summary>
+    private Task<bool> PluginModifiesAppearanceAsync(ISkyrimModGetter mod, IEnumerable<ModKey> allKeysInCurrentMod)
+    {
+        // Use Task.Run to execute the synchronous, CPU-bound logic on a thread pool thread.
+        return Task.Run(() =>
+        {
+            var candidateMasters = mod.ModHeader.MasterReferences.Select(x => x.Master)
+                .Where(x => !allKeysInCurrentMod.Contains(x))
+                .ToHashSet();
+
+            var enabledMasters = _environmentStateProvider.LoadOrder.PriorityOrder
+                .Where(x => candidateMasters.Contains(x.ModKey))
+                .ToList();
+
+            var tempLinkCache = mod.ToImmutableLinkCache();
+            foreach (var npc in mod.Npcs)
+            {
+                if (npc.FormKey.ModKey.Equals(mod.ModKey))
+                {
+                    continue; // not an overridden NPC
+                }
+
+                if (!tempLinkCache.TryResolve<INpcGetter>(npc.FormKey, out var npcGetter))
+                {
+                    continue;
+                }
+
+                foreach (var listing in enabledMasters)
+                {
+                    var baseNpcGetter = listing.Mod?.Npcs.FirstOrDefault(x => x.FormKey.Equals(npc.FormKey));
+                    if (baseNpcGetter != null)
+                    {
+                        // A series of comparisons to check for appearance changes.
+                        if ((npcGetter.FaceMorph != null && baseNpcGetter.FaceMorph == null) ||
+                            (npcGetter.FaceMorph != null && !npcGetter.FaceMorph.Equals(baseNpcGetter.FaceMorph)) ||
+                            (npcGetter.FaceParts != null && baseNpcGetter.FaceParts == null) ||
+                            (npcGetter.FaceParts != null && !npcGetter.FaceParts.Equals(baseNpcGetter.FaceParts)) ||
+                            !npcGetter.Height.Equals(baseNpcGetter.Height) ||
+                            !npcGetter.Weight.Equals(baseNpcGetter.Weight) ||
+                            !npcGetter.TextureLighting.Equals(baseNpcGetter.TextureLighting) ||
+                            !npcGetter.HeadTexture.Equals(baseNpcGetter.HeadTexture) ||
+                            !npcGetter.WornArmor.Equals(baseNpcGetter.WornArmor) ||
+                            !npcGetter.HeadParts.Count.Equals(baseNpcGetter.HeadParts.Count) ||
+                            !npcGetter.TintLayers.Count.Equals(baseNpcGetter.TintLayers.Count) ||
+                            !npcGetter.HairColor.Equals(baseNpcGetter.HairColor)
+                           )
+                        {
+                            return true;
+                        }
+
+                        foreach (var headPart in npcGetter.HeadParts)
+                        {
+                            if (!baseNpcGetter.HeadParts.Contains(headPart))
+                            {
+                                return true;
+                            }
+                        }
+
+                        foreach (var tintLayer in npcGetter.TintLayers)
+                        {
+                            if (!baseNpcGetter.TintLayers.Contains(tintLayer))
+                            {
+                                return true;
+                            }
+                        }
+
+                        bool npcGetterUsesTemplate = Auxilliary.IsValidTemplatedNpc(npcGetter);
+                        bool baseNpcGetterUsesTemplate = Auxilliary.IsValidTemplatedNpc(baseNpcGetter);
+
+                        if (npcGetterUsesTemplate != baseNpcGetterUsesTemplate)
+                        {
+                            return true;
+                        }
+
+                        if (npcGetterUsesTemplate && baseNpcGetterUsesTemplate &&
+                            !npcGetter.Template.Equals(baseNpcGetter.Template))
+                        {
+                            return true;
+                        }
+
+                        break; // Analyzed highest priority mod containing this NPC; no need to look further
+                    }
+                }
+            }
+
+            return false;
+        });
+    }
+
+    public ConcurrentDictionary<(string pluginSourcePath, ModKey modKey), bool> GetOverrideCache()
+    {
+        return _overridesCache;
+    }
+
+    public bool UpdateTemplates(FormKey npcFormKey, VM_ModSetting modSettingVM)
+    {
+        int maxCycleCount = 50; // this should be way overkill
+        List<(FormKey formKey, string displayName)> templateChain = new();
+        List<string> errorMessages = new();
+
+        Dictionary<ModKey, ISkyrimModGetter> plugins = new();
+        foreach (var modKey in modSettingVM.CorrespondingModKeys)
+        {
+            if (_pluginProvider.TryGetPlugin(modKey, modSettingVM.CorrespondingFolderPaths.ToHashSet(),
+                    out var plugin) && plugin != null)
+            {
+                plugins.Add(modKey, plugin);
+            }
+        }
+
+        // --- Early-out: check the session cache before doing the expensive chain walk ---
+        // If onboarding already determined this NPC's chain ends in a Leveled NPC, skip the full traversal.
+        INpcGetter? earlyNpcGetter = null;
+        // Try to resolve from the mod's own plugins first
+        foreach (var plugin in plugins.Values)
+        {
+            earlyNpcGetter = plugin.Npcs.FirstOrDefault(n => n.FormKey == npcFormKey);
+            if (earlyNpcGetter != null) break;
+        }
+        // Fall back to link cache
+        if (earlyNpcGetter == null)
+        {
+            _environmentStateProvider.LinkCache.TryResolve<INpcGetter>(npcFormKey, out earlyNpcGetter);
+        }
+
+        if (earlyNpcGetter != null && 
+            Auxilliary.IsValidTemplatedNpc(earlyNpcGetter) &&
+            _aux.TemplateChainTerminatesInLeveledNpc(earlyNpcGetter, plugins.Values))
+        {
+            ScrollableMessageBox.ShowWarning(
+                "This NPC appearance uses a template whose template chain ends with a Leveled NPC. " +
+                "Therefore, you cannot select a unique appearance for it.");
+            return false;
+        }
+
+        int cycleCount = 0;
+        ISkyrimModGetter? sourcePlugin = null;
+        INpcGetter? currentNpcGetter = null;
+        List<FormKey> fromLinkCacheOnly = new(); // don't try to set the appearance mod for these NPCs
+        while (cycleCount < maxCycleCount)
+        {
+            var availablePlugins = modSettingVM.AvailablePluginsForNpcs.TryGetValue(npcFormKey);
+            // note: availablePlugins might be null if the given template doesn't come with FaceGen, causing the modSetting to reject it as an appearance mod.
+            // Fall back to the link cache in this case
+            if (availablePlugins != null && availablePlugins.Any())
+            {
+                if (availablePlugins != null && availablePlugins.Count == 1)
+                {
+                    if (plugins.TryGetValue(availablePlugins.First(), out var plugin))
+                    {
+                        sourcePlugin = plugin;
+                    }
+                    else
+                    {
+                        errorMessages.Add(
+                            $"Could not find plugin {availablePlugins.First()} for {npcFormKey} within {modSettingVM.DisplayName}.");
+                        break;
+                    }
+                }
+                else if (modSettingVM.NpcPluginDisambiguation.TryGetValue(npcFormKey, out var disambiguation))
+                {
+                    if (plugins.TryGetValue(disambiguation, out var plugin))
+                    {
+                        sourcePlugin = plugin;
+                    }
+                    else
+                    {
+                        errorMessages.Add(
+                            $"Could not find plugin {disambiguation} for {npcFormKey} within {modSettingVM.DisplayName}.");
+                        break;
+                    }
+                }
+                else
+                {
+                    errorMessages.Add(
+                        $"Could not determine source plugin for {npcFormKey} within plugin {modSettingVM.DisplayName}: [{string.Join(", ", availablePlugins)}])");
+                    break;
+                }
+            }
+            else if (_environmentStateProvider.LinkCache.TryResolve<ILeveledNpcGetter>(npcFormKey,
+                         out var leveledNpcGetter))
+            {
+                var newEntry = (leveledNpcGetter.FormKey, Auxilliary.GetLogString(leveledNpcGetter, _settings.LocalizationLanguage, true));
+                templateChain.Add(newEntry);
+                
+                ScrollableMessageBox.ShowWarning(TranslationServiceProvider.GetService()?.GetString("msg_templateChainEndsWithLeveledNpc") ?? "This NPC appearance uses a template whose template chain ends with a Leveled NPC. Therefore, you cannot select a unique appearance for it." 
+                                                 + Environment.NewLine + $"Template Chain: {string.Join(" -> ", templateChain.Select(x => x.displayName))}");
+                return false;
+            }
+            else if (_environmentStateProvider.LinkCache.TryResolve<INpcGetter>(npcFormKey, out currentNpcGetter) && currentNpcGetter != null)
+            {
+                fromLinkCacheOnly.Add(currentNpcGetter.FormKey);
+                sourcePlugin = null;
+            }
+            else
+            {
+                 errorMessages.Add(
+                    $"Could not find any available plugins for {npcFormKey} within {modSettingVM.DisplayName}");
+                break;
+            }
+
+            if (sourcePlugin != null || currentNpcGetter != null)
+            {
+                if (sourcePlugin != null)
+                {
+                    currentNpcGetter =  sourcePlugin.Npcs.Where(x => x.FormKey.Equals(npcFormKey)).FirstOrDefault();   
+                }
+                    
+                if (currentNpcGetter is null)
+                {
+                    errorMessages.Add(
+                        $"Could not find {npcFormKey} in {sourcePlugin.ModKey.FileName} even though analysis indicates it should be there");
+                    break;
+                }
+
+                var newEntry = (currentNpcGetter.FormKey, Auxilliary.GetLogString(currentNpcGetter, _settings.LocalizationLanguage, true));
+                templateChain.Add(newEntry);
+
+                if (Auxilliary.HasTraitsFlag(currentNpcGetter))
+                {
+                    if (currentNpcGetter.Template is null || currentNpcGetter.Template.IsNull)
+                    {
+                        errorMessages.Add(
+                            $"The appearance template for {Auxilliary.GetLogString(currentNpcGetter, _settings.LocalizationLanguage)} in {sourcePlugin.ModKey.FileName} is blank despite it having a Traits template flag");
+                        break;
+                    }
+                    else
+                    {
+                        npcFormKey = currentNpcGetter.Template.FormKey; // repeat for the next template
+                    }
+                }
+                else
+                {
+                    break; // template chain stops here
+                }
+            }
+        }
+
+        if (templateChain.Any())
+        {
+            StringBuilder message = new();
+            message.AppendLine(
+                "This NPC inherits appearance from a template, which means that it needs to come from the same mod as the template.");
+            message.AppendLine($"Template Chain: {string.Join(" -> ", templateChain.Select(x => x.displayName))}");
+            message.AppendLine();
+            if (errorMessages.Any())
+            {
+                message.AppendLine("Note: the following error(s) occured when analyzing the template chain:");
+                message.AppendLine(string.Join(Environment.NewLine, errorMessages));
+            }
+
+            message.AppendLine();
+            message.AppendLine("Would you like to apply this mod selection for all NPCs in the chain?");
+
+            if (ScrollableMessageBox.Confirm(message.ToString(), "Update template chain?"))
+            {
+                int index = 0;
+                foreach (var entry in templateChain)
+                {
+                    index++;
+                    if (index == 1)
+                    {
+                        continue;
+                    } // the current mugshot has already been set by the caller
+
+                    if (fromLinkCacheOnly.Contains(entry.formKey))
+                    {
+                        continue;
+                    } // don't set the appearance for templates without FaceGen.
+
+                    _consistencyProvider.SetSelectedMod(entry.formKey, modSettingVM.DisplayName, entry.formKey);
+                }
+            }
+        }
+
+        return true;
+    }
+
+    public CancellationToken GetCurrentMugshotLoadToken()
+    {
+        return _mugshotLoadingCts?.Token ?? CancellationToken.None;
+    }
+
+    private void ApplyCotRKeyword()
+    {
+        var baseDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Resources");
+        var pluginListFiles = Directory.GetFiles(baseDirectory, "CotR_Plugins*.txt");
+
+        if (!pluginListFiles.Any())
+        {
+            ScrollableMessageBox.ShowError($"No CotR_Plugins*.txt files found in:\n{baseDirectory}");
+            return;
+        }
+
+        const string confirmMessage =
+            "This will apply the Charmers of the Reach keyword to all mods containing a plugin listed in CotR_Plugins.txt.\n\n" +
+            "NPC Plugin Chooser 2 ships with a default CotR_Plugins.txt file containing many of the popular CotR-based replacer mods (in the Resources folder). " +
+            "However, it may be out of date or missing some of the less popular ones.\n\n" +
+            "You can edit this file in NotePad or add the keyword manually to any Mods that aren't in the default list using the Set Keywords button.\n\n" +
+            "You can also create additional files (e.g., CotR_Plugins_Custom.txt) to add more plugins without modifying the original file, making your changes update-safe.\n\n" +
+            "Do you want to proceed?";
+
+        if (!ScrollableMessageBox.Confirm(confirmMessage, "Apply CotR Keyword"))
+        {
+            return;
+        }
+
+        var cotRPluginFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var filePath in pluginListFiles)
+        {
+            foreach (var line in File.ReadLines(filePath))
+            {
+                var trimmed = line.Trim();
+                if (!string.IsNullOrEmpty(trimmed))
+                {
+                    cotRPluginFileNames.Add(trimmed);
+                }
+            }
+        }
+
+        if (!cotRPluginFileNames.Any())
+        {
+            ScrollableMessageBox.ShowWarning(TranslationServiceProvider.GetService()?.GetString("msg_cotrPluginsFilesEmpty") ?? TranslationServiceProvider.GetService()?.GetString("msg_cotrPluginsFilesEmpty") ?? "CotR_Plugins*.txt files are empty or contain no valid entries.");
+            return;
+        }
+
+        var keyword = CotRKeyword?.Trim();
+        if (string.IsNullOrEmpty(keyword))
+        {
+            ScrollableMessageBox.ShowError(TranslationServiceProvider.GetService()?.GetString("msg_cotrKeywordCannotBeEmpty") ?? TranslationServiceProvider.GetService()?.GetString("msg_cotrKeywordCannotBeEmpty") ?? "CotR Keyword cannot be empty.");
+            return;
+        }
+
+        var taggedModNames = new List<string>();
+        foreach (var modSetting in _allModSettingsInternal)
+        {
+            bool hasMatch = modSetting.CorrespondingModKeys
+                .Any(modKey => cotRPluginFileNames.Contains(modKey.FileName.String));
+
+            if (hasMatch)
+            {
+                if (!modSetting.Keywords.Contains(keyword, StringComparer.OrdinalIgnoreCase))
+                {
+                    modSetting.Keywords.Add(keyword);
+                    taggedModNames.Add(modSetting.DisplayName);
+                }
+            }
+        }
+
+        if (taggedModNames.Any())
+        {
+            var message = $"Applied '{keyword}' keyword to {taggedModNames.Count} mod setting(s):\n\n" +
+                          string.Join("\n", taggedModNames.OrderBy(n => n));
+            ScrollableMessageBox.Show(message, "CotR Keyword Applied");
+        }
+        else
+        {
+            ScrollableMessageBox.Show(
+                "No new mod settings were tagged. All matching mods may already have the keyword.",
+                "CotR Keyword Applied");
+        }
+    }
+
+    private void WriteRsvExclusion()
+    {
+        var keyword = CotRKeyword?.Trim();
+        if (string.IsNullOrEmpty(keyword))
+        {
+            ScrollableMessageBox.ShowError(TranslationServiceProvider.GetService()?.GetString("msg_cotrKeywordCannotBeEmpty") ?? TranslationServiceProvider.GetService()?.GetString("msg_cotrKeywordCannotBeEmpty") ?? "CotR Keyword cannot be empty.");
+            return;
+        }
+
+        const string rsvIgnoreKeyword = "RSVignore";
+        int matchCount = 0;
+
+        foreach (var modSetting in _allModSettingsInternal)
+        {
+            if (modSetting.Keywords.Contains(keyword, StringComparer.OrdinalIgnoreCase))
+            {
+                if (!modSetting.Keywords.Contains(rsvIgnoreKeyword, StringComparer.OrdinalIgnoreCase))
+                {
+                    modSetting.Keywords.Add(rsvIgnoreKeyword);
+                    matchCount++;
+                }
+            }
+        }
+
+        ScrollableMessageBox.Show($"Added '{rsvIgnoreKeyword}' keyword to {matchCount} mod setting(s) that had the '{keyword}' keyword.");
+    }
+
+    public string GetStatusReport()
+    {
+        StringBuilder sb = new();
+        sb.AppendLine("Installed Appearance Mods:");
+        foreach (var mod in _allModSettingsInternal)
+        {
+            sb.AppendLine($"{mod.DisplayName}" + 
+                          (mod.IsFaceGenOnlyEntry ? " (FaceGen-Only)" : string.Empty) + 
+                          (mod.IsMugshotOnlyEntry ? " (Mugshots-Only)" : string.Empty));
+            if (!mod.IsFaceGenOnlyEntry && !mod.IsMugshotOnlyEntry)
+            {
+                sb.AppendLine($"\t{mod.NpcFormKeys.Count} NPCs in plugin(s).");
+            }
+
+            sb.AppendLine($"\tMerge-in: {mod.MergeInDependencyRecords}");
+            sb.AppendLine($"\tInjected Record Handling: {mod.HandleInjectedRecords}");
+            sb.AppendLine($"\tInclude Outfits: {mod.IncludeOutfits}");
+        }
+        
+        return sb.ToString();
+    }
+}

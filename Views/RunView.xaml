@@ -1,0 +1,209 @@
+﻿<!-- RunView.xaml -->
+<reactiveui:ReactiveUserControl x:Class="NPC_Plugin_Chooser_2.Views.RunView"
+                                xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                                xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                                xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+                                xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+                                xmlns:local="clr-namespace:NPC_Plugin_Chooser_2.Views"
+                                xmlns:vm="clr-namespace:NPC_Plugin_Chooser_2.View_Models"
+                                xmlns:reactiveui="http://reactiveui.net"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
+                                mc:Ignorable="d"
+                                x:TypeArguments="vm:VM_Run"
+                                MinHeight="400"
+                                VerticalAlignment="Stretch"
+                                d:DataContext="{d:DesignInstance Type=vm:VM_Run}"
+                                d:DesignHeight="550" d:DesignWidth="800">
+
+    <UserControl.Resources>
+        <local:BlankLineToSpaceConverter x:Key="BlankLineToSpaceConverter"/>
+    </UserControl.Resources>
+
+    <Grid Margin="10"
+          HorizontalAlignment="Stretch"
+          VerticalAlignment="Stretch">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/> <!-- Run Button & Group Selector -->
+            <RowDefinition Height="*"/>    <!-- Log Output -->
+            <RowDefinition Height="Auto"/> <!-- Progress Bar -->
+        </Grid.RowDefinitions>
+
+        <!-- Controls Row -->
+        <DockPanel Grid.Row="0" Margin="0,0,0,10">
+            <Button x:Name="RunButton"
+                    DockPanel.Dock="Left"
+                    Content="{Binding RunButtonText}"
+                    Command="{Binding RunCommand}"
+                    MinWidth="150" Padding="10,5" VerticalAlignment="Center"/>
+
+            <TextBlock Text="{l:Loc patchNPCsInGroup}" 
+                       DockPanel.Dock="Left" 
+                       Margin="15,0,5,0" 
+                       VerticalAlignment="Center"/>
+            <ComboBox x:Name="GroupComboBox"
+                      DockPanel.Dock="Left"
+                      MinWidth="150"
+                      ItemsSource="{Binding AvailableNpcGroups}"
+                      SelectedItem="{Binding SelectedNpcGroup, Mode=TwoWay}"
+                      DisplayMemberPath="."
+                      VerticalAlignment="Center"
+                      ToolTip="{l:Loc selectAnNPCGroup}"/>
+            
+            <Button Content="{l:Loc generateSpawnBat}"
+                    Command="{Binding GenerateSpawnBatCommand}"
+                    DockPanel.Dock="Left"
+                    Margin="5,0,0,0"
+                    VerticalAlignment="Center"
+                    ToolTip="{l:Loc generatesATxtBatch}"/>
+
+            <CheckBox x:Name="PerformanceLoggingCheckBox"
+                      DockPanel.Dock="Left"
+                      Content="{l:Loc performanceLogging}"
+                      IsChecked="{Binding IsPerformanceLoggingEnabled, Mode=TwoWay}"
+                      VerticalAlignment="Center"
+                      Margin="15,0,0,0"
+                      ToolTip="{l:Loc logThePerBatch}"/>
+
+            <CheckBox x:Name="VerboseModeCheckBox"
+                      DockPanel.Dock="Left"
+                      Content="{l:Loc verboseLogging}"
+                      IsChecked="{Binding IsVerboseModeEnabled, Mode=TwoWay}"
+                      VerticalAlignment="Center"
+                      Margin="15,0,0,0"/>
+            
+            <Button Content="{l:Loc environmentStatus}"
+                    Command="{Binding ShowStatusCommand}"
+                    DockPanel.Dock="Left"
+                    Margin="15,0,0,0"
+                    VerticalAlignment="Center"
+                    ToolTip="{l:Loc generatesAReportDetailing}"/>
+            
+            <Button x:Name="AnalyzeMastersButton"
+                    Content="{l:Loc analyzeMasters}"
+                    Command="{Binding AnalyzeMastersCommand}"
+                    DockPanel.Dock="Left"
+                    Margin="15,0,0,0"
+                    VerticalAlignment="Center"
+                    ToolTip="{l:Loc analyzeWhySpecificMasters}"/>
+
+            <Button x:Name="ValidateOutputButton"
+                    Content="{l:Loc validateOutput}"
+                    Command="{Binding ValidateOutputCommand}"
+                    DockPanel.Dock="Left"
+                    Margin="15,0,0,0"
+                    VerticalAlignment="Center"
+                    ToolTip="{l:Loc checksThatYourGenerated}"/>
+
+            <TextBlock /> <!-- Fills remaining space as LastChildFill is true by default -->
+        </DockPanel>
+
+        <!-- Log Output.
+             A virtualizing ListBox rather than a TextBox, so each line can carry its own
+             severity colour (see RunLogClassifier). Lines are selectable and copyable via
+             Ctrl+C / the context menu; the container style is declared in full here so the
+             per-theme implicit ListBoxItem styles (padding, proportional font) cannot reshape
+             the log. Long lines wrap: horizontal scrolling is off so the ScrollViewer gives
+             each line a finite width to wrap within. -->
+        <ListBox x:Name="LogListBox"
+                 Grid.Row="1"
+                 ItemsSource="{Binding LogLines}"
+                 SelectionMode="Extended"
+                 Background="{DynamicResource TextBoxBackground}"
+                 BorderBrush="{DynamicResource BorderBrush}"
+                 BorderThickness="1"
+                 Padding="2"
+                 FontFamily="Consolas"
+                 VirtualizingStackPanel.IsVirtualizing="True"
+                 VirtualizingStackPanel.VirtualizationMode="Recycling"
+                 ScrollViewer.VerticalScrollBarVisibility="Auto"
+                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                 HorizontalContentAlignment="Stretch"
+                 HorizontalAlignment="Stretch"
+                 VerticalAlignment="Stretch"
+                 PreviewMouseLeftButtonDown="LogListBox_PreviewMouseLeftButtonDown"
+                 PreviewMouseMove="LogListBox_PreviewMouseMove"
+                 PreviewMouseLeftButtonUp="LogListBox_PreviewMouseLeftButtonUp"
+                 LostMouseCapture="LogListBox_LostMouseCapture">
+            <ListBox.ContextMenu>
+                <ContextMenu>
+                    <MenuItem Header="{l:Loc copySelectedLines}"
+                              InputGestureText="{l:Loc ctrlC}"
+                              Click="CopySelectedLogLines_Click"/>
+                    <MenuItem Header="{l:Loc copyEntireLog}"
+                              Click="CopyEntireLog_Click"/>
+                </ContextMenu>
+            </ListBox.ContextMenu>
+
+            <ListBox.ItemContainerStyle>
+                <Style TargetType="ListBoxItem">
+                    <Setter Property="Padding" Value="0"/>
+                    <Setter Property="Margin" Value="0"/>
+                    <Setter Property="BorderThickness" Value="0"/>
+                    <Setter Property="Background" Value="Transparent"/>
+                    <!-- Stretch so a wrapping line gets the full viewport width to wrap within. -->
+                    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                    <Setter Property="Template">
+                        <Setter.Value>
+                            <ControlTemplate TargetType="ListBoxItem">
+                                <Border x:Name="LineBorder"
+                                        Background="{TemplateBinding Background}"
+                                        Padding="{TemplateBinding Padding}"
+                                        SnapsToDevicePixels="True">
+                                    <ContentPresenter/>
+                                </Border>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsSelected" Value="True">
+                                        <Setter TargetName="LineBorder" Property="Background"
+                                                Value="{DynamicResource LogSelectionBackground}"/>
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </Setter.Value>
+                    </Setter>
+                </Style>
+            </ListBox.ItemContainerStyle>
+
+            <ListBox.ItemTemplate>
+                <DataTemplate DataType="{x:Type vm:RunLogEntry}">
+                    <!-- Wrap rather than clip: horizontal scrolling is disabled on the ListBox
+                         above (a ScrollViewer that can scroll horizontally hands its content
+                         infinite width, which would stop any wrapping from happening). -->
+                    <TextBlock Text="{Binding Text, Converter={StaticResource BlankLineToSpaceConverter}}"
+                               TextWrapping="Wrap">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <!-- Info: the ordinary text colour (black in the light themes). -->
+                                <Setter Property="Foreground" Value="{DynamicResource PrimaryForeground}"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding Severity}" Value="Success">
+                                        <Setter Property="Foreground"
+                                                Value="{DynamicResource StatusValidForeground}"/>
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding Severity}" Value="Warning">
+                                        <Setter Property="Foreground"
+                                                Value="{DynamicResource StatusWarningForeground}"/>
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding Severity}" Value="Error">
+                                        <Setter Property="Foreground"
+                                                Value="{DynamicResource StatusErrorForeground}"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+
+        <!-- Progress Bar -->
+         <StatusBar Grid.Row="2" Margin="0,5,0,0">
+             <StatusBarItem>
+                 <ProgressBar x:Name="ProgressBar" Value="{Binding ProgressValue, Mode=OneWay}" Width="200" Height="18" />
+             </StatusBarItem>
+             <StatusBarItem>
+                 <TextBlock x:Name="ProgressTextBlock" Text="{Binding ProgressText}"/>
+             </StatusBarItem>
+         </StatusBar>
+
+    </Grid>
+</reactiveui:ReactiveUserControl>

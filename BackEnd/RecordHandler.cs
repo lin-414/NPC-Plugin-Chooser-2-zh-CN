@@ -1,0 +1,1779 @@
+﻿using Microsoft.Build.Tasks;
+using System.Collections.Concurrent;
+using System.IO;
+using Mutagen.Bethesda;
+using Mutagen.Bethesda.Plugins;
+using Mutagen.Bethesda.Plugins.Cache;
+using Mutagen.Bethesda.Plugins.Cache.Internals.Implementations;
+using Mutagen.Bethesda.Plugins.Records;
+using Mutagen.Bethesda.Skyrim;
+using Noggog;
+using NPC_Plugin_Chooser_2.BackEnd.CharacterViewerHost;
+using NPC_Plugin_Chooser_2.Models;
+
+namespace NPC_Plugin_Chooser_2.BackEnd;
+
+public class RecordHandler
+{
+    // Outer Key: Appearance Mod Name
+    // Inner Key: FormKey from source plugin
+    // Value: FormKey of merged-in record in output plugin
+    private Dictionary<FormKey, FormKey> _currentDuplicateInMappings = new();
+    private HashSet<IFormLinkGetter> _currenTraversedFormLinks = new();
+    
+    // For converting plugins into linkcaches and avoiding having to resolve all contexts to get mod-specific records
+    private ConcurrentDictionary<ModKey, ImmutableModLinkCache<ISkyrimMod, ISkyrimModGetter>> _modLinkCaches = new();
+
+    // Plugin instance backing each entry in _modLinkCaches. Held so the
+    // deferred-warmup path can prime the SAME instance the link cache wraps
+    // (PluginProvider.TryGetPlugin doesn't cache standalone, so a fresh
+    // TryGetPlugin call would return a different — still cold — instance).
+    private ConcurrentDictionary<ModKey, ISkyrimModGetter> _modLinkCachePlugins = new();
+
+    // Resolved source path each cache was built from. PluginProvider keys its
+    // own cache by file path, but _modLinkCaches keys by ModKey alone — so
+    // two NPC2 mods that both ship a plugin with the same filename but
+    // different contents (e.g. "Bijin Redux" vs "Bijin Redux - SkyPatched",
+    // both shipping Bijin Redux.esp) would collide here: whichever mod's
+    // render touched the plugin first would populate the cache, and every
+    // later render for the OTHER mod would hit CACHED-OK against the wrong
+    // physical file and silently fail to resolve records only present in
+    // that other file. Tracking the path lets TryAddPluginToCaches detect
+    // the collision and evict before the GetOrAdd factory runs.
+    //
+    // INVARIANT: every content-bearing _modLinkCaches entry must have a
+    // matching path record here. An entry with no path record has unknown
+    // provenance and is treated as a mismatch by EvictIfSourcePathChanged
+    // (evicted as soon as a caller can resolve the file it actually wants) —
+    // the 2026-07 "Auri wig" bug was a path-less entry serving one FoxGlove
+    // variant's plugin to every sibling variant, immune to eviction.
+    private ConcurrentDictionary<ModKey, string> _modLinkCacheSourcePaths = new();
+
+    // Per-ModKey gate serializing every WRITE to the map trio above plus
+    // _warmedPlugins (reads stay lock-free). Without it, ClearLinkCachesFor
+    // interleaving with a concurrent rebuild can strand a cache entry whose
+    // path record was deleted — exactly the unknown-provenance state the
+    // invariant above forbids. Monitor is reentrant, so locked helpers may
+    // call each other for the same key.
+    private readonly ConcurrentDictionary<ModKey, object> _modLinkCacheLocks = new();
+
+    private object GetModLinkCacheLock(ModKey modKey) =>
+        _modLinkCacheLocks.GetOrAdd(modKey, _ => new object());
+
+    // Per-ModKey memo of the cold-ESL warmup outcome. Presence = warmup
+    // attempted; value = true on successful Npcs.Count, false on throw.
+    // Used by TryWarmPlugin to skip repeat work after either outcome.
+    // Cleared by ClearLinkCachesFor so a re-loaded plugin instance is
+    // re-evaluated.
+    private ConcurrentDictionary<ModKey, bool> _warmedPlugins = new();
+
+    private readonly EnvironmentStateProvider _environmentStateProvider;
+    private PluginProvider _pluginProvider;
+    private readonly Settings _settings;
+
+    public RecordHandler(EnvironmentStateProvider environmentStateProvider, PluginProvider pluginProvider, Settings settings)
+    {
+        _environmentStateProvider = environmentStateProvider;
+        _pluginProvider = pluginProvider;
+        _settings = settings;
+    }
+
+    // Output FormKeys that already existed when the current appearance-mod batch began. Anything
+    // NOT in here was created by the batch in progress — see IsFromCurrentBatch.
+    private HashSet<FormKey> _preBatchOutputRecords = new();
+
+    public void ResetMapping()
+    {
+        _currentDuplicateInMappings.Clear();
+        _currenTraversedFormLinks.Clear();
+
+        // Env is null in the bookkeeping unit tests, which exercise the maps above and nothing else.
+        _preBatchOutputRecords = _environmentStateProvider?.OutputMod == null
+            ? new HashSet<FormKey>()
+            : _environmentStateProvider.OutputMod.EnumerateMajorRecords()
+                .Select(r => r.FormKey)
+                .ToHashSet();
+    }
+
+    /// <summary>
+    /// Whether an output record was written by the appearance-mod batch currently being patched,
+    /// as opposed to an earlier one. The duplicate-in mapping is reset per batch
+    /// (<see cref="ResetMapping"/>), but the output plugin it is applied to is cumulative — so this
+    /// is what keeps one mod's merge from rewriting another mod's already-written records. See the
+    /// remap step in <c>PatcherExtensions.DuplicateFromOnlyReferencedGetters</c>.
+    ///
+    /// <para>Derived from a snapshot rather than from a list of records as they are created: a
+    /// tracked list silently misses any creation site that forgets to register, and the failure
+    /// mode of missing one is a dangling reference that fails the save.</para>
+    /// </summary>
+    public bool IsFromCurrentBatch(FormKey outputRecordFormKey) =>
+        !_preBatchOutputRecords.Contains(outputRecordFormKey);
+
+    /// <summary>
+    /// Records the provenance of a record that was deep-copied ("merged in") into
+    /// the output plugin. Captures a snapshot of where each output record came
+    /// from. Unlike <see cref="_currentDuplicateInMappings"/> (which is reset per
+    /// appearance-mod batch), this map persists for the whole patch run so a save
+    /// failure at the very end can still report the original source of a merged-in
+    /// record. See <see cref="TryGetMergedRecordOrigin"/> and the enriched
+    /// "missing master" diagnostics in <c>Patcher.RunPatchingLogic</c>.
+    /// </summary>
+    public readonly struct MergedRecordOrigin
+    {
+        public FormKey SourceFormKey { get; init; }
+        public string? SourceEditorId { get; init; }
+    }
+
+    // Output FormKey -> the source record it was duplicated from. Persists across
+    // per-batch ResetMapping() calls; cleared once per run via ResetMergedRecordTracking().
+    private readonly Dictionary<FormKey, MergedRecordOrigin> _mergedRecordOrigins = new();
+
+    /// <summary>Clears the persistent merged-record provenance map. Call once at the
+    /// start of a patch run (alongside the Patcher's record-ownership maps).</summary>
+    public void ResetMergedRecordTracking()
+    {
+        _mergedRecordOrigins.Clear();
+    }
+
+    /// <summary>Notes that <paramref name="outputFormKey"/> in the output plugin was
+    /// duplicated from <paramref name="sourceFormKey"/>. Output FormKeys are unique,
+    /// so the first (root) source seen is retained.</summary>
+    public void RecordMergedRecordOrigin(FormKey sourceFormKey, FormKey outputFormKey, string? sourceEditorId)
+    {
+        if (outputFormKey.IsNull || sourceFormKey.IsNull) return;
+        _mergedRecordOrigins.TryAdd(outputFormKey,
+            new MergedRecordOrigin { SourceFormKey = sourceFormKey, SourceEditorId = sourceEditorId });
+    }
+
+    /// <summary>Looks up where an output record was merged in from, if it was a
+    /// deep-copied dependency rather than an originally-authored record.</summary>
+    public bool TryGetMergedRecordOrigin(FormKey outputFormKey, out MergedRecordOrigin origin)
+    {
+        return _mergedRecordOrigins.TryGetValue(outputFormKey, out origin);
+    }
+
+    /// <summary>
+    /// Seeds an identity remap (formKey -> formKey) into the active duplicate-in
+    /// mapping so the merge-in walker treats this record as "already handled" and
+    /// will NOT duplicate it into a new record. Used to stop the NPC being patched
+    /// from being pulled into the output as a brand-new NPC: its own winning
+    /// override often lives in an appearance plugin that is in the duplicate-from
+    /// set, so a self-reference (or the input NPC's own override) would otherwise
+    /// be deep-copied and re-FormKey'd. Any link to this FormKey now resolves to
+    /// the existing output override instead.
+    /// </summary>
+    public void ProtectRecordFromDuplication(FormKey formKey)
+    {
+        if (formKey.IsNull) return;
+        if (!_currentDuplicateInMappings.ContainsKey(formKey))
+        {
+            _currentDuplicateInMappings[formKey] = formKey;
+        }
+    }
+
+    /// <summary>
+    /// Seeds (or overwrites) a source → output remap so subsequent merge-in
+    /// walkers treat <paramref name="sourceFormKey"/> as already duplicated:
+    /// they will not deep-copy the original, and every reference to it gets
+    /// redirected to <paramref name="outputFormKey"/> instead. This is how a
+    /// deliberately-modified duplicate (e.g. the +Wig WornArmor built by
+    /// <see cref="WigForwarder"/>) replaces the original in the merge without
+    /// the original also being pulled in. Overwrite semantics are intentional:
+    /// mappings live per appearance-mod batch, and a later NPC in the batch may
+    /// need the same source record redirected to a different duplicate —
+    /// references remapped under the earlier seed are already materialized, so
+    /// re-seeding cannot retroactively affect them.
+    /// </summary>
+    public void SeedDuplicateMapping(FormKey sourceFormKey, FormKey outputFormKey)
+    {
+        if (sourceFormKey.IsNull || outputFormKey.IsNull) return;
+        _currentDuplicateInMappings[sourceFormKey] = outputFormKey;
+    }
+
+    /// <summary>Looks up where <paramref name="sourceFormKey"/> was remapped to
+    /// in the current appearance-mod batch, if it was duplicated into the
+    /// output. Lets callers that stashed SOURCE-side FormKeys before a merge
+    /// (e.g. <see cref="WigForwarder"/>'s hair head part removal) find the
+    /// corresponding output records afterwards.</summary>
+    public bool TryGetDuplicateMapping(FormKey sourceFormKey, out FormKey outputFormKey)
+    {
+        return _currentDuplicateInMappings.TryGetValue(sourceFormKey, out outputFormKey);
+    }
+
+    /// <summary>
+    /// Resolves an NPC record the way the appearance DONOR itself is resolved at the top of the
+    /// patch loop: from the selected mod's own plugins (honouring the per-NPC plugin
+    /// disambiguation and skipping resource-only plugins), falling back to the load order only
+    /// when that mod has no record for it.
+    ///
+    /// <para>Used for every record the appearance pipeline reads besides the donor — the Traits
+    /// chain hops and the flatten terminus. Those all feed decisions that are paired with assets
+    /// sourced from this same mod, so resolving them through the load order would let the record
+    /// side and the asset side come from different plugins.</para>
+    ///
+    /// <para><paramref name="isFaceGenOnly"/> mirrors the donor's own fallback: a mod that ships
+    /// FaceGen but no plugin record for this NPC has its donor resolved at
+    /// <see cref="ResolveTarget.Origin"/>, on the assumption its meshes were built against the
+    /// base record, so the rest of the chain has to be read the same way to stay consistent
+    /// with it.</para>
+    ///
+    /// <para>Lives here rather than on the Patcher because the Validator screens Traits chains with
+    /// it too — screening has to judge an NPC by the records the patcher will actually read.</para>
+    /// </summary>
+    public INpcGetter? ResolveNpcPreferringMod(FormKey npcFormKey, ModSetting? appearanceModSetting,
+        HashSet<string> currentModFolderPaths, bool isFaceGenOnly)
+    {
+        if (appearanceModSetting != null)
+        {
+            var link = npcFormKey.ToLink<INpcGetter>();
+
+            if (appearanceModSetting.NpcPluginDisambiguation.TryGetValue(npcFormKey, out var disambiguationKey) &&
+                TryGetRecordGetterFromMod(link, disambiguationKey, currentModFolderPaths,
+                    RecordLookupFallBack.None, out var disambiguated) &&
+                disambiguated is INpcGetter disambiguatedNpc)
+            {
+                return disambiguatedNpc;
+            }
+
+            // Iterate backwards; lowest in the list is the winner within the mod (as for the donor).
+            for (int i = appearanceModSetting.CorrespondingModKeys.Count - 1; i >= 0; i--)
+            {
+                var candidateKey = appearanceModSetting.CorrespondingModKeys[i];
+                if (appearanceModSetting.ResourceOnlyModKeys.Contains(candidateKey)) continue;
+
+                if (TryGetRecordGetterFromMod(link, candidateKey, currentModFolderPaths,
+                        RecordLookupFallBack.None, out var record) &&
+                    record is INpcGetter modNpc)
+                {
+                    return modNpc;
+                }
+            }
+        }
+
+        var linkCache = _environmentStateProvider.LinkCache;
+        if (linkCache == null) return null;
+
+        return linkCache.TryResolve<INpcGetter>(npcFormKey, out var fallback,
+            isFaceGenOnly ? ResolveTarget.Origin : ResolveTarget.Winner)
+            ? fallback
+            : null;
+    }
+
+    /// <summary>
+    /// Resolves a RACE as the selected mod's author saw it: the mod's own plugins first (lowest
+    /// in the list wins, mirroring <see cref="ResolveNpcPreferringMod"/>, resource-only plugins
+    /// skipped the same way), then the winning version among the IMPLICIT base-game masters
+    /// (vanilla + CC) or the race's defining plugin, whichever wins between them. The fallback is
+    /// deliberately not the live winner — the caller (the Patcher's race-drift trigger) compares
+    /// this against the live winner to detect the race's chargen defaults changing out from under
+    /// a mod-authored FaceGen mesh, and a winner fallback would compare the live winner to itself
+    /// and hide exactly the third-party race override the trigger exists to catch. It is equally
+    /// deliberately not the raw ORIGIN: every SE-era mod is authored against the full vanilla
+    /// stack, so a DLC's own override of a vanilla race (Dawnguard rewriting every *RaceVampire's
+    /// chargen head parts) is baseline, not drift — an Origin fallback fired the trigger for all
+    /// 92 vampire-race NPCs on the measuring run.
+    /// </summary>
+    public IRaceGetter? ResolveRacePreferringMod(FormKey raceFormKey, ModSetting? appearanceModSetting,
+        HashSet<string> currentModFolderPaths)
+    {
+        if (appearanceModSetting != null)
+        {
+            var link = raceFormKey.ToLink<IRaceGetter>();
+
+            for (int i = appearanceModSetting.CorrespondingModKeys.Count - 1; i >= 0; i--)
+            {
+                var candidateKey = appearanceModSetting.CorrespondingModKeys[i];
+                if (appearanceModSetting.ResourceOnlyModKeys.Contains(candidateKey)) continue;
+
+                if (TryGetRecordGetterFromMod(link, candidateKey, currentModFolderPaths,
+                        RecordLookupFallBack.None, out var record) &&
+                    record is IRaceGetter modRace)
+                {
+                    return modRace;
+                }
+            }
+        }
+
+        var linkCache = _environmentStateProvider.LinkCache;
+        if (linkCache == null) return null;
+
+        // Winner-first walk, stopping at the first version supplied by the author baseline:
+        // an implicitly-loaded base-game plugin, or the plugin that defines the race (covers
+        // mod-added races, whose baseline is their own defining plugin).
+        var baseline = new HashSet<ModKey>(_environmentStateProvider.BaseGamePlugins);
+        baseline.UnionWith(_environmentStateProvider.CreationClubPlugins);
+        baseline.Add(raceFormKey.ModKey);
+
+        foreach (var ctx in linkCache.ResolveAllContexts<IRace, IRaceGetter>(raceFormKey))
+        {
+            if (baseline.Contains(ctx.ModKey)) return ctx.Record;
+        }
+
+        // The race resolves only through non-baseline overrides (defining plugin absent from the
+        // load order). Origin is the best remaining approximation of the author's view.
+        return linkCache.TryResolve<IRaceGetter>(raceFormKey, out var originRace, ResolveTarget.Origin)
+            ? originRace
+            : null;
+    }
+
+    public void PrimeLinkCachesFor(IEnumerable<ModKey> modKeys, HashSet<string> fallBackModFolderNames)
+    {
+        foreach (var modKey in modKeys)
+        {
+            if (!_pluginProvider.TryGetPlugin(modKey, fallBackModFolderNames, out var plugin, out var sourcePath) ||
+                plugin == null || sourcePath == null)
+            {
+                continue;
+            }
+
+            lock (GetModLinkCacheLock(modKey))
+            {
+                EvictIfSourcePathChanged(modKey, sourcePath);
+
+                // Any entry that survived eviction was built from this same
+                // path — keep it.
+                if (_modLinkCaches.ContainsKey(modKey)) continue;
+
+                _modLinkCachePlugins[modKey] = plugin;
+                _modLinkCacheSourcePaths[modKey] = NormalizePath(sourcePath);
+                _modLinkCaches[modKey] = new ImmutableModLinkCache<ISkyrimMod, ISkyrimModGetter>(plugin, new LinkCachePreferences());
+            }
+        }
+    }
+
+    public void ClearLinkCachesFor(IEnumerable<ModKey> modKeys)
+    {
+        foreach (var modKey in modKeys)
+        {
+            lock (GetModLinkCacheLock(modKey))
+            {
+                // Path record first: if a lock-free reader observes a partial
+                // clear, "cache present + path missing" reads as unknown
+                // provenance and gets evicted on next access, whereas the
+                // reverse order could be observed as a fully valid entry.
+                _modLinkCacheSourcePaths.TryRemove(modKey, out _);
+                _modLinkCachePlugins.TryRemove(modKey, out _);
+                _modLinkCaches.TryRemove(modKey, out _);
+                _warmedPlugins.TryRemove(modKey, out _);
+            }
+        }
+    }
+
+    /// <summary>Normalizes a filesystem path for case-insensitive equality
+    /// comparison between paths that may have been produced by different
+    /// code paths (PluginProvider's out param, our own Path.Combine of the
+    /// data folder + modKey filename, etc.).</summary>
+    private static string NormalizePath(string path)
+    {
+        try { return Path.GetFullPath(path).ToUpperInvariant(); }
+        catch { return path.ToUpperInvariant(); }
+    }
+
+    /// <summary>If an existing cache entry for <paramref name="modKey"/> was
+    /// built from a path different from <paramref name="desiredSourcePath"/> —
+    /// or has no recorded source path at all — evict it so the next
+    /// <c>GetOrAdd</c> factory call rebuilds the cache against the right
+    /// physical file. Two NPC2 mods can share a plugin filename with
+    /// different contents, and <c>_modLinkCaches</c> is keyed by ModKey only —
+    /// without this check the first mod's render would poison every later
+    /// render that targets the same ModKey from a different folder. An entry
+    /// with no path record has unknown provenance (a torn clear/rebuild, or a
+    /// poisoned-null negative entry) and must not be trusted once the caller
+    /// can resolve the file it actually wants.</summary>
+    private void EvictIfSourcePathChanged(ModKey modKey, string desiredSourcePath)
+    {
+        lock (GetModLinkCacheLock(modKey))
+        {
+            if (!_modLinkCaches.ContainsKey(modKey)) return;
+
+            if (_modLinkCacheSourcePaths.TryGetValue(modKey, out var existing))
+            {
+                string desired = NormalizePath(desiredSourcePath);
+                if (string.Equals(existing, desired, StringComparison.OrdinalIgnoreCase)) return;
+
+                if (RenderLogCapture.IsCapturing)
+                {
+                    TraceLookup($"  evicting cache for {modKey.FileName}: cached path '{existing}' " +
+                                $"differs from desired '{desired}' (likely two NPC2 mods sharing this plugin filename).");
+                }
+            }
+            else if (RenderLogCapture.IsCapturing)
+            {
+                TraceLookup($"  evicting cache for {modKey.FileName}: entry has no recorded source path " +
+                            $"(unknown provenance); rebuilding from '{desiredSourcePath}'.");
+            }
+
+            ClearLinkCachesFor(new[] { modKey });
+        }
+    }
+
+    /// <summary>Diagnostic trace that lands in the active mugshot/preview
+    /// RenderLogCapture flow file when one is bound, and is a no-op otherwise.
+    /// Used to surface where mod-scoped record resolution decides a record
+    /// "doesn't exist" — analysis-time vs render-time disagreements that the
+    /// boolean return values alone can't pinpoint.</summary>
+    private static void TraceLookup(string message)
+    {
+        if (!RenderLogCapture.IsCapturing) return;
+        RenderLogCapture.Write("[RecordHandler] " + message);
+    }
+
+    /// <summary>Workaround for a Mutagen 0.53-alpha overlay-reader bug where
+    /// the first cold access to a freshly-loaded ESL plugin's NPC group
+    /// throws <see cref="ArgumentOutOfRangeException"/>, and any
+    /// <see cref="ImmutableModLinkCache{TMod,TModGetter}.TryResolve"/> that
+    /// runs before the plugin is primed leaves the link cache in a state
+    /// from which it can't recover — even after a subsequent successful
+    /// <c>Npcs.Count</c> on the same plugin and rebuilding the link cache.
+    /// Symptom: SkyPatcher template-replacer mugshots fail to resolve the
+    /// donor NPC even though analysis-time scanning found it just fine.
+    ///
+    /// <para>Calling <c>plugin.Npcs.Count</c> before the link cache is wrapped
+    /// around the plugin sidesteps the bug entirely. Gated on the
+    /// LightMaster (Small) flag because the bug is ESL-specific in practice
+    /// and unconditional priming here would walk the NPC GRUP of every
+    /// loaded full-master appearance plugin, which contended on disk I/O
+    /// and froze the UI for ~20s when many tiles render simultaneously.
+    /// ESLs cap at 4096 records and are typically much smaller, so priming
+    /// every ESL the resolver touches is bounded and fast.</para>
+    ///
+    /// <para>The deferred warmup in <see cref="TryGetRecordGetterFromMod"/>
+    /// remains as a safety net for any non-ESL plugin that ever surfaces
+    /// the same failure mode. Throws are swallowed: a corrupt plugin
+    /// returns a link cache that resolves nothing — same observable
+    /// behavior as today's cold-state failure — and the trace surfaces
+    /// the exception when capture is active.</para>
+    /// </summary>
+    private static void PrimeIfEsl(ISkyrimModGetter plugin)
+    {
+        try
+        {
+            if (!plugin.ModHeader.Flags.HasFlag(SkyrimModHeader.HeaderFlag.Small)) return;
+            _ = plugin.Npcs.Count;
+        }
+        catch (Exception ex)
+        {
+            if (RenderLogCapture.IsCapturing)
+            {
+                TraceLookup($"  PrimeIfEsl threw on '{plugin.ModKey.FileName}' " +
+                            $"({ex.GetType().Name}: {ex.Message}); link cache will likely " +
+                            $"resolve nothing for this plugin.");
+            }
+        }
+    }
+
+    /// <summary>On-demand workaround for a Mutagen 0.53-alpha overlay-reader
+    /// bug where the first cold access to a freshly loaded ESL plugin's NPC
+    /// group throws <see cref="ArgumentOutOfRangeException"/> from
+    /// <c>Npcs.Count</c> / <c>Npcs.GetEnumerator()</c>, and
+    /// <see cref="ImmutableModLinkCache{TMod,TModGetter}.TryResolve"/>
+    /// swallows that throw internally and returns <c>false</c> — making the
+    /// plugin silently look "empty" of records that are actually present.
+    /// Symptom: SkyPatcher template-replacer mugshots fail with "Could not
+    /// resolve NPC" even though analysis-time scanning found the same
+    /// FormKey just fine.
+    ///
+    /// <para>Calling <c>Npcs.Count</c> primes the plugin's lazy parser state;
+    /// after that, link-cache resolution on the same instance behaves
+    /// correctly. We deliberately do NOT prime proactively at link-cache
+    /// construction time — when many tiles render simultaneously, eagerly
+    /// walking the NPC GRUP of every loaded plugin contended on disk I/O
+    /// and froze the UI for ~20s. Instead, this is invoked lazily from
+    /// <see cref="TryGetRecordGetterFromMod"/> only when a "missing"
+    /// verdict is suspicious (the record's natural ModKey matches the
+    /// queried plugin, so the plugin should own it as a new entry rather
+    /// than as a master override).</para>
+    ///
+    /// <para>Result is memoized per-ModKey in <see cref="_warmedPlugins"/>
+    /// so each plugin pays the warmup cost at most once per session, even
+    /// across many legitimately-missing queries. Returns <c>true</c> if
+    /// the plugin was successfully primed (or already had been); returns
+    /// <c>false</c> if the warmup threw (the plugin is likely structurally
+    /// invalid; the caller should not bother retrying resolution).</para>
+    ///
+    /// <para>Why analysis-time wasn't affected: <c>RefreshNpcLists</c>
+    /// already iterates <c>plugin.Npcs</c> eagerly inside its own
+    /// <c>foreach</c>, priming the lazy state before anything else touches
+    /// it. The mugshot resolver path bypassed that priming and exposed
+    /// the bug.</para>
+    /// </summary>
+    private bool TryWarmPlugin(ModKey modKey)
+    {
+        bool capturing = RenderLogCapture.IsCapturing;
+
+        if (_warmedPlugins.TryGetValue(modKey, out var prev))
+        {
+            if (capturing) TraceLookup($"  TryWarmPlugin {modKey.FileName}: memoized prev={prev}");
+            return prev;
+        }
+
+        // First-choice source: the plugin instance our factory stashed when
+        // this ModKey's link cache was created. Same instance the link cache
+        // wraps, so priming it primes the cache's view too. Acquired (and the
+        // stash backfilled) under the per-ModKey write lock so it can't
+        // interleave with an eviction's partial clear.
+        ISkyrimModGetter? plugin;
+        bool fromStash;
+        lock (GetModLinkCacheLock(modKey))
+        {
+            fromStash = _modLinkCachePlugins.TryGetValue(modKey, out plugin) && plugin != null;
+
+            if (!fromStash)
+            {
+                // Fallback: pull the plugin out of the link cache itself. Covers
+                // the case where _modLinkCaches was populated by some code path
+                // we didn't update to mirror into _modLinkCachePlugins. For an
+                // ImmutableModLinkCache built from a single plugin, PriorityOrder
+                // returns that plugin in slot 0.
+                if (_modLinkCaches.TryGetValue(modKey, out var existingCache) && existingCache != null)
+                {
+                    plugin = existingCache.PriorityOrder.FirstOrDefault() as ISkyrimModGetter;
+                    if (capturing)
+                    {
+                        TraceLookup($"  TryWarmPlugin {modKey.FileName}: plugin missing from " +
+                                    $"_modLinkCachePlugins; pulled from linkCache.PriorityOrder " +
+                                    $"(plugin={(plugin?.ModKey.FileName.String ?? "(null)")}).");
+                    }
+                    if (plugin != null)
+                    {
+                        _modLinkCachePlugins[modKey] = plugin;
+                    }
+                }
+            }
+        }
+        if (plugin == null)
+        {
+            if (capturing) TraceLookup($"  TryWarmPlugin {modKey.FileName}: no plugin reference available; aborting warmup");
+            return false;
+        }
+
+        if (capturing)
+        {
+            TraceLookup($"  TryWarmPlugin {modKey.FileName}: priming Npcs (plugin source={(fromStash ? "stash" : "PriorityOrder fallback")})");
+        }
+
+        bool success;
+        try
+        {
+            int count = plugin.Npcs.Count;
+            success = true;
+            if (capturing) TraceLookup($"  TryWarmPlugin {modKey.FileName}: Npcs.Count={count} (warmup ok)");
+        }
+        catch (Exception ex)
+        {
+            if (capturing)
+            {
+                TraceLookup($"  TryWarmPlugin {modKey.FileName} threw: {ex.GetType().Name}: {ex.Message}");
+            }
+            success = false;
+        }
+
+        // Replace the existing link cache with a fresh one wrapping the
+        // now-primed plugin. The original cache may have already walked
+        // the plugin in its cold state during an earlier TryResolve and
+        // built a partial / corrupt index — priming alone doesn't undo
+        // that, so we hand the caller a clean cache to retry against.
+        //
+        // Guarded on the entry still being backed by the instance we primed:
+        // if it was evicted (or rebuilt from a different file) while we were
+        // priming, installing a cache around the old instance would resurrect
+        // it with no source-path record — the unknown-provenance state the
+        // path bookkeeping exists to prevent. The warmup memo is skipped in
+        // that case so whatever replaced the entry warms itself on demand.
+        bool stillCurrent;
+        lock (GetModLinkCacheLock(modKey))
+        {
+            stillCurrent = _modLinkCaches.ContainsKey(modKey) &&
+                           _modLinkCachePlugins.TryGetValue(modKey, out var current) &&
+                           ReferenceEquals(current, plugin);
+            if (stillCurrent)
+            {
+                if (success)
+                {
+                    _modLinkCaches[modKey] = new ImmutableModLinkCache<ISkyrimMod, ISkyrimModGetter>(plugin, new LinkCachePreferences());
+                }
+                _warmedPlugins[modKey] = success;
+            }
+        }
+        if (capturing)
+        {
+            if (stillCurrent && success) TraceLookup($"  TryWarmPlugin {modKey.FileName}: rebuilt link cache around primed plugin");
+            else if (!stillCurrent) TraceLookup($"  TryWarmPlugin {modKey.FileName}: entry evicted/replaced during warmup; discarding result");
+        }
+
+        return success && stillCurrent;
+    }
+
+    private bool TryAddPluginToCaches(ModKey modKey, HashSet<string> fallBackModFolderNames)
+    {
+        bool capturing = RenderLogCapture.IsCapturing;
+
+        // Resolve the desired source path UP FRONT. PluginProvider checks
+        // fallBackModFolderNames first, then the data folder. We use the
+        // resolved path to (a) detect a stale cache entry built from a
+        // different physical file under the same ModKey and evict it, and
+        // (b) decide inside the factory whether to reuse Mutagen's already-
+        // parsed LoadOrder instance (only when the desired path IS the data
+        // folder path — otherwise the LO instance is the WRONG file).
+        bool resolvedDesired = _pluginProvider.TryGetPlugin(
+            modKey, fallBackModFolderNames, out var providerPlugin, out var resolvedSourcePath);
+
+        // Evict-check, get-or-build, and provenance recording form one atomic
+        // unit per ModKey (see _modLinkCacheLocks) so a concurrent clear or a
+        // sibling mod's rebuild can't interleave and strand a cache entry
+        // without its source-path record.
+        bool wasCached;
+        bool factoryRan = false;
+        bool loBranch = false;
+        bool pluginProviderBranch = false;
+        bool pluginProviderFailed = false;
+        ISkyrimModGetter? loadedPlugin = null;
+        ImmutableModLinkCache<ISkyrimMod, ISkyrimModGetter>? linkCache;
+        string? cachedPathAfterBuild;
+        lock (GetModLinkCacheLock(modKey))
+        {
+            if (resolvedDesired && resolvedSourcePath != null)
+            {
+                EvictIfSourcePathChanged(modKey, resolvedSourcePath);
+            }
+
+            wasCached = _modLinkCaches.ContainsKey(modKey);
+
+            // Use GetOrAdd for an atomic "get or create" operation.
+            // The value factory (the second argument) is only executed if the key is not already present.
+            linkCache = _modLinkCaches.GetOrAdd(modKey, key =>
+            {
+                factoryRan = true;
+                if (!resolvedDesired || providerPlugin == null || resolvedSourcePath == null)
+                {
+                    pluginProviderFailed = true;
+                    return null;
+                }
+
+                // Reuse Mutagen's already-parsed LoadOrder instance ONLY when the
+                // desired path is the data folder path. If fallBackModFolderNames
+                // resolved to a mod folder, we MUST use PluginProvider's instance
+                // — the LO instance is parsed from the data folder file and
+                // would have different content than the mod-folder file the
+                // caller is asking about.
+                string dataFolderCandidate = NormalizePath(
+                    Path.Combine(_environmentStateProvider.DataFolderPath, key.ToString()));
+                bool desiredIsDataFolder = string.Equals(
+                    NormalizePath(resolvedSourcePath), dataFolderCandidate, StringComparison.OrdinalIgnoreCase);
+
+                if (desiredIsDataFolder)
+                {
+                    var modListing = _environmentStateProvider.LoadOrder?.TryGetValue(key);
+                    if (modListing != null && modListing.Mod != null)
+                    {
+                        loBranch = true;
+                        loadedPlugin = modListing.Mod;
+                        _modLinkCachePlugins[key] = modListing.Mod;
+                        _modLinkCacheSourcePaths[key] = NormalizePath(resolvedSourcePath);
+                        PrimeIfEsl(modListing.Mod);
+                        return new ImmutableModLinkCache<ISkyrimMod, ISkyrimModGetter>(modListing.Mod, new LinkCachePreferences());
+                    }
+                }
+
+                pluginProviderBranch = true;
+                loadedPlugin = providerPlugin;
+                _modLinkCachePlugins[key] = providerPlugin;
+                _modLinkCacheSourcePaths[key] = NormalizePath(resolvedSourcePath);
+                PrimeIfEsl(providerPlugin);
+                return new ImmutableModLinkCache<ISkyrimMod, ISkyrimModGetter>(providerPlugin, new LinkCachePreferences());
+            });
+
+            _modLinkCacheSourcePaths.TryGetValue(modKey, out cachedPathAfterBuild);
+        }
+
+        if (capturing)
+        {
+            string folders = fallBackModFolderNames == null
+                ? "(null)"
+                : "[" + string.Join(", ", fallBackModFolderNames) + "]";
+            string outcome;
+            if (wasCached)
+            {
+                outcome = linkCache != null ? "CACHED-OK" : "CACHED-NULL (poisoned)";
+            }
+            else if (factoryRan)
+            {
+                if (loBranch) outcome = "LOAD-FROM-LO";
+                else if (pluginProviderBranch) outcome = "LOAD-FROM-PROVIDER";
+                else if (pluginProviderFailed) outcome = "LOAD-FAILED (provider could not resolve path)";
+                else outcome = "LOAD-FACTORY-RAN-UNKNOWN";
+            }
+            else
+            {
+                outcome = linkCache != null ? "CACHED-OK (raced)" : "CACHED-NULL (raced, poisoned)";
+            }
+            string pathLabel = resolvedSourcePath != null ? resolvedSourcePath : "(unresolved)";
+            // Captured inside the build lock so the trace reflects the state
+            // this call actually produced, not a later concurrent rewrite.
+            string cachedPathLabel = cachedPathAfterBuild ?? "(none)";
+            TraceLookup($"TryAddPluginToCaches mk={modKey.FileName} fallback={folders} → {outcome} " +
+                        $"desiredPath={pathLabel} cachedPath={cachedPathLabel}");
+
+            // Probe the SAME plugin instance the link cache wraps so we know
+            // whether enumeration throws on the very instance the resolver
+            // queries — independent of any fresh re-load via TryGetPlugin.
+            // Reports masters list, NPC count + sample, and a full exception
+            // chain (type/message/stack head) when enumeration throws.
+            if (loadedPlugin != null)
+            {
+                try
+                {
+                    var masters = loadedPlugin.ModHeader.MasterReferences
+                        .Select(m => m.Master.FileName.String).ToList();
+                    TraceLookup($"  loadedPlugin masters=[{string.Join(", ", masters)}], flags={loadedPlugin.ModHeader.Flags}");
+                }
+                catch (Exception ex)
+                {
+                    TraceLookup($"  loadedPlugin masters=THREW({ex.GetType().Name}: {ex.Message})");
+                }
+
+                try
+                {
+                    int npcCount = loadedPlugin.Npcs.Count;
+                    var sample = loadedPlugin.Npcs.Take(8).Select(n => n.FormKey.ToString()).ToList();
+                    TraceLookup($"  loadedPlugin Npcs.Count={npcCount}, firstKeys=[{string.Join(", ", sample)}]");
+                }
+                catch (Exception ex)
+                {
+                    var exChain = new System.Text.StringBuilder();
+                    var cur = ex;
+                    int depth = 0;
+                    while (cur != null && depth < 4)
+                    {
+                        exChain.Append("    [").Append(depth).Append("] ").Append(cur.GetType().FullName)
+                               .Append(": ").Append(cur.Message).Append('\n');
+                        if (!string.IsNullOrEmpty(cur.StackTrace))
+                        {
+                            var lines = cur.StackTrace.Split('\n');
+                            foreach (var line in lines.Take(6))
+                            {
+                                exChain.Append("        ").Append(line.Trim()).Append('\n');
+                            }
+                        }
+                        cur = cur.InnerException;
+                        depth++;
+                    }
+                    TraceLookup($"  loadedPlugin Npcs enumeration threw:\n{exChain}");
+                }
+            }
+        }
+
+        // The method succeeds if the linkCache is not null (either it existed before or was successfully created).
+        return linkCache != null;
+    }
+
+    #region Merge In New Records
+    
+    /// <summary>
+    /// Tries to deep copy a FormLink into another FormLink, copying in records and remapping recursivley
+    /// If the FormLink target is not contained in modKeysToDuplicateFrom, simply adds the FormLink
+    /// </summary>
+    /// <param name="targetFormLink">The FormLink to be modified).</param>
+    /// <param name="formLinkToCopy">The FormLink to copy.</param>
+    /// <param name="modToDuplicateInto">The mod that will contain the modified FromLink data.</param>
+    /// /// <param name="modKeysToDuplicateFrom">The mods whose records are eligible to be deep copied in.</param>
+    /// /// <param name="rootContextModKey">The mod which is the source override of "formLinkToCopy".</param>
+    /// <returns>No return; modification in-place.</returns>
+    public List<MajorRecord> DuplicateInOrAddFormLink<TMod>(
+        IFormLink<IMajorRecordGetter> targetFormLink,
+        IFormLinkGetter<IMajorRecordGetter> formLinkToCopy,
+        TMod modToDuplicateInto,
+        IEnumerable<ModKey> modKeysToDuplicateFrom,
+        ModKey rootContextModKey, 
+        bool handleInjectedRecords,
+        HashSet<string> fallBackModFolderNames,
+        ref List<string> exceptionStrings,
+        params Type[] typesToInspect)
+        where TMod : class, IMod, ISkyrimMod, IModGetter
+    {
+        List<MajorRecord> mergedInRecords = new();
+        if (formLinkToCopy.IsNull)
+        {
+            targetFormLink.SetToNull();
+            return mergedInRecords;
+        }
+        
+        if (_currentDuplicateInMappings.TryGetValue(targetFormLink.FormKey, out var remappedFormKey))
+        {
+            targetFormLink.SetTo(remappedFormKey);
+            return mergedInRecords;
+        }
+        
+        if (!modKeysToDuplicateFrom.Contains(formLinkToCopy.FormKey.ModKey) && !handleInjectedRecords)
+        {
+            if (NpcDiagnosticLogger.IsActive)
+                NpcDiagnosticLogger.Log($"  Merge skip: {formLinkToCopy.FormKey} not provided by appearance mod(s) [{string.Join(", ", modKeysToDuplicateFrom)}]; left FormLink unchanged.");
+            targetFormLink.SetTo(formLinkToCopy);
+            return mergedInRecords;
+        }
+
+        if (!TryGetRecordFromMods(formLinkToCopy, modKeysToDuplicateFrom, fallBackModFolderNames, RecordLookupFallBack.None, out var record) || record == null)
+        {
+            if (NpcDiagnosticLogger.IsActive)
+                NpcDiagnosticLogger.Log($"  Merge abort: could not resolve {formLinkToCopy.FormKey} in appearance mod(s); left FormLink unchanged.");
+            targetFormLink.SetTo(formLinkToCopy);
+            return mergedInRecords;
+        }
+        
+        mergedInRecords = DuplicateFromOnlyReferencedGetters(modToDuplicateInto, record, modKeysToDuplicateFrom, 
+            rootContextModKey, false, handleInjectedRecords, fallBackModFolderNames, ref exceptionStrings, typesToInspect);
+
+        if (_currentDuplicateInMappings.ContainsKey(formLinkToCopy.FormKey))
+        {
+            var deepCopiedFormKey = _currentDuplicateInMappings[formLinkToCopy.FormKey];
+            targetFormLink.SetTo(deepCopiedFormKey);
+        }
+        else
+        {
+            targetFormLink.SetTo(formLinkToCopy.FormKey);
+        }
+        
+        return mergedInRecords;
+    }
+
+    private bool ExplicitRecordCheck(IFormLinkGetter<IMajorRecordGetter> formLinkToCopy,IEnumerable<ModKey> modKeysToDuplicateFrom, HashSet<string> fallBackModFolderNames, out IMajorRecordGetter? recordGetter)
+    {
+        recordGetter = null;
+        // extra check
+        foreach (var modKey in modKeysToDuplicateFrom)
+        {
+            if (TryGetRecordGetterFromMod(formLinkToCopy, modKey, fallBackModFolderNames, RecordLookupFallBack.None,
+                    out recordGetter))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public List<MajorRecord> DuplicateFromOnlyReferencedGetters<TMod>(
+        TMod modToDuplicateInto,
+        IEnumerable<IMajorRecordGetter> recordsToDuplicate,
+        IEnumerable<ModKey> modKeysToDuplicateFrom,
+        ModKey rootContextModKey,
+        bool onlySubRecords, 
+        bool handleInjectedRecords,
+        HashSet<string> fallBackModFolderNames,
+        ref List<string> exceptionStrings,
+        params Type[] typesToInspect)
+        where TMod : class, IMod, ISkyrimMod, IModGetter
+    {
+        using var _ = ContextualPerformanceTracer.Trace("RecordHandler.DuplicateFromOnlyReferencedGetters");
+
+        int exceptionCountBefore = exceptionStrings?.Count ?? 0;
+        // Snapshot the remap table so we can report each newly-duplicated record's
+        // ORIGINAL FormKey (orig -> new), which pinpoints what got pulled in (and
+        // from where) when an undesired record — e.g. an NPC via its Template — is merged.
+        Dictionary<FormKey, FormKey>? mappingBefore =
+            NpcDiagnosticLogger.IsActive ? new Dictionary<FormKey, FormKey>(_currentDuplicateInMappings) : null;
+
+        var result = modToDuplicateInto.DuplicateFromOnlyReferencedGetters<TMod, ISkyrimModGetter>(
+            recordsToDuplicate,
+            this,
+            modKeysToDuplicateFrom,
+            onlySubRecords,
+            handleInjectedRecords,
+            fallBackModFolderNames,
+            RecordLookupFallBack.None, // Don't fall back to winning override or origin - if the chain of new records breaks, don't search through overrides
+            // Override searching is the job of RecordHandler.DeepGetOverriddenDependencyRecords()
+            ref _currentDuplicateInMappings,
+            ref _currenTraversedFormLinks,
+            ref exceptionStrings,
+            typesToInspect);
+
+        // Per-NPC merge-in detail: the concrete set of referenced records pulled
+        // into the output plugin for the NPC currently being logged.
+        if (NpcDiagnosticLogger.IsActive)
+        {
+            // Reverse-map (new FormKey -> original FormKey) for entries added by this call.
+            var newToOrig = new Dictionary<FormKey, FormKey>();
+            if (mappingBefore != null)
+            {
+                foreach (var kv in _currentDuplicateInMappings)
+                {
+                    if (!mappingBefore.ContainsKey(kv.Key))
+                    {
+                        newToOrig[kv.Value] = kv.Key;
+                    }
+                }
+            }
+
+            NpcDiagnosticLogger.Log($"  Merge-in (DuplicateFromOnlyReferencedGetters): copied {result.Count} referenced record(s) from [{string.Join(", ", modKeysToDuplicateFrom)}] (onlySubRecords={onlySubRecords}, handleInjected={handleInjectedRecords}).");
+            foreach (var r in result)
+            {
+                string origin = newToOrig.TryGetValue(r.FormKey, out var orig) ? $" (was {orig})" : string.Empty;
+                NpcDiagnosticLogger.Log($"      + [{r.GetType().Name}] {r.EditorID ?? "(no EditorID)"} {r.FormKey}{origin}");
+            }
+            if (exceptionStrings != null)
+            {
+                foreach (var ex in exceptionStrings.Skip(exceptionCountBefore))
+                {
+                    NpcDiagnosticLogger.Log($"      ! merge note: {ex}");
+                }
+            }
+        }
+
+        return result;
+    }
+
+    // convenience overload for a single ModKey
+    public List<MajorRecord> DuplicateFromOnlyReferencedGetters<TMod>(
+        TMod modToDuplicateInto,
+        IEnumerable<IMajorRecordGetter> recordsToDuplicate,
+        ModKey modKeyToDuplicateFrom,
+        bool onlySubRecords, 
+        bool handleInjectedRecords,
+        HashSet<string> fallBackModFolderNames,
+        ref List<string> exceptionStrings,
+        params Type[] typesToInspect)
+        where TMod : class, IMod, ISkyrimMod, IModGetter
+    {
+        return DuplicateFromOnlyReferencedGetters(
+            modToDuplicateInto,
+            recordsToDuplicate,
+            new[] { modKeyToDuplicateFrom },
+            modKeyToDuplicateFrom,
+            onlySubRecords,
+            handleInjectedRecords,
+            fallBackModFolderNames,
+            ref exceptionStrings,
+            typesToInspect);
+    }
+    
+    // convenience overload for a single Record
+    public List<MajorRecord> DuplicateFromOnlyReferencedGetters<TMod>(
+        TMod modToDuplicateInto,
+        IMajorRecordGetter recordToDuplicate,
+        IEnumerable<ModKey> modKeysToDuplicateFrom,
+        ModKey rootContextModKey,
+        bool onlySubRecords,
+        bool handleInjectedRecords,
+        HashSet<string> fallBackModFolderNames,
+        ref List<string> exceptionStrings,
+        params Type[] typesToInspect)
+        where TMod : class, IMod, ISkyrimMod, IModGetter
+    {
+        return DuplicateFromOnlyReferencedGetters(
+            modToDuplicateInto,
+            new[] { recordToDuplicate },
+            modKeysToDuplicateFrom,
+            rootContextModKey,
+            onlySubRecords,
+            handleInjectedRecords,
+            fallBackModFolderNames,
+            ref exceptionStrings,
+            typesToInspect);
+    }
+    
+    // convenience overload for a single Record and ModKey
+    public List<MajorRecord> DuplicateFromOnlyReferencedGetters<TMod>(
+        TMod modToDuplicateInto,
+        IMajorRecordGetter recordToDuplicate,
+        ModKey modKeyToDuplicateFrom,
+        bool onlySubRecords,
+        bool handleInjectedRecords,
+        HashSet<string> fallBackModFolderNames,
+        ref List<string> exceptionStrings,
+        params Type[] typesToInspect)
+        where TMod : class, IMod, ISkyrimMod, IModGetter
+    {
+        return DuplicateFromOnlyReferencedGetters(
+            modToDuplicateInto,
+            new[] { recordToDuplicate },
+            new[] { modKeyToDuplicateFrom },
+            modKeyToDuplicateFrom,
+            onlySubRecords,
+            handleInjectedRecords,
+            fallBackModFolderNames,
+            ref exceptionStrings,
+            typesToInspect);
+    }
+    #endregion
+
+    #region Collect Overrides of Existing Records
+    public HashSet<IModContext<ISkyrimMod, ISkyrimModGetter, IMajorRecord, IMajorRecordGetter>>
+        DeepGetOverriddenDependencyRecords(IMajorRecordGetter majorRecordGetter, List<ModKey> relevantContextKeys, HashSet<FormKey> searchedFormKeys, HashSet<string> fallBackModFolderNames, int maxNestedIntervalDepth, CancellationToken ct)
+    {
+        return DeepGetOverriddenDependencyRecords(majorRecordGetter.EnumerateFormLinks(), relevantContextKeys,
+            searchedFormKeys, fallBackModFolderNames, maxNestedIntervalDepth, ct);
+    }
+
+    /// <summary>
+    /// Override-discovery variant that traverses an explicit set of FormLinks instead of every
+    /// link on a record. SkyPatcher mode uses this to restrict discovery to the NPC's
+    /// appearance-descended links (skin, head texture, race, hair color, head parts, outfit) so
+    /// non-appearance overrides (packages, factions, items, AI data) are never pulled into the
+    /// output plugin as masters.
+    /// </summary>
+    public HashSet<IModContext<ISkyrimMod, ISkyrimModGetter, IMajorRecord, IMajorRecordGetter>>
+        DeepGetOverriddenDependencyRecords(IEnumerable<IFormLinkGetter> containedFormLinks, List<ModKey> relevantContextKeys, HashSet<FormKey> searchedFormKeys, HashSet<string> fallBackModFolderNames, int maxNestedIntervalDepth, CancellationToken ct)
+    {
+        using var _ = ContextualPerformanceTracer.Trace("RecordHandler.DeepGetOverriddenDependencyRecords");
+        foreach (var modKey in relevantContextKeys)
+        {
+            TryAddPluginToCaches(modKey, fallBackModFolderNames);
+        }
+        // Opt-in record-provenance tracking: carry the traversal path so each discovered
+        // override can be attributed a root -> ... -> record chain (consumed when/if the
+        // override is actually written to the output). Null when disabled.
+        List<RecordProvenanceDiag.Node>? provenanceChain =
+            RecordProvenanceDiag.IsEnabled ? new List<RecordProvenanceDiag.Node>() : null;
+        HashSet<IModContext<ISkyrimMod, ISkyrimModGetter, IMajorRecord, IMajorRecordGetter>> dependencyContexts = new();
+        foreach (var link in containedFormLinks)
+        {
+            ct.ThrowIfCancellationRequested();
+            CollectOverriddenDependencyRecords(link, relevantContextKeys, dependencyContexts, maxNestedIntervalDepth, 0, searchedFormKeys, provenanceChain, ct);
+        }
+
+        if (NpcDiagnosticLogger.IsActive)
+        {
+            NpcDiagnosticLogger.Log($"  Override discovery (DeepGetOverriddenDependencyRecords): found {dependencyContexts.Count} overridden dependency record(s) across [{string.Join(", ", relevantContextKeys)}].");
+            foreach (var ctx in dependencyContexts)
+            {
+                NpcDiagnosticLogger.Log($"      * [{ctx.Record.GetType().Name}] {ctx.Record.EditorID ?? "(no EditorID)"} {ctx.Record.FormKey} (override in {ctx.ModKey})");
+            }
+        }
+
+        return dependencyContexts.ToHashSet();;
+    }
+    
+    /// <summary>
+    /// Gets ALL override records from the specified plugins, regardless of NPC traversal.
+    /// This is a simpler but less targeted approach compared to DeepGetOverriddenDependencyRecords.
+    /// </summary>
+    /// <param name="relevantContextKeys">The ModKeys of plugins to search for overrides.</param>
+    /// <param name="searchedFormKeys">FormKeys that have already been processed (will be updated).</param>
+    /// <param name="fallBackModFolderNames">Fallback folder paths for plugin loading.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>A HashSet of all override record contexts found in the specified plugins.</returns>
+    public HashSet<IModContext<ISkyrimMod, ISkyrimModGetter, IMajorRecord, IMajorRecordGetter>>
+        GetAllOverriddenDependencyRecords(List<ModKey> relevantContextKeys, HashSet<FormKey> searchedFormKeys, 
+            HashSet<string> fallBackModFolderNames, CancellationToken ct)
+    {
+        using var _ = ContextualPerformanceTracer.Trace("RecordHandler.GetAllOverriddenDependencyRecords");
+        
+        foreach (var modKey in relevantContextKeys)
+        {
+            TryAddPluginToCaches(modKey, fallBackModFolderNames);
+        }
+        
+        HashSet<IModContext<ISkyrimMod, ISkyrimModGetter, IMajorRecord, IMajorRecordGetter>> dependencyContexts = new();
+        
+        foreach (var modKey in relevantContextKeys)
+        {
+            ct.ThrowIfCancellationRequested();
+            
+            if (!_modLinkCaches.TryGetValue(modKey, out var linkCache) || linkCache == null)
+            {
+                continue;
+            }
+            
+            // Get the plugin to iterate through all its records
+            if (!_pluginProvider.TryGetPlugin(modKey, fallBackModFolderNames, out var plugin) || plugin == null)
+            {
+                continue;
+            }
+            
+            // Iterate through all major records in the plugin
+            foreach (var record in plugin.EnumerateMajorRecords())
+            {
+                ct.ThrowIfCancellationRequested();
+                
+                // Skip if already processed
+                if (searchedFormKeys.Contains(record.FormKey))
+                {
+                    continue;
+                }
+
+                if (record is INpcGetter)
+                {
+                    continue; // patcher has explicit logic to manually handle NPCs
+                }
+                
+                // Check if this is an override (FormKey's ModKey is NOT one of the appearance mod's plugins)
+                if (!relevantContextKeys.Contains(record.FormKey.ModKey))
+                {
+                    // This is an override record (originates from outside the mod's plugins)
+                    searchedFormKeys.Add(record.FormKey);
+    
+                    try
+                    {
+                        var context = linkCache.ResolveContext(record.FormKey, record.Registration.GetterType);
+                        if (context != null)
+                        {
+                            dependencyContexts.Add(context);
+                        }
+                    }
+                    catch
+                    {
+                        // Skip records that can't be resolved to a context
+                    }
+                }
+            }
+        }
+    
+    return dependencyContexts;
+}
+    
+    /// <summary>
+    /// Duplicates ALL override records from the specified plugins as new records.
+    /// This is a simpler but less targeted approach compared to DuplicateInOverrideRecords.
+    /// </summary>
+    public HashSet<IMajorRecord>
+        DuplicateAllOverrideRecordsAsNew(IMajorRecord rootRecord, List<ModKey> relevantContextKeys, 
+            ModKey rootContextKey, ModKey npcSourceModKey, bool handleInjectedRecords,
+            HashSet<string> fallBackModFolderNames, ref List<string> exceptionStrings, 
+            HashSet<FormKey> searchedFormKeys, CancellationToken ct)
+    {
+        using var _ = ContextualPerformanceTracer.Trace("RecordHandler.DuplicateAllOverrideRecordsAsNew");
+        HashSet<IMajorRecord> mergedInRecords = new();
+        
+        foreach (var modKey in relevantContextKeys)
+        {
+            TryAddPluginToCaches(modKey, fallBackModFolderNames);
+        }
+
+        Dictionary<FormKey, FormKey> remappedOverrideMap = new();
+        
+        foreach (var modKey in relevantContextKeys)
+        {
+            ct.ThrowIfCancellationRequested();
+            
+            if (!_modLinkCaches.TryGetValue(modKey, out var linkCache) || linkCache == null)
+            {
+                continue;
+            }
+            
+            if (!_pluginProvider.TryGetPlugin(modKey, fallBackModFolderNames, out var plugin) || plugin == null)
+            {
+                continue;
+            }
+            
+            foreach (var record in plugin.EnumerateMajorRecords())
+            {
+                ct.ThrowIfCancellationRequested();
+                
+                // Skip if already processed
+                if (searchedFormKeys.Contains(record.FormKey))
+                {
+                    continue;
+                }
+                
+                // Check if this is an override (FormKey's ModKey is NOT one of the appearance mod's plugins)
+                if (!relevantContextKeys.Contains(record.FormKey.ModKey))
+                {
+                    searchedFormKeys.Add(record.FormKey);
+    
+                    // Skip if already mapped
+                    if (_currentDuplicateInMappings.ContainsKey(record.FormKey))
+                    {
+                        remappedOverrideMap.TryAdd(record.FormKey, _currentDuplicateInMappings[record.FormKey]);
+                        continue;
+                    }
+                    
+                    try
+                    {
+                        var context = linkCache.ResolveContext(record.FormKey, record.Registration.GetterType);
+                        if (context != null)
+                        {
+                            var duplicate = context.DuplicateIntoAsNewRecord(_environmentStateProvider.OutputMod);
+                            RecordProvenanceDiag.RecordBulkOverrideImport(record.FormKey, record.EditorID,
+                                record.Registration.Name, duplicate.FormKey, modKey);
+                            // Origin recorded BEFORE the rename, so it keeps the source EditorID.
+                            // Unlike RecordProvenanceDiag above this map is not opt-in: the "missing
+                            // master" diagnostics read it, and so does the FaceGen shape rename that
+                            // keeps a renamed head part paired with its baked geometry.
+                            RecordMergedRecordOrigin(record.FormKey, duplicate.FormKey, record.EditorID);
+                            duplicate.EditorID = (duplicate.EditorID ?? "NoEditorID") + "_" + modKey.FileName;
+                            _currentDuplicateInMappings.Add(record.FormKey, duplicate.FormKey);
+                            remappedOverrideMap.Add(record.FormKey, duplicate.FormKey);
+                            mergedInRecords.Add(duplicate);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        exceptionStrings.Add($"Failed to duplicate {record.FormKey}: {ex.Message}");
+                    }
+                }
+            }
+        }
+        
+        // Remap links in all merged records and root record
+        foreach (var newRecord in mergedInRecords.And(rootRecord).ToArray())
+        {
+            newRecord.RemapLinks(remappedOverrideMap);
+        }
+        
+        // Now merge in any new records that the overrides may reference
+        var importSourceModKeys = relevantContextKeys
+            .Distinct()
+            .Where(k => k != npcSourceModKey)
+            .ToHashSet();
+        var newMergedSubRecords = DuplicateFromOnlyReferencedGetters(_environmentStateProvider.OutputMod, 
+            mergedInRecords, importSourceModKeys, rootContextKey, true, handleInjectedRecords, 
+            fallBackModFolderNames, ref exceptionStrings);
+        
+        mergedInRecords.UnionWith(newMergedSubRecords);
+        
+        return mergedInRecords;
+    }
+    
+    private void CollectOverriddenDependencyRecords(IFormLinkGetter formLinkGetter, List<ModKey> relevantContextKeys,
+        HashSet<IModContext<ISkyrimMod, ISkyrimModGetter, IMajorRecord, IMajorRecordGetter>> collectedRecords, int maxNestedIntervalDepth, int currentDepth, HashSet<FormKey> searchedFormKeys, List<RecordProvenanceDiag.Node>? provenanceChain, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (formLinkGetter.IsNull)
+        {
+            return;
+        }
+
+        currentDepth++;
+        if (currentDepth > maxNestedIntervalDepth) {return;}
+
+        if (searchedFormKeys == null)
+        {
+            searchedFormKeys = new HashSet<FormKey>();
+        }
+
+        searchedFormKeys.Add(formLinkGetter.FormKey);
+
+        IMajorRecordGetter? modRecord = null;
+
+        // try to get the record version in the given mod plugin if possible
+        foreach (var modKey in relevantContextKeys)
+        {
+            if (_modLinkCaches.TryGetValue(modKey, out var scopedCache) && scopedCache != null &&
+                scopedCache.TryResolve(formLinkGetter, out modRecord) && modRecord != null)
+            {
+                var context = scopedCache.ResolveContext(formLinkGetter);
+                currentDepth = 0; // reset the interval search
+                if (!relevantContextKeys.Contains(formLinkGetter.FormKey.ModKey)) // this is an override rather than a new record
+                {
+                    collectedRecords.Add(context);
+                    RecordProvenanceDiag.RecordOverrideDiscoveryChain(formLinkGetter.FormKey, modRecord.EditorID, provenanceChain);
+                }
+                break;
+            }
+        }
+        
+        // otherwise, traverse the parent record
+        if (modRecord is null)
+        {
+            var parentmod = formLinkGetter.FormKey.ModKey;
+            lock (GetModLinkCacheLock(parentmod))
+            {
+                if (!_modLinkCaches.ContainsKey(parentmod))
+                {
+                    var parentListing = _environmentStateProvider.LoadOrder.TryGetValue(parentmod);
+                    if (parentListing != null && parentListing.Mod != null)
+                    {
+                        _modLinkCachePlugins[parentListing.ModKey] = parentListing.Mod;
+                        _modLinkCacheSourcePaths[parentListing.ModKey] = NormalizePath(
+                            Path.Combine(_environmentStateProvider.DataFolderPath, parentmod.ToString()));
+                        _modLinkCaches[parentListing.ModKey] = new ImmutableModLinkCache<ISkyrimMod, ISkyrimModGetter>(parentListing.Mod, new LinkCachePreferences());
+                    }
+                }
+            }
+
+            if (_modLinkCaches.TryGetValue(parentmod, out var parentCache) && parentCache != null)
+            {
+                parentCache.TryResolve(formLinkGetter, out modRecord);
+            }
+        }
+
+        if (modRecord != null)
+        {
+            // While descending into this record's links, it is the sub-records' provenance parent.
+            provenanceChain?.Add(new RecordProvenanceDiag.Node(formLinkGetter.FormKey, modRecord.EditorID));
+            var sublinks = modRecord.EnumerateFormLinks();
+            foreach (var subLink in sublinks.Where(x => !searchedFormKeys.Contains(x.FormKey)).ToArray())
+            {
+                CollectOverriddenDependencyRecords(subLink, relevantContextKeys, collectedRecords, maxNestedIntervalDepth, currentDepth, searchedFormKeys, provenanceChain, ct);
+            }
+            provenanceChain?.RemoveAt(provenanceChain.Count - 1);
+        }
+    }
+
+    #endregion
+
+    #region Merge In Overrides of Existing Records
+
+    public HashSet<IMajorRecord> // return is For Caller's Information only; duplication and remapping happens internally
+        DuplicateInOverrideRecords(IMajorRecordGetter majorRecordGetter, IMajorRecord rootRecord, List<ModKey> relevantContextKeys, ModKey rootContextKey, ModKey npcSourceModKey, bool handleInjectedRecords, int maxNestedIntervalDepth, HashSet<string> fallBackModFolderNames, ref List<string> exceptionStrings, HashSet<FormKey> searchedFormKeys, CancellationToken ct, IReadOnlyCollection<IFormLinkGetter>? additionalRootLinks = null, IReadOnlyCollection<FormKey>? excludedRootFormKeys = null)
+    {
+        // Exclusions are applied to the traversed record's OWN links only — an additional root
+        // naming the same FormKey (e.g. the recipient's outfit when it coincides with the donor's)
+        // is deliberately appended afterwards and survives.
+        var rootLinks = majorRecordGetter.EnumerateFormLinks().AsEnumerable();
+        if (excludedRootFormKeys is { Count: > 0 })
+        {
+            rootLinks = rootLinks.Where(l => !excludedRootFormKeys.Contains(l.FormKey));
+        }
+        if (additionalRootLinks is { Count: > 0 })
+        {
+            rootLinks = rootLinks.Concat(additionalRootLinks);
+        }
+
+        return DuplicateInOverrideRecordsFromLinks(rootLinks.ToArray(), rootRecord, relevantContextKeys,
+            rootContextKey, npcSourceModKey, handleInjectedRecords, maxNestedIntervalDepth,
+            fallBackModFolderNames, ref exceptionStrings, searchedFormKeys, ct);
+    }
+
+    /// <summary>
+    /// Same as <see cref="DuplicateInOverrideRecords"/> but traverses from an explicit set of root
+    /// links instead of (or in addition to) a record's own links. Lets Include-As-New duplicate the
+    /// chain hanging from a link the eventual output does NOT carry on the traversed record — e.g.
+    /// the RECIPIENT's outfit when discovery walks the donor (Include Outfits off), or extra roots
+    /// alongside an 'Include All' bulk import. <paramref name="rootRecord"/> still gets its links
+    /// remapped against everything duplicated here.
+    /// </summary>
+    public HashSet<IMajorRecord>
+        DuplicateInOverrideRecordsFromLinks(IReadOnlyCollection<IFormLinkGetter> rootLinks, IMajorRecord rootRecord, List<ModKey> relevantContextKeys, ModKey rootContextKey, ModKey npcSourceModKey, bool handleInjectedRecords, int maxNestedIntervalDepth, HashSet<string> fallBackModFolderNames, ref List<string> exceptionStrings, HashSet<FormKey> searchedFormKeys, CancellationToken ct)
+    {
+        using var _ = ContextualPerformanceTracer.Trace("RecordHandler.DuplicateInOverrideRecords");
+        HashSet<IMajorRecord> mergedInRecords = new();
+        var containedFormLinks = rootLinks;
+        foreach (var modKey in relevantContextKeys)
+        {
+            TryAddPluginToCaches(modKey, fallBackModFolderNames);
+        }
+
+        Dictionary<FormKey, FormKey> remappedOverrideMap = new();
+        // Opt-in record-provenance tracking: the recursion path doubles as each duplicated
+        // record's root -> ... -> parent chain. Null when disabled.
+        List<RecordProvenanceDiag.Node>? provenanceChain =
+            RecordProvenanceDiag.IsEnabled ? new List<RecordProvenanceDiag.Node>() : null;
+        foreach (var link in containedFormLinks)
+        {
+            ct.ThrowIfCancellationRequested();
+            TraverseAndDuplicateInOverrideRecords(link, relevantContextKeys, _environmentStateProvider.OutputMod, remappedOverrideMap, mergedInRecords, maxNestedIntervalDepth, 0, ref exceptionStrings, searchedFormKeys, provenanceChain, ct);
+        }
+        
+        foreach (var newRecord in mergedInRecords.And(rootRecord).ToArray())
+        {
+            newRecord.RemapLinks(remappedOverrideMap);
+        }
+        
+        // Now go through all merged-in override records and also merge in any new records they may be pointing to
+        var importSourceModKeys = relevantContextKeys
+            .Distinct()
+            .Where(k => k != npcSourceModKey) // don't copy from the mod that defines the NPC, since that is a base mod
+            .ToHashSet();
+        var newMergedSubRecords = DuplicateFromOnlyReferencedGetters(_environmentStateProvider.OutputMod, mergedInRecords, importSourceModKeys, rootContextKey, true, handleInjectedRecords, fallBackModFolderNames, ref exceptionStrings);
+        
+        mergedInRecords.UnionWith(newMergedSubRecords);
+        
+        return mergedInRecords;
+    }
+
+    private bool TraverseAndDuplicateInOverrideRecords(IFormLinkGetter formLinkGetter, List<ModKey> relevantContextKeys,
+        ISkyrimMod outputMod,
+        Dictionary<FormKey, FormKey> remappedSubLinks, HashSet<IMajorRecord> mergedInRecords,
+        int maxNestedIntervalDepth, int currentDepth, ref List<string> exceptionStrings, HashSet<FormKey> searchedFormKeys, List<RecordProvenanceDiag.Node>? provenanceChain, CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        if (formLinkGetter.IsNull)
+        {
+            return false;
+        }
+
+        currentDepth++;
+        if (currentDepth > maxNestedIntervalDepth) {return false;}
+
+        searchedFormKeys.Add(formLinkGetter.FormKey);
+
+        bool parentRecordShouldBeMergedIn = false;
+        bool currentRecordHasBeenMergedIn = false;
+        IMajorRecordGetter? traversedModRecord = null;
+        // Source-side EditorID of the record this link resolved to, captured before any
+        // duplication mutates it (the duplicate gets a plugin-name suffix). Used for the
+        // record-provenance chain, which reports source identities.
+        string? sourceEditorId = null;
+        IModContext<ISkyrimMod, ISkyrimModGetter, IMajorRecord, IMajorRecordGetter>? modContext = null;
+
+        // try to get the record version in the given mod plugin if possible
+        foreach (var modKey in relevantContextKeys)
+        {
+            if (_modLinkCaches.TryGetValue(modKey, out var scopedCache) && scopedCache != null &&
+                scopedCache.TryResolve(formLinkGetter, out traversedModRecord) &&
+                traversedModRecord != null)
+            {
+                sourceEditorId = traversedModRecord.EditorID;
+                modContext = scopedCache.ResolveContext(formLinkGetter);
+                currentDepth = 0; // reset the interval search
+                if (!relevantContextKeys.Contains(formLinkGetter.FormKey.ModKey)) // this is an override rather than a new record
+                {
+                    if (_currentDuplicateInMappings.ContainsKey(formLinkGetter.FormKey))
+                    {
+                        // This record has already been merged in from a previous function call on a previously processed NPC
+                        // add it to remappedSubLinks so that the caller knows to remap it in the current NPC
+                        // no need to add it to mergedInRecords because its AssetLinks have already been processed during the previous iteration
+                        remappedSubLinks.TryAdd(formLinkGetter.FormKey, _currentDuplicateInMappings[formLinkGetter.FormKey]);
+                        return true;
+                    }
+
+                    var duplicate = modContext.DuplicateIntoAsNewRecord(outputMod);
+                    RecordMergedRecordOrigin(formLinkGetter.FormKey, duplicate.FormKey, traversedModRecord.EditorID);
+                    if (provenanceChain != null)
+                    {
+                        RecordProvenanceDiag.RecordMergedAsNew(formLinkGetter.FormKey, traversedModRecord.EditorID,
+                            traversedModRecord.Registration.Name, duplicate.FormKey, provenanceChain);
+                    }
+                    duplicate.EditorID = (duplicate.EditorID ?? "NoEditorID") + "_" + modKey.FileName;
+                    traversedModRecord = duplicate;
+                    _currentDuplicateInMappings.Add(formLinkGetter.FormKey, duplicate.FormKey);
+                    remappedSubLinks.Add(formLinkGetter.FormKey, duplicate.FormKey);
+                    mergedInRecords.Add(duplicate);
+                    parentRecordShouldBeMergedIn = true;
+                    currentRecordHasBeenMergedIn = true;
+                    if (NpcDiagnosticLogger.IsActive)
+                        NpcDiagnosticLogger.Log($"  Override merged: {formLinkGetter.FormKey} ({modKey}) -> {duplicate.FormKey} [{duplicate.GetType().Name}] EditorID='{duplicate.EditorID}'.");
+                }
+                break;
+            }
+        }
+        
+        // otherwise, traverse the parent record
+        if (traversedModRecord is null)
+        {
+            var parentmod = formLinkGetter.FormKey.ModKey;
+            lock (GetModLinkCacheLock(parentmod))
+            {
+                if (!_modLinkCaches.ContainsKey(parentmod))
+                {
+                    var parentListing = _environmentStateProvider.LoadOrder.TryGetValue(parentmod);
+                    if (parentListing != null && parentListing.Mod != null)
+                    {
+                        _modLinkCachePlugins[parentListing.ModKey] = parentListing.Mod;
+                        _modLinkCacheSourcePaths[parentListing.ModKey] = NormalizePath(
+                            Path.Combine(_environmentStateProvider.DataFolderPath, parentmod.ToString()));
+                        _modLinkCaches[parentListing.ModKey] = new ImmutableModLinkCache<ISkyrimMod, ISkyrimModGetter>(parentListing.Mod, new LinkCachePreferences());
+                    }
+                }
+            }
+
+            if (_modLinkCaches.TryGetValue(parentmod, out var parentCache) && parentCache != null)
+            {
+                if (parentCache.TryResolve(formLinkGetter, out traversedModRecord) &&
+                    traversedModRecord != null)
+                {
+                    sourceEditorId = traversedModRecord.EditorID;
+                }
+            }
+        }
+
+        if (traversedModRecord != null)
+        {
+            // While descending into this record's links, it is the sub-records' provenance parent
+            // (source identity — captured before any duplication renamed it).
+            provenanceChain?.Add(new RecordProvenanceDiag.Node(formLinkGetter.FormKey, sourceEditorId));
+            var sublinks = traversedModRecord.EnumerateFormLinks().Distinct();
+            foreach (var subLink in sublinks.Where(x => !searchedFormKeys.Contains(x.FormKey)).ToArray())
+            {
+                // don't repeat records that have already been processed
+                bool hasCachedSubLink = false;
+                if (_currentDuplicateInMappings.ContainsKey(subLink.FormKey))
+                {
+                    hasCachedSubLink = true;
+                    remappedSubLinks.TryAdd(subLink.FormKey, _currentDuplicateInMappings[subLink.FormKey]);
+                    parentRecordShouldBeMergedIn = true;
+                    break;
+                }
+
+                if (hasCachedSubLink)
+                {
+                    continue;
+                }
+
+                bool subRecordsAreOverrides = TraverseAndDuplicateInOverrideRecords(subLink, relevantContextKeys, outputMod, remappedSubLinks, mergedInRecords, maxNestedIntervalDepth, currentDepth, ref exceptionStrings, searchedFormKeys, provenanceChain, ct);
+                if (subRecordsAreOverrides)
+                {
+                    parentRecordShouldBeMergedIn = true; // merge in this record (even if it's not itself contained in the source mod) because this record's subrecords have been merged in.
+                }
+            }
+            // Done descending — this record is no longer the provenance parent.
+            provenanceChain?.RemoveAt(provenanceChain.Count - 1);
+
+            if (parentRecordShouldBeMergedIn &&
+                !currentRecordHasBeenMergedIn &&
+                !remappedSubLinks.ContainsKey(formLinkGetter.FormKey))
+            {
+                // A BRIDGE parent: not itself overridden by the mod, duplicated only because an
+                // overridden descendant needs a reachable private chain (e.g. the vanilla Outfit
+                // above RS Children's ArmorAddons). Registered in the batch-scoped map exactly
+                // like a direct override duplicate — the outfit-directive delivery looks the
+                // chain HEAD up there (Patcher.DeliverIncludeAsNewOutfitDirectives), and a later
+                // NPC in the batch must reuse this copy instead of minting another.
+                if (_currentDuplicateInMappings.TryGetValue(formLinkGetter.FormKey, out var existingBridge))
+                {
+                    remappedSubLinks.TryAdd(formLinkGetter.FormKey, existingBridge);
+                }
+                else if (Auxilliary.TryDuplicateGenericRecordAsNew(traversedModRecord, outputMod, out var duplicate, out string exceptionString))
+                {
+                    RecordMergedRecordOrigin(formLinkGetter.FormKey, duplicate.FormKey, traversedModRecord.EditorID);
+                    if (provenanceChain != null)
+                    {
+                        RecordProvenanceDiag.RecordBridgeParent(formLinkGetter.FormKey, sourceEditorId,
+                            traversedModRecord.Registration.Name, (FormKey)duplicate.FormKey, provenanceChain);
+                    }
+                    duplicate.EditorID = (duplicate.EditorID ?? "NoEditorID") + "_" + formLinkGetter.FormKey.ModKey;
+                    _currentDuplicateInMappings.Add(formLinkGetter.FormKey, duplicate.FormKey);
+                    remappedSubLinks.Add(formLinkGetter.FormKey, duplicate.FormKey);
+                    mergedInRecords.Add(duplicate);
+                }
+                else
+                {
+                    // The bridge could not be built, so nothing below it is deliverable: the private
+                    // copies down there stay unreachable no matter what we do above. Report that
+                    // upward as "do not merge my parent" — otherwise the failure is swallowed and
+                    // every ancestor gets bridged anyway, minting copies whose chain is already
+                    // severed. Measured on RS Children: an NPC's AI package reaches a Cell, the
+                    // Cell's bridge fails (Cells and placed references have no top-level group to
+                    // duplicate into), and 24 Packages, 5 Quests, a DialogTopic and a Faction were
+                    // minted above it as pure waste — plus one Error line per failure.
+                    //
+                    // Not an error: the only way TryDuplicateGenericRecordAsNew fails is
+                    // GetTopLevelGroup rejecting the type, which is structural and expected for
+                    // world records. It stays out of exceptionStrings (which the patcher surfaces as
+                    // CRITICAL) and is recorded in the per-NPC diagnostic instead.
+                    parentRecordShouldBeMergedIn = false;
+                    if (NpcDiagnosticLogger.IsActive)
+                        NpcDiagnosticLogger.Log($"  Bridge parent {formLinkGetter.FormKey} " +
+                            $"({Auxilliary.GetLogString(traversedModRecord, _settings.LocalizationLanguage)}) " +
+                            $"cannot be duplicated ({exceptionString}); its subtree is not " +
+                            "deliverable, so no ancestor is bridged for it.");
+                }
+            }
+        }
+
+        return parentRecordShouldBeMergedIn;
+    }
+    #endregion
+    
+    #region Misc Functions
+
+    public bool TryGetRecordFromMod(FormKey formKey, Type type, ModKey modKey, HashSet<string> fallBackModFolderNames,  RecordLookupFallBack fallbackMode,
+        out dynamic? record)
+    {
+        using var _ = ContextualPerformanceTracer.Trace("RecordHandler.TryGetRecordFromMod");
+        record = null;
+        if (_pluginProvider.TryGetPlugin(modKey, fallBackModFolderNames, out var plugin) && plugin != null)
+        {
+            var group = plugin.TryGetTopLevelGroup(type);
+            if (group != null && group.ContainsKey(formKey))
+            {
+                record = group[formKey];
+                return true;
+            }
+        }
+        return false;
+    }
+    
+    public bool TryGetRecordGetterFromMod(IFormLinkGetter formLink, ModKey modKey, HashSet<string> fallBackModFolderNames, RecordLookupFallBack fallbackMode, out IMajorRecordGetter? record)
+    {
+        bool capturing = RenderLogCapture.IsCapturing;
+        if (TryAddPluginToCaches(modKey, fallBackModFolderNames))
+        {
+            // TryGetValue (not the indexer): a sibling mod's eviction can
+            // remove or null the entry between the build above and this read.
+            IMajorRecordGetter? modRecord = null;
+            bool resolved = _modLinkCaches.TryGetValue(modKey, out var scopedCache) && scopedCache != null &&
+                            scopedCache.TryResolve(formLink, out modRecord) && modRecord is not null;
+
+            // Cold-ESL recovery: if the lookup missed but the FormKey's
+            // natural origin IS this plugin (so the plugin should own this
+            // record as a new entry, not as an override of a master), the
+            // miss may be the Mutagen lazy-parse bug rather than a true
+            // absence. Prime the plugin's NPC group via TryWarmPlugin and
+            // retry once. Memoized per-ModKey, so this incurs at most one
+            // NPC-GRUP walk per buggy plugin per session — and never runs
+            // for queries whose ModKey doesn't match the queried plugin
+            // (those misses are expected and shouldn't trigger work).
+            if (!resolved && formLink.FormKey.ModKey == modKey)
+            {
+                if (capturing) TraceLookup($"  triggering deferred warmup for {modKey.FileName} (suspicious miss)");
+                bool warmed = TryWarmPlugin(modKey);
+                if (warmed)
+                {
+                    bool retryResolved = _modLinkCaches.TryGetValue(modKey, out var warmedCache) && warmedCache != null &&
+                                         warmedCache.TryResolve(formLink, out modRecord) && modRecord is not null;
+                    if (capturing) TraceLookup($"  post-warmup retry on {modKey.FileName}: TryResolve={retryResolved}");
+                    if (retryResolved && !resolved)
+                    {
+                        TraceLookup($"  recovered fk={formLink.FormKey} via post-warmup retry on {modKey.FileName}");
+                    }
+                    resolved = retryResolved;
+                }
+                else if (capturing)
+                {
+                    TraceLookup($"  warmup failed for {modKey.FileName}; not retrying TryResolve");
+                }
+            }
+            else if (!resolved && capturing)
+            {
+                TraceLookup($"  not triggering warmup: formLink.FormKey.ModKey={formLink.FormKey.ModKey.FileName}, modKey={modKey.FileName}, equal={formLink.FormKey.ModKey == modKey}");
+            }
+
+            if (capturing)
+            {
+                int? recordCount = null;
+                string? probeError = null;
+                List<string>? sampleNpcKeys = null;
+                try
+                {
+                    // Probe NPC count to confirm Mutagen actually parsed the plugin's
+                    // contents — a loaded-but-empty link cache would resolve nothing
+                    // and look identical to a true "not present" miss otherwise.
+                    // Sample a few FormKeys so we can detect ESL key-storage drift
+                    // (the lookup FormKey vs. how Mutagen actually keyed the record).
+                    if (_pluginProvider.TryGetPlugin(modKey, fallBackModFolderNames, out var probe) && probe != null)
+                    {
+                        recordCount = probe.Npcs.Count;
+                        sampleNpcKeys = probe.Npcs.Take(8).Select(n => n.FormKey.ToString()).ToList();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    probeError = ex.GetType().Name + ": " + ex.Message;
+                }
+                string countLabel;
+                if (recordCount.HasValue) countLabel = recordCount.Value.ToString();
+                else if (probeError != null) countLabel = "THREW(" + probeError + ")";
+                else countLabel = "?";
+                TraceLookup($"  TryGetRecordGetterFromMod mk={modKey.FileName} fk={formLink.FormKey} → TryResolve={resolved}, npcsInPlugin={countLabel}");
+                if (sampleNpcKeys != null && sampleNpcKeys.Count > 0)
+                {
+                    TraceLookup($"    NPC keys actually in plugin (first {sampleNpcKeys.Count}): [{string.Join(", ", sampleNpcKeys)}]");
+                }
+            }
+            if (resolved)
+            {
+                record = modRecord;
+                return true;
+            }
+        }
+        else if (capturing)
+        {
+            TraceLookup($"  TryGetRecordGetterFromMod mk={modKey.FileName} fk={formLink.FormKey} → plugin not loadable");
+        }
+
+        // fallbacks
+        IMajorRecordGetter? fallbackRecord = null;
+        switch (fallbackMode)
+        {
+            case RecordLookupFallBack.Origin:
+                if (TryAddPluginToCaches(formLink.FormKey.ModKey, fallBackModFolderNames) &&
+                    _modLinkCaches.TryGetValue(formLink.FormKey.ModKey, out var originCache) && originCache != null &&
+                    originCache.TryResolve(formLink, out fallbackRecord) && fallbackRecord is not null)
+                {
+                    if (capturing) TraceLookup($"  TryGetRecordGetterFromMod[Origin] mk={formLink.FormKey.ModKey.FileName} fk={formLink.FormKey} → resolved");
+                    record = fallbackRecord;
+                    return true;
+                }
+                break;
+
+            case RecordLookupFallBack.Winner:
+                if (_environmentStateProvider.LinkCache.TryResolve(formLink, out fallbackRecord) && fallbackRecord is not null)
+                {
+                    if (capturing) TraceLookup($"  TryGetRecordGetterFromMod[Winner] fk={formLink.FormKey} → resolved via global LinkCache");
+                    record = fallbackRecord;
+                    return true;
+                }
+                if (capturing) TraceLookup($"  TryGetRecordGetterFromMod[Winner] fk={formLink.FormKey} → global LinkCache miss");
+                break;
+
+            case RecordLookupFallBack.None:
+                default:
+                    break;
+        }
+
+        record = null;
+        return false;
+    }
+
+    public bool TryGetRecordFromMods(IFormLinkGetter formLink, IEnumerable<ModKey> modKeys, HashSet<string> fallBackModFolderNames, RecordLookupFallBack fallbackMode,
+        out IMajorRecordGetter? record, bool reverseOrder = true)
+    {
+        record = null;
+        if (modKeys == null || formLink.IsNull)
+        {
+            return false;
+        }
+
+        var toSearch = modKeys.Reverse().ToArray();
+        if (!reverseOrder)
+        {
+            toSearch = modKeys.ToArray();
+        }
+
+        bool capturing = RenderLogCapture.IsCapturing;
+        if (capturing)
+        {
+            TraceLookup($"TryGetRecordFromMods fk={formLink.FormKey} fallback={fallbackMode} reverseOrder={reverseOrder} keys=[{string.Join(", ", toSearch.Select(k => k.FileName.String))}]");
+        }
+
+        foreach (var mk in toSearch)
+        {
+            if (TryGetRecordGetterFromMod(formLink, mk, fallBackModFolderNames, RecordLookupFallBack.None, out record) && record != null)
+            {
+                if (capturing) TraceLookup($"  → MATCHED via {mk.FileName}");
+                return true;
+            }
+        }
+
+        // fallbacks
+        switch (fallbackMode)
+        {
+            case RecordLookupFallBack.Origin:
+                if (TryGetRecordGetterFromMod(formLink, formLink.FormKey.ModKey, fallBackModFolderNames, RecordLookupFallBack.None,  out record) && record != null)
+                {
+                    if (capturing) TraceLookup($"  → MATCHED via Origin fallback {formLink.FormKey.ModKey.FileName}");
+                    return true;
+                }
+                if (capturing) TraceLookup("  → Origin fallback miss");
+                break;
+
+            case RecordLookupFallBack.Winner:
+                if (_environmentStateProvider.LinkCache.TryResolve(formLink, out record) && record is not null)
+                {
+                    if (capturing) TraceLookup("  → MATCHED via Winner fallback (global LinkCache)");
+                    return true;
+                }
+                if (capturing) TraceLookup("  → Winner fallback miss (global LinkCache)");
+                break;
+
+            case RecordLookupFallBack.None:
+            default:
+                break;
+        }
+
+        if (capturing) TraceLookup($"TryGetRecordFromMods fk={formLink.FormKey} → MISS");
+        return false;
+    }
+
+    public enum RecordLookupFallBack
+    {
+        None,
+        Origin,
+        Winner
+    }
+    
+    public string GetStatusReport()
+    {
+        if (!_modLinkCaches.Any())
+        {
+            return "No plugins link caches currently created.";
+        }
+        else
+        {
+            return "Link caches for plugins: " + Environment.NewLine + string.Join(Environment.NewLine, _modLinkCaches.Select(x => "\t" + x.Key.ToString()));
+        }
+    }
+    #endregion
+}

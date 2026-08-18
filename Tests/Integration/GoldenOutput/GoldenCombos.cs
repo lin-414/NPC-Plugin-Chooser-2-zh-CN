@@ -1,0 +1,68 @@
+using NPC_Plugin_Chooser_2.Models;
+
+namespace NPC_Plugin_Chooser_2.Tests.Integration.GoldenOutput;
+
+/// <summary>
+/// One of the 12 reference setting combinations = {CreateAndPatch, Create} x {Ignore, Include, IncludeAsNew}
+/// x {non-SkyPatcher, SkyPatcher}. <see cref="FolderName"/> matches the reference output sub-folder exactly.
+/// </summary>
+internal sealed record GoldenCombo(
+    int Index,
+    string FolderName,
+    PatchingMode PatchingMode,
+    RecordOverrideHandlingMode OverrideMode,
+    bool UseSkyPatcher);
+
+internal static class GoldenCombos
+{
+    public static readonly IReadOnlyList<GoldenCombo> All = new[]
+    {
+        new GoldenCombo(1,  "NPC 01 - CreateAndPatch - Ignore",                  PatchingMode.CreateAndPatch, RecordOverrideHandlingMode.Ignore,       false),
+        new GoldenCombo(2,  "NPC 02 - CreateAndPatch - Include",                 PatchingMode.CreateAndPatch, RecordOverrideHandlingMode.Include,      false),
+        new GoldenCombo(3,  "NPC 03 - CreateAndPatch - IncludeAsNew",            PatchingMode.CreateAndPatch, RecordOverrideHandlingMode.IncludeAsNew, false),
+        new GoldenCombo(4,  "NPC 04 - Create - Ignore",                          PatchingMode.Create,         RecordOverrideHandlingMode.Ignore,       false),
+        new GoldenCombo(5,  "NPC 05 - Create - Include",                         PatchingMode.Create,         RecordOverrideHandlingMode.Include,      false),
+        new GoldenCombo(6,  "NPC 06 - Create - IncludeAsNew",                    PatchingMode.Create,         RecordOverrideHandlingMode.IncludeAsNew, false),
+        new GoldenCombo(7,  "NPC 07 - CreateAndPatch - Ignore - SkyPatcher",     PatchingMode.CreateAndPatch, RecordOverrideHandlingMode.Ignore,       true),
+        new GoldenCombo(8,  "NPC 08 - CreateAndPatch - Include - SkyPatcher",    PatchingMode.CreateAndPatch, RecordOverrideHandlingMode.Include,      true),
+        new GoldenCombo(9,  "NPC 09 - CreateAndPatch - IncludeAsNew - SkyPatcher", PatchingMode.CreateAndPatch, RecordOverrideHandlingMode.IncludeAsNew, true),
+        new GoldenCombo(10, "NPC 10 - Create - Ignore - SkyPatcher",            PatchingMode.Create,         RecordOverrideHandlingMode.Ignore,       true),
+        new GoldenCombo(11, "NPC 11 - Create - Include - SkyPatcher",           PatchingMode.Create,         RecordOverrideHandlingMode.Include,      true),
+        new GoldenCombo(12, "NPC 12 - Create - IncludeAsNew - SkyPatcher",      PatchingMode.Create,         RecordOverrideHandlingMode.IncludeAsNew, true),
+    };
+
+    /// <summary>
+    /// Whether a combo's reference set predates the ChildClothes01 (0006D92C) SkyPatcher+Include fix and so
+    /// should tolerate exactly that one deviation (the fixed patcher writes the outfit-override edit a stale
+    /// reference lacks). The SkyPatcher+Include references (NPC 08, NPC 11) have since been regenerated with
+    /// the fix, so nothing is stale now; this hook is kept so a future fix that invalidates a reference can
+    /// flag it here until the user regenerates that combo.
+    /// </summary>
+    public static bool IsStaleForChildClothesFix(GoldenCombo combo) => false;
+
+    /// <summary>
+    /// Whether a combo's reference set predates the 2026-08 Include-As-New root-delivery fix
+    /// (docs/SkyPatcher-IncludeAsNew-Outfit-Records.md). The fixed patcher writes two directive
+    /// classes the stale references lack: <c>race=</c> for the FIRST NPC of a batch (previously
+    /// dropped — directives were emitted before the override remap, the "Kayd bug", §4.5), and
+    /// <c>outfitDefault=</c>/<c>outfitSleep=</c> pointing Include-As-New NPCs at their private
+    /// outfit-chain copies (previously never emitted at all, §4.1-§4.3). Tolerate exactly those
+    /// deviations (while asserting the fresh output delivers them) until the user regenerates
+    /// these combos.
+    /// </summary>
+    public static bool IsStaleForRootDeliveryFix(GoldenCombo combo) =>
+        combo.UseSkyPatcher && combo.OverrideMode == RecordOverrideHandlingMode.IncludeAsNew;
+
+    /// <summary>
+    /// Whether a combo's reference set predates the 2026-08 shared/surrogate FaceGen tint rewrite
+    /// (<see cref="NPC_Plugin_Chooser_2.BackEnd.AssetHandler.RewriteCopiedFaceTintPath"/>): a
+    /// FaceGen NIF delivered under a different NPC's FormKey (guest appearance in the
+    /// CreateAndPatch combos, every surrogate delivery in the SkyPatcher combos) now has its baked
+    /// tint slot re-pointed at the tint delivered beside it, so it no longer hash-matches a
+    /// reference captured as a straight donor copy. All current references predate the fix; the
+    /// tolerance (<see cref="TintRewriteTolerance"/>) byte-verifies each deviation, so combos
+    /// without affected NPCs (the Create trio) pass through it untouched. Flip per combo as its
+    /// reference set is regenerated.
+    /// </summary>
+    public static bool IsStaleForSharedTintRewriteFix(GoldenCombo combo) => true;
+}

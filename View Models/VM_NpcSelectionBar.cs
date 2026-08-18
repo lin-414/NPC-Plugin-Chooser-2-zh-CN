@@ -1,0 +1,6376 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Diagnostics; // For Debug.WriteLine
+using System.IO;
+using System.Linq;
+using System.Reactive;
+using System.Reactive.Concurrency; // Required for Unit
+using System.Reactive.Disposables;
+using System.Reactive.Linq;
+using System.Reactive.Subjects;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks; // Added for Task
+using System.Windows;
+using System.Windows.Forms; // Added for MessageBox
+using System.Windows.Media;
+using System.Runtime.InteropServices;
+using Mutagen.Bethesda;
+using Mutagen.Bethesda.Plugins;
+using Mutagen.Bethesda.Plugins.Cache;
+using Mutagen.Bethesda.Plugins.Records;
+using Mutagen.Bethesda.Skyrim;
+using Noggog;
+using NPC_Plugin_Chooser_2.BackEnd;
+using NPC_Plugin_Chooser_2.Models;
+using NPC_Plugin_Chooser_2.Themes;
+using NPC_Plugin_Chooser_2.Views; 
+using ReactiveUI;
+using ReactiveUI.Fody.Helpers;
+using Splat;
+using Application = System.Windows.Application;
+using NPC_Plugin_Chooser_2.Localization;
+
+
+namespace NPC_Plugin_Chooser_2.View_Models;
+
+public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
+{
+    // Shared diagnostic stopwatch — restarted whenever the user picks a new
+    // NPC. Other VMs (notably VM_NpcsMenuMugshot) read it to stamp
+    // "T+<ms-since-selection>" on their own perf log lines so the full
+    // selection timeline can be reconstructed from one filter pass.
+    internal static readonly Stopwatch SelectionPerfSw = new();
+
+    // --- Define the Factory Delegate ---
+    public delegate VM_NpcsMenuMugshot AppearanceModFactory(
+        string modName,
+        string npcDisplayName,
+        FormKey targetNpcFormKey,
+        FormKey sourceNpcFormKey,
+        ModKey? overrideModeKey,
+        string? imagePath
+    );
+
+    // --- Dependencies ---
+    private readonly EnvironmentStateProvider _environmentStateProvider;
+    private readonly Settings _settings;
+    private readonly NpcConsistencyProvider _consistencyProvider;
+    private readonly NpcDescriptionProvider _descriptionProvider;
+    private readonly Auxilliary _auxilliary;
+    private readonly ImagePacker _imagePacker;
+    private readonly FaceFinderClient _faceFinderClient;
+    private readonly EventLogger _eventLogger;
+    private readonly CompositeDisposable _disposables = new();
+    private readonly Action<bool> _themeChangedHandler;
+    private readonly Lazy<VM_Mods> _lazyModsVm;
+    private readonly Lazy<VM_MainWindow> _lazyMainWindowVm;
+    private readonly VM_FavoriteFaces _favoriteFacesVm;
+    private readonly AppearanceModFactory _appearanceModFactory;
+    private readonly VM_FavoriteFaces.Factory _favoriteFacesFactory;
+    private readonly VM_ModSetting.FromModelFactory _modSettingFromModelFactory;
+    private readonly PluginProvider _pluginProvider;
+    private readonly RecordHandler _recordHandler;
+
+    [DllImport("shlwapi.dll", CharSet = CharSet.Unicode)]
+    private static extern int StrCmpLogicalW(string x, string y);
+
+    // --- Internal State ---
+    private static readonly SolidColorBrush _fallbackGreenBrush = new(Colors.LimeGreen);
+    private static readonly SolidColorBrush _fallbackPurpleBrush = new(Colors.DarkMagenta);
+    private static readonly SolidColorBrush _fallbackRedBrush = new(Color.FromRgb(0xFF, 0x6B, 0x68));
+    private SolidColorBrush NpcIndicatorGreenBrush => Application.Current.Resources["StatusValidForeground"] as SolidColorBrush ?? _fallbackGreenBrush;
+    private SolidColorBrush NpcIndicatorPurpleBrush => Application.Current.Resources["SelectionNoDataBrush"] as SolidColorBrush ?? _fallbackPurpleBrush;
+    private SolidColorBrush NpcIndicatorRedBrush => Application.Current.Resources["StatusErrorForeground"] as SolidColorBrush ?? _fallbackRedBrush;
+    private HashSet<string> _hiddenModNames = new();
+    private Dictionary<FormKey, HashSet<string>> _hiddenModsPerNpc = new();
+    private Dictionary<FormKey, List<(string ModName, string ImagePath)>> _downloadedMugshotData = new();
+    private readonly Subject<Unit> _refreshImageSizesSubject = new Subject<Unit>();
+    // Fired (throttled) when a mugshot tile finishes loading its image and sets
+    // its source dimensions, so the ImagePacker re-runs once the async bitmap
+    // decodes have actually landed. See NotifyTileImageReady + the throttle
+    // wiring in the constructor. Guarded by _tileImageReadyGate because tiles
+    // decode off the UI thread and may signal concurrently.
+    private readonly Subject<Unit> _tileImageReadySubject = new Subject<Unit>();
+    private readonly object _tileImageReadyGate = new();
+    private CancellationTokenSource? _mugshotGenerationCts;
+    // True whenever CurrentNpcAppearanceMods has been (re)built since the last
+    // generation kick. TriggerAsyncMugshotGeneration only cancels the in-flight
+    // batch when this is set (i.e. the tiles it was working for are gone);
+    // same-collection re-triggers — which now happen on every repack, including
+    // the repacks fired as each tile's image lands — top up un-started tiles
+    // without aborting renders already in progress. Main-thread only.
+    private bool _generationTilesDirty = true;
+
+    // --- TEMP: auto-advance for memory profiling ---
+    // Drives the browse flow automatically (Ctrl+Shift+A in the NPCs view; Escape to stop) so the opt-in
+    // MemoryLogger accrues a per-NPC sample across a long run without a human clicking. It advances to the
+    // next NPC as soon as the current NPC's mugshot tiles all finish loading (or a safety timeout). Remove
+    // when the memory investigation is done.
+    private CancellationTokenSource? _autoAdvanceCts;
+    [Reactive] public bool IsAutoAdvancing { get; private set; }
+
+    // Template filter caches — built once during InitializeAsync
+    private HashSet<FormKey> _baseRecordIsTemplateSources = new();     // NPCs referenced as template by other base records
+    private HashSet<FormKey> _winOverrideIsTemplateSources = new();    // NPCs referenced as template by other winning overrides
+    private HashSet<FormKey> _appModUsedAsTemplateSources = new();     // NPCs referenced as template by any appearance mod's NPC records
+
+    // Reverse maps: template target → who references it (for tooltips & recalculation)
+    private Dictionary<FormKey, List<FormKey>> _winOverrideTemplateUsers = new();
+    private Dictionary<FormKey, List<(string ModName, FormKey NpcFormKey)>> _appModTemplateUsers = new();
+
+    // When NPC X's selection changes, which template-source NPCs need recalculation?
+    private Dictionary<FormKey, HashSet<FormKey>> _npcToAffectedTemplateSources = new();
+
+    // Fast lookup from FormKey → VM (populated during init)
+    private Dictionary<FormKey, VM_NpcsMenuSelection> _npcVmLookup = new();
+
+    private readonly BehaviorSubject<VM_NpcsMenuSelection?> _requestScrollToNpcSubject =
+        new BehaviorSubject<VM_NpcsMenuSelection?>(null);
+
+    public IObservable<VM_NpcsMenuSelection?> RequestScrollToNpcObservable =>
+        _requestScrollToNpcSubject.AsObservable();
+    
+    [Reactive] public NpcSortProperty SelectedSortProperty { get; set; } = NpcSortProperty.FormID;
+    [Reactive] public bool IsSortReversed { get; set; } = false;
+    public Array AvailableSortProperties => Enum.GetValues(typeof(NpcSortProperty));
+
+    /// <summary>
+    /// Persisted pixel width of the left (search + NPC list) panel — i.e. the
+    /// GridSplitter position. Read once when the view loads and written back on drag;
+    /// 0 means the user has never dragged it, so the view keeps its XAML default.
+    /// Not [Reactive]: nothing binds to it, the view drives it directly.
+    /// </summary>
+    public double LeftPanelWidth
+    {
+        get => _settings.NpcsViewLeftPanelWidth;
+        set => _settings.NpcsViewLeftPanelWidth = value;
+    }
+
+    // --- Collapsible settings-bar group boxes ---
+    // Bound to each GroupBox.Header in NpcsView; clicking a caption hides that group and
+    // reclaims its width. State persists via Settings.NpcsViewCollapsedGroups.
+    public VM_CollapsibleGroup GroupNpcGroups { get; }
+    public VM_CollapsibleGroup GroupShow { get; }
+    public VM_CollapsibleGroup GroupAppearanceSelections { get; }
+    public VM_CollapsibleGroup GroupSelectedMugshots { get; }
+    public VM_CollapsibleGroup GroupSubmenus { get; }
+
+    private VM_CollapsibleGroup MakeCollapsibleGroup(string persistenceKey, string translationKey) =>
+            new(persistenceKey,
+                GetTranslation(translationKey, persistenceKey),
+                isExpanded: !_settings.NpcsViewCollapsedGroups.Contains(persistenceKey),
+                onChanged: (key, expanded) =>
+                {
+                    if (expanded) _settings.NpcsViewCollapsedGroups.Remove(key);
+                    else _settings.NpcsViewCollapsedGroups.Add(key);
+            });
+
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
+
+    // --- Search Properties ---
+    [Reactive] public string SearchText1 { get; set; } = string.Empty;
+    [Reactive] public NpcSearchType SearchType1 { get; set; } = NpcSearchType.Name;
+    [Reactive] public string SearchText2 { get; set; } = string.Empty;
+    [Reactive] public NpcSearchType SearchType2 { get; set; } = NpcSearchType.InAppearanceMod;
+    [Reactive] public string SearchText3 { get; set; } = string.Empty;
+    [Reactive] public NpcSearchType SearchType3 { get; set; } = NpcSearchType.Group;
+
+    // Per-row Is / Is Not — inverts that row's predicate before it joins the AND/OR set.
+    [Reactive] public FilterInversionType SearchInversion1 { get; set; } = FilterInversionType.Is;
+    [Reactive] public FilterInversionType SearchInversion2 { get; set; } = FilterInversionType.Is;
+    [Reactive] public FilterInversionType SearchInversion3 { get; set; } = FilterInversionType.Is;
+
+    private const string AllNpcsGroup = "All NPCs";
+
+    // Visibility & Selection State Filters
+    [ObservableAsProperty] public bool IsSelectionStateSearch1 { get; }
+
+    [Reactive] public SelectionStateFilterType SelectedStateFilter1 { get; set; } = SelectionStateFilterType.NotMade;
+
+    [ObservableAsProperty] public bool IsSelectionStateSearch2 { get; }
+
+    [Reactive] public SelectionStateFilterType SelectedStateFilter2 { get; set; } = SelectionStateFilterType.NotMade;
+
+    [ObservableAsProperty] public bool IsSelectionStateSearch3 { get; }
+
+    [Reactive] public SelectionStateFilterType SelectedStateFilter3 { get; set; } = SelectionStateFilterType.NotMade;
+
+    public Array AvailableSelectionStateFilters => Enum.GetValues(typeof(SelectionStateFilterType));
+    [Reactive] public bool IsProgrammaticNavigationInProgress { get; set; } = false;
+
+    // Group Filter Visibility & Selection
+    [ObservableAsProperty] public bool IsGroupSearch1 { get; }
+    [Reactive] public string? SelectedGroupFilter1 { get; set; }
+    [ObservableAsProperty] public bool IsGroupSearch2 { get; }
+    [Reactive] public string? SelectedGroupFilter2 { get; set; }
+    [ObservableAsProperty] public bool IsGroupSearch3 { get; }
+    [Reactive] public string? SelectedGroupFilter3 { get; set; }
+    
+    // Guest Status Visibility & Selection
+    
+    [ObservableAsProperty] public bool IsShareStatusSearch1 { get; }
+    [Reactive] public ShareStatusFilterType SelectedShareStatusFilter1 { get; set; } = ShareStatusFilterType.Any;
+    [ObservableAsProperty] public bool IsShareStatusSearch2 { get; }
+    [Reactive] public ShareStatusFilterType SelectedShareStatusFilter2 { get; set; } = ShareStatusFilterType.Any;
+    [ObservableAsProperty] public bool IsShareStatusSearch3 { get; }
+    [Reactive] public ShareStatusFilterType SelectedShareStatusFilter3 { get; set; } = ShareStatusFilterType.Any;
+    
+    // Uniquness Status Visibilty & Selection
+    [ObservableAsProperty] public bool IsUniquenessSearch1 { get; }
+    [Reactive] public UniquenessFilterType SelectedUniquenessFilter1 { get; set; } = UniquenessFilterType.Unique;
+    [ObservableAsProperty] public bool IsUniquenessSearch2 { get; }
+    [Reactive] public UniquenessFilterType SelectedUniquenessFilter2 { get; set; } = UniquenessFilterType.Unique;
+    [ObservableAsProperty] public bool IsUniquenessSearch3 { get; }
+    [Reactive] public UniquenessFilterType SelectedUniquenessFilter3 { get; set; } = UniquenessFilterType.Unique;
+
+    // Gender Visibility & Selection
+    [ObservableAsProperty] public bool IsGenderSearch1 { get; }
+    [Reactive] public GenderFilterType SelectedGenderFilter1 { get; set; } = GenderFilterType.Female;
+    [ObservableAsProperty] public bool IsGenderSearch2 { get; }
+    [Reactive] public GenderFilterType SelectedGenderFilter2 { get; set; } = GenderFilterType.Female;
+    [ObservableAsProperty] public bool IsGenderSearch3 { get; }
+    [Reactive] public GenderFilterType SelectedGenderFilter3 { get; set; } = GenderFilterType.Female;
+
+    // Race Visibility (Race uses an editable combo of AvailableRaces bound to SearchTextN)
+    [ObservableAsProperty] public bool IsRaceSearch1 { get; }
+    [ObservableAsProperty] public bool IsRaceSearch2 { get; }
+    [ObservableAsProperty] public bool IsRaceSearch3 { get; }
+
+    // Template Status Visibility & Selection
+    [ObservableAsProperty] public bool IsTemplateSearch1 { get; }
+    [Reactive] public TemplateFilterType SelectedTemplateFilter1 { get; set; } = TemplateFilterType.BaseHasTemplate;
+    [ObservableAsProperty] public bool IsTemplateSearch2 { get; }
+    [Reactive] public TemplateFilterType SelectedTemplateFilter2 { get; set; } = TemplateFilterType.BaseHasTemplate;
+    [ObservableAsProperty] public bool IsTemplateSearch3 { get; }
+    [Reactive] public TemplateFilterType SelectedTemplateFilter3 { get; set; } = TemplateFilterType.BaseHasTemplate;
+    
+
+    [Reactive] public SearchLogic CurrentSearchLogic { get; set; } = SearchLogic.AND;
+    public Array AvailableSearchTypes => Enum.GetValues(typeof(NpcSearchType));
+    // --- End Search Properties ---
+
+    // --- UI / Display Properties ---
+    [Reactive] public bool ShowHiddenMods { get; set; } = false;
+    [Reactive] public bool ShowSingleOptionNpcs { get; set; } = true;
+    [Reactive] public bool ShowUnloadedNpcs { get; set; } = true;
+    [Reactive] public bool ShowSkyPatcherTemplates { get; set; }
+    [Reactive] public bool ShowUninstalledMods { get; set; } = true;
+    [Reactive] public bool ShowNpcDescriptions { get; set; }
+    public List<VM_NpcsMenuSelection> AllNpcs { get; } = new();
+    public ObservableCollection<VM_NpcsMenuSelection> FilteredNpcs { get; } = new();
+    [Reactive] public VM_NpcsMenuSelection? SelectedNpc { get; set; }
+    [ObservableAsProperty] public ObservableCollection<VM_NpcsMenuMugshot>? CurrentNpcAppearanceMods { get; }
+
+    // Transient per-NPC override of the mugshot source priority. None = use
+    // Settings.MugshotSourcePriority verbatim. When a real source is set, it
+    // becomes index 0 of GetEffectiveMugshotPriority(), with the remaining
+    // settings entries falling through in their original order. Clears
+    // automatically whenever SelectedNpc changes — see constructor wiring.
+    [Reactive] public MugshotSourceType MugshotSourceOverride { get; set; } = MugshotSourceType.None;
+
+    // Forced-regeneration latch, armed when the user ACTIVATES the AG override.
+    // Clicking AG is the app's only "render this NPC now" gesture, and users
+    // reach for it exactly after fixing a mod (adding the folder that holds the
+    // missing assets). Priority promotion alone can't serve that: the staleness
+    // checker compares stamped render SETTINGS, so a changed asset scope is
+    // invisible to it and the click reuses the same asset-less PNG.
+    // This latch is only ARMING, not the whole decision: each tile additionally
+    // requires its own cached render to record missing assets
+    // (VM_NpcsMenuMugshot.ShouldForceAutoGenRegeneration), so a click re-renders
+    // the broken mugshots in the row and leaves the intact ones alone.
+    // Per-tile serve tracking (reference identity — VM_NpcsMenuMugshot doesn't
+    // override Equals) keeps it one-shot: the rebuild the override triggers
+    // hands every tile a fresh object that gets its one forced render, while the
+    // re-kicks TriggerAsyncMugshotGeneration fires at the SAME objects don't
+    // re-render. Tiles are marked served only once a render actually completed,
+    // so a render cancelled by startup/layout churn is retried by the re-kick.
+    private readonly object _forcedAutoGenLock = new();
+    private bool _forcedAutoGenPending;
+    private readonly HashSet<VM_NpcsMenuMugshot> _forcedAutoGenTilesServed = new();
+    // Mirrors Settings.MugshotsFolder (existence) /
+    // Settings.UseFaceFinderFallback / Settings.UsePortraitCreatorFallback so
+    // the MD/FF/AG override radio buttons disable live when the corresponding
+    // source becomes unavailable in the Settings menu. The MD check matches
+    // VM_Settings.RefreshMugshotSourceEnabledStates' DownloadedMugshots case.
+    [ObservableAsProperty] public bool IsManualDownloadSourceAvailable { get; }
+    [ObservableAsProperty] public bool IsFaceFinderSourceAvailable { get; }
+    [ObservableAsProperty] public bool IsAutoGenSourceAvailable { get; }
+    [Reactive] public string? CurrentNpcDescription { get; private set; }
+    public ReactiveCommand<Unit, string?> LoadDescriptionCommand { get; }
+    [ObservableAsProperty] public bool IsLoadingDescription { get; }
+    public IObservable<Unit> RefreshImageSizesObservable => _refreshImageSizesSubject.AsObservable();
+
+    /// <summary>Called by a mugshot tile once it has loaded an image and set its
+    /// source dimensions. Coalesced by a throttle in the constructor into a
+    /// single ImagePacker re-run, so tiles get correctly sized after their async
+    /// bitmap decodes complete (the CurrentNpcAppearanceMods throttle alone races
+    /// those decodes on a cold launch, so the packer would otherwise skip an
+    /// all-0×0 set and never re-run). Thread-safe: tiles decode off the UI thread
+    /// and may call this concurrently.</summary>
+    public void NotifyTileImageReady()
+    {
+        lock (_tileImageReadyGate)
+        {
+            try
+            {
+                _tileImageReadySubject.OnNext(Unit.Default);
+            }
+            catch (ObjectDisposedException)
+            {
+                // A tile's background image load can outlive this VM at app
+                // shutdown; a signal into the disposed subject is meaningless
+                // then — swallow rather than fault the worker thread.
+            }
+        }
+    }
+
+    // --- NEW: Zoom Control Properties & Commands for NpcsView ---
+    [Reactive] public double NpcsViewZoomLevel { get; set; }
+    [Reactive] public bool NpcsViewIsZoomLocked { get; set; }
+    public ReactiveCommand<Unit, Unit> ZoomInNpcsCommand { get; }
+    public ReactiveCommand<Unit, Unit> ZoomOutNpcsCommand { get; }
+    public ReactiveCommand<Unit, Unit> ResetZoomNpcsCommand { get; }
+    private const double _minZoomPercentage = 1.0;
+    private const double _maxZoomPercentage = 1000.0;
+    private const double _zoomStepPercentage = 2.5; // For +/- buttons and scroll wheel
+    [Reactive] public bool NpcsViewHasUserManuallyZoomed { get; set; } = false;
+    
+    // --- New: Other Display Controls
+    public bool NormalizeImageDimensions => _settings.NormalizeImageDimensions;
+    public int MaxMugshotsToFit => _settings.MaxMugshotsToFit;
+    
+    // --- Template Icon Display Controls ---
+    [Reactive] public bool ShowTemplateStatusInList { get; set; }
+    [Reactive] public TemplateIconPosition TemplateIconPosition { get; set; }
+    [Reactive] public string NpcSelectionIndicator { get; set; } = "Bar";
+
+    // --- NPC Group Properties ---
+    [Reactive] public string SelectedGroupName { get; set; } = string.Empty;
+    public ObservableCollection<string> AvailableNpcGroups { get; } = new();
+    public ReactiveCommand<Unit, bool> AddCurrentNpcToGroupCommand { get; }
+    public ReactiveCommand<Unit, bool> RemoveCurrentNpcFromGroupCommand { get; }
+    public ReactiveCommand<Unit, bool> AddAllVisibleNpcsToGroupCommand { get; }
+    public ReactiveCommand<Unit, bool> RemoveAllVisibleNpcsFromGroupCommand { get; }
+    // --- End NPC Group Properties ---
+
+    // Distinct race Names + EditorIDs (winning-override) for the Race filter's editable
+    // combo. Seeded from Settings.CachedFilterRaces for instant availability, then
+    // rebuilt from the finalized NPC list at the end of InitializeAsync (load/Refresh).
+    public ObservableCollection<string> AvailableRaces { get; } = new();
+
+    // --- NEW: Compare/Hide/Deselect Functionality ---
+    [ObservableAsProperty] public int CheckedMugshotCount { get; }
+    [ObservableAsProperty] public bool CanOpenHideUnhideMenu { get; }
+    public ReactiveCommand<Unit, Unit> CompareSelectedCommand { get; }
+    public ReactiveCommand<Unit, Unit> HideAllSelectedCommand { get; }
+    public ReactiveCommand<Unit, Unit> HideAllButSelectedCommand { get; }
+    public ReactiveCommand<Unit, Unit> UnhideAllSelectedCommand { get; }
+    public ReactiveCommand<Unit, Unit> UnhideAllButSelectedCommand { get; }
+    public ReactiveCommand<Unit, Unit> DeselectAllCommand { get; }
+    // --- End NEW Compare/Hide/Deselect ---
+
+    // --- NEW: Import/Export Commands ---
+    public ReactiveCommand<Unit, Unit> ImportChoicesFromLoadOrderCommand { get; }
+    public ReactiveCommand<Unit, Unit> RandomizeChoicesCommand { get; }
+    public ReactiveCommand<Unit, Unit> ExportChoicesCommand { get; }
+    public ReactiveCommand<Unit, Unit> ImportChoicesCommand { get; }
+    public ReactiveCommand<Unit, Unit> ClearChoicesCommand { get; }
+    // --- End Import/Export Commands ---
+    
+    public ReactiveCommand<object, Unit> SetNpcOutfitOverrideCommand { get; }
+    // Click toggles the per-NPC mugshot source override: clicking an inactive
+    // source promotes it to top; clicking the active one clears the override.
+    public ReactiveCommand<MugshotSourceType, Unit> ToggleMugshotSourceOverrideCommand { get; }
+    public ReactiveCommand<Unit, Unit> ShowFavoritesCommand { get; }
+    public ReactiveCommand<VM_NpcsMenuSelection, Unit> AddFavoriteFaceToNpcCommand { get; }
+    public ReactiveCommand<FormKey, Unit> JumpToTemplateReferenceCommand { get; }
+
+    // --- NPC Navigation Commands ---
+    public ReactiveCommand<Unit, Unit> NavigateNextNpcCommand { get; }
+    public ReactiveCommand<Unit, Unit> NavigatePreviousNpcCommand { get; }
+    public ReactiveCommand<Unit, Unit> NavigateBackNpcCommand { get; }
+    public ReactiveCommand<Unit, Unit> NavigateForwardNpcCommand { get; }
+
+    // Navigation history state
+    private readonly List<VM_NpcsMenuSelection> _npcViewHistory = new();
+    private int _npcViewHistoryIndex = -1;
+    private bool _isNavigatingHistory = false;
+    private readonly Subject<Unit> _npcNavHistoryChanged = new();
+
+    [ObservableAsProperty] public bool CanNavigateNext { get; }
+    [ObservableAsProperty] public bool CanNavigatePrevious { get; }
+    [ObservableAsProperty] public bool CanNavigateBack { get; }
+    [ObservableAsProperty] public bool CanNavigateForward { get; }
+
+    // --- Constructor ---
+    private readonly Lazy<VM_Settings> _lazyVmSettings;
+
+    public VM_NpcSelectionBar(EnvironmentStateProvider environmentStateProvider,
+        Settings settings,
+        Auxilliary auxilliary,
+        NpcConsistencyProvider consistencyProvider,
+        NpcDescriptionProvider descriptionProvider,
+        FaceFinderClient faceFinderClient,
+        ImagePacker imagePacker,
+        EventLogger eventLogger,
+        Lazy<VM_Mods> lazyModsVm,
+        Lazy<VM_MainWindow> lazyMainWindowVm,
+        AppearanceModFactory appearanceModFactory,
+        VM_FavoriteFaces.Factory favoriteFacesFactory,
+        VM_ModSetting.FromModelFactory modSettingFromModelFactory,
+        PluginProvider pluginProvider,
+        RecordHandler recordHandler,
+        Lazy<VM_Settings> lazyVmSettings)
+    {
+        _lazyVmSettings = lazyVmSettings;
+        _environmentStateProvider = environmentStateProvider;
+        _settings = settings;
+        _auxilliary = auxilliary;
+        _consistencyProvider = consistencyProvider;
+        _descriptionProvider = descriptionProvider;
+        _faceFinderClient = faceFinderClient;
+        _imagePacker = imagePacker;
+        _eventLogger = eventLogger;
+        _lazyModsVm = lazyModsVm;
+        _lazyMainWindowVm = lazyMainWindowVm;
+        _appearanceModFactory = appearanceModFactory;
+        _favoriteFacesFactory = favoriteFacesFactory;
+        _modSettingFromModelFactory = modSettingFromModelFactory;
+        _pluginProvider = pluginProvider;
+        _recordHandler = recordHandler;
+
+        _hiddenModNames = _settings.HiddenModNames ?? new(StringComparer.OrdinalIgnoreCase);
+        _hiddenModsPerNpc = _settings.HiddenModsPerNpc ?? new();
+        _settings.NpcGroupAssignments ??= new();
+
+        // Titles double as the persistence keys, so they must match the captions shown in
+        // NpcsView. Changing one resets that group to expanded on the next launch.
+        _settings.NpcsViewCollapsedGroups ??= new(StringComparer.OrdinalIgnoreCase);
+        GroupNpcGroups = MakeCollapsibleGroup("NPC Groups", "npcGroups");
+                GroupShow = MakeCollapsibleGroup("Show", "showGroup");
+                GroupAppearanceSelections = MakeCollapsibleGroup("NPC Appearance Selections", "npcAppearanceSelections");
+                GroupSelectedMugshots = MakeCollapsibleGroup("Selected Mugshots", "selectedMugshots");
+                GroupSubmenus = MakeCollapsibleGroup("Submenus", "submenus");
+
+        NpcsViewZoomLevel =
+            Math.Max(_minZoomPercentage,
+                Math.Min(_maxZoomPercentage, _settings.NpcsViewZoomLevel)); // Clamp initial load
+        NpcsViewIsZoomLocked = _settings.NpcsViewIsZoomLocked;
+        ShowTemplateStatusInList = _settings.ShowTemplateStatusInList;
+        TemplateIconPosition = _settings.TemplateIconPosition;
+        NpcSelectionIndicator = _settings.NpcSelectionIndicator;
+        Debug.WriteLine(
+            $"VM_NpcSelectionBar.Constructor: Initial ZoomLevel: {NpcsViewZoomLevel:F2}, IsZoomLocked: {NpcsViewIsZoomLocked}");
+
+        ZoomInNpcsCommand = ReactiveCommand.Create(() =>
+        {
+            Debug.WriteLine("VM_NpcSelectionBar: ZoomInNpcsCommand executed.");
+            NpcsViewHasUserManuallyZoomed = true;
+            NpcsViewZoomLevel = Math.Min(_maxZoomPercentage, NpcsViewZoomLevel + _zoomStepPercentage);
+        }).DisposeWith(_disposables);
+        ZoomOutNpcsCommand = ReactiveCommand.Create(() =>
+        {
+            Debug.WriteLine("VM_NpcSelectionBar: ZoomOutNpcsCommand executed.");
+            NpcsViewHasUserManuallyZoomed = true;
+            NpcsViewZoomLevel = Math.Max(_minZoomPercentage, NpcsViewZoomLevel - _zoomStepPercentage);
+        }).DisposeWith(_disposables);
+        ResetZoomNpcsCommand = ReactiveCommand.Create(() =>
+        {
+            Debug.WriteLine("VM_NpcSelectionBar: ResetZoomNpcsCommand executed.");
+            NpcsViewIsZoomLocked = false;
+            NpcsViewHasUserManuallyZoomed = false;
+            _refreshImageSizesSubject.OnNext(Unit.Default);
+        }).DisposeWith(_disposables);
+        
+        SetNpcOutfitOverrideCommand = ReactiveCommand.Create<object>(param =>
+        {
+            // This is the corrected, compatible code:
+            if (param is object[] arr && arr.Length == 2 && 
+                arr[0] is OutfitOverride newOverride && 
+                arr[1] is VM_NpcsMenuSelection npcVM)
+            {
+                SetNpcOutfitOverride(npcVM.NpcFormKey, newOverride);
+            }
+        }).DisposeWith(_disposables);
+
+        JumpToTemplateReferenceCommand = ReactiveCommand.Create<FormKey>(fk =>
+        {
+            JumpToTemplateReference(fk);
+        }).DisposeWith(_disposables);
+
+        // --- NPC Navigation Commands ---
+        var canNavigateNext = this.WhenAnyValue(
+                x => x.SelectedNpc,
+                x => x.FilteredNpcs.Count,
+                (sel, _) =>
+                {
+                    if (sel == null || FilteredNpcs.Count == 0) return false;
+                    int idx = FilteredNpcs.IndexOf(sel);
+                    return idx >= 0 && idx < FilteredNpcs.Count - 1;
+                });
+        canNavigateNext.ToPropertyEx(this, x => x.CanNavigateNext).DisposeWith(_disposables);
+
+        var canNavigatePrevious = this.WhenAnyValue(
+                x => x.SelectedNpc,
+                x => x.FilteredNpcs.Count,
+                (sel, _) =>
+                {
+                    if (sel == null || FilteredNpcs.Count == 0) return false;
+                    int idx = FilteredNpcs.IndexOf(sel);
+                    return idx > 0;
+                });
+        canNavigatePrevious.ToPropertyEx(this, x => x.CanNavigatePrevious).DisposeWith(_disposables);
+
+        var canNavigateBack = _npcNavHistoryChanged.StartWith(Unit.Default)
+            .Select(_ => _npcViewHistoryIndex > 0);
+        canNavigateBack.ToPropertyEx(this, x => x.CanNavigateBack).DisposeWith(_disposables);
+
+        var canNavigateForward = _npcNavHistoryChanged.StartWith(Unit.Default)
+            .Select(_ => _npcViewHistoryIndex >= 0 && _npcViewHistoryIndex < _npcViewHistory.Count - 1);
+        canNavigateForward.ToPropertyEx(this, x => x.CanNavigateForward).DisposeWith(_disposables);
+
+        NavigateNextNpcCommand = ReactiveCommand.Create(() =>
+        {
+            if (SelectedNpc == null) return;
+            int idx = FilteredNpcs.IndexOf(SelectedNpc);
+            if (idx >= 0 && idx < FilteredNpcs.Count - 1)
+            {
+                SelectedNpc = FilteredNpcs[idx + 1];
+                SignalScrollToNpc(SelectedNpc);
+            }
+        }, canNavigateNext).DisposeWith(_disposables);
+
+        NavigatePreviousNpcCommand = ReactiveCommand.Create(() =>
+        {
+            if (SelectedNpc == null) return;
+            int idx = FilteredNpcs.IndexOf(SelectedNpc);
+            if (idx > 0)
+            {
+                SelectedNpc = FilteredNpcs[idx - 1];
+                SignalScrollToNpc(SelectedNpc);
+            }
+        }, canNavigatePrevious).DisposeWith(_disposables);
+
+        NavigateBackNpcCommand = ReactiveCommand.Create(() =>
+        {
+            if (_npcViewHistoryIndex > 0)
+            {
+                _isNavigatingHistory = true;
+                _npcViewHistoryIndex--;
+                var target = _npcViewHistory[_npcViewHistoryIndex];
+                if (FilteredNpcs.Contains(target))
+                {
+                    SelectedNpc = target;
+                    SignalScrollToNpc(target);
+                }
+                else
+                {
+                    // Target not visible in current filter — skip without changing history
+                    _isNavigatingHistory = false;
+                }
+                _isNavigatingHistory = false;
+                _npcNavHistoryChanged.OnNext(Unit.Default);
+            }
+        }, canNavigateBack).DisposeWith(_disposables);
+
+        NavigateForwardNpcCommand = ReactiveCommand.Create(() =>
+        {
+            if (_npcViewHistoryIndex >= 0 && _npcViewHistoryIndex < _npcViewHistory.Count - 1)
+            {
+                _isNavigatingHistory = true;
+                _npcViewHistoryIndex++;
+                var target = _npcViewHistory[_npcViewHistoryIndex];
+                if (FilteredNpcs.Contains(target))
+                {
+                    SelectedNpc = target;
+                    SignalScrollToNpc(target);
+                }
+                else
+                {
+                    _isNavigatingHistory = false;
+                }
+                _isNavigatingHistory = false;
+                _npcNavHistoryChanged.OnNext(Unit.Default);
+            }
+        }, canNavigateForward).DisposeWith(_disposables);
+
+        NavigateNextNpcCommand.ThrownExceptions.Subscribe(ex => Debug.WriteLine($"Error NavigateNextNpcCommand: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+        NavigatePreviousNpcCommand.ThrownExceptions.Subscribe(ex => Debug.WriteLine($"Error NavigatePreviousNpcCommand: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+        NavigateBackNpcCommand.ThrownExceptions.Subscribe(ex => Debug.WriteLine($"Error NavigateBackNpcCommand: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+        NavigateForwardNpcCommand.ThrownExceptions.Subscribe(ex => Debug.WriteLine($"Error NavigateForwardNpcCommand: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+
+        ZoomInNpcsCommand.ThrownExceptions
+            .Subscribe(ex => Debug.WriteLine($"Error ZoomInNpcsCommand: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables).DisposeWith(_disposables);
+        ZoomOutNpcsCommand.ThrownExceptions
+            .Subscribe(ex => Debug.WriteLine($"Error ZoomOutNpcsCommand: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables).DisposeWith(_disposables);
+        ResetZoomNpcsCommand.ThrownExceptions
+            .Subscribe(ex => Debug.WriteLine($"Error ResetZoomNpcsCommand: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .DisposeWith(_disposables);
+
+        // Mugshot Source Override — command + availability OAPHs. Wired before
+        // the SelectedNpc rebuild chain below so the override-clear subscription
+        // fires first when the user picks a different NPC.
+        ToggleMugshotSourceOverrideCommand = ReactiveCommand.Create<MugshotSourceType>(src =>
+        {
+            bool activating = MugshotSourceOverride != src;
+
+            // Arm BEFORE the property set: setting it synchronously raises the
+            // PropertyChanged that drives the tile rebuild, and the rebuilt tiles
+            // must see the latch already up (they consult it in
+            // LoadInitialImageAsync to suppress the fresh-cache short-circuit).
+            if (activating && src == MugshotSourceType.AutoGeneration)
+            {
+                ArmForcedAutoGenRegeneration();
+            }
+            else
+            {
+                ClearForcedAutoGenRegeneration();
+            }
+
+            MugshotSourceOverride = activating ? src : MugshotSourceType.None;
+        }).DisposeWith(_disposables);
+        ToggleMugshotSourceOverrideCommand.ThrownExceptions
+            .Subscribe(ex => Debug.WriteLine(
+                $"Error ToggleMugshotSourceOverrideCommand: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .DisposeWith(_disposables);
+
+        // Defer-resolve VM_Settings so we don't trip on a DI cycle if it's
+        // constructed lazily — the OAPHs subscribe on first read (UI binding),
+        // by which time VM_Settings is up.
+        Observable.Defer(() => _lazyVmSettings.Value.WhenAnyValue(x => x.MugshotsFolder)
+                .Select(folder => !string.IsNullOrWhiteSpace(folder) && Directory.Exists(folder)))
+            .ToPropertyEx(this, x => x.IsManualDownloadSourceAvailable)
+            .DisposeWith(_disposables);
+        Observable.Defer(() => _lazyVmSettings.Value.WhenAnyValue(x => x.UseFaceFinderFallback))
+            .ToPropertyEx(this, x => x.IsFaceFinderSourceAvailable)
+            .DisposeWith(_disposables);
+        Observable.Defer(() => _lazyVmSettings.Value.WhenAnyValue(x => x.UsePortraitCreatorFallback))
+            .ToPropertyEx(this, x => x.IsAutoGenSourceAvailable)
+            .DisposeWith(_disposables);
+
+        // Clear the override whenever SelectedNpc changes. Registered before
+        // the combined rebuild chain so the override-clear PropertyChanged
+        // fires first; DistinctUntilChanged on the rebuild chain dedupes the
+        // back-to-back tuple emissions.
+        this.WhenAnyValue(x => x.SelectedNpc)
+            .Subscribe(_ =>
+            {
+                ClearForcedAutoGenRegeneration();
+                MugshotSourceOverride = MugshotSourceType.None;
+            })
+            .DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.SelectedNpc)
+            .Subscribe(npc =>
+            {
+                if (npc != null)
+                {
+                    _settings.LastSelectedNpcFormKey = npc.NpcFormKey;
+                }
+
+                if (!NpcsViewIsZoomLocked)
+                {
+                    NpcsViewHasUserManuallyZoomed = false;
+                }
+            })
+            .DisposeWith(_disposables);
+
+        // Track NPC view history for back/forward navigation
+        this.WhenAnyValue(x => x.SelectedNpc)
+            .Where(npc => npc != null && !_isNavigatingHistory)
+            .Subscribe(npc =>
+            {
+                // If we're not at the end of history, truncate forward entries
+                if (_npcViewHistoryIndex < _npcViewHistory.Count - 1)
+                {
+                    _npcViewHistory.RemoveRange(_npcViewHistoryIndex + 1,
+                        _npcViewHistory.Count - _npcViewHistoryIndex - 1);
+                }
+
+                // Avoid duplicate consecutive entries
+                if (_npcViewHistory.Count == 0 || _npcViewHistory[^1] != npc)
+                {
+                    _npcViewHistory.Add(npc!);
+                    _npcViewHistoryIndex = _npcViewHistory.Count - 1;
+                }
+                _npcNavHistoryChanged.OnNext(Unit.Default);
+            })
+            .DisposeWith(_disposables);
+
+        // Rebuild CurrentNpcAppearanceMods whenever EITHER the selected NPC
+        // OR the mugshot source override changes. The override-clear
+        // subscription above runs first when SelectedNpc changes, so this
+        // chain sees a (newNpc, None) tuple. DistinctUntilChanged dedupes the
+        // back-to-back emissions (one for SelectedNpc change, one for the
+        // synchronous override clear).
+        this.WhenAnyValue(x => x.SelectedNpc, x => x.MugshotSourceOverride)
+            .DistinctUntilChanged()
+            .Do(t =>
+            {
+                if (t.Item1 != null)
+                {
+                    SelectionPerfSw.Restart();
+                    Debug.WriteLine($"[NpcPerf] T+0ms SelectedNpc -> {t.Item1.DisplayName} [{t.Item1.NpcFormKey}] override={t.Item2}");
+                }
+            })
+            .SelectMany(async t =>
+            {
+                var selectedNpc = t.Item1;
+                var mugshotVMs = selectedNpc != null
+                    ? await CreateMugShotViewModelsAsync(selectedNpc, _downloadedMugshotData)
+                    : new ObservableCollection<VM_NpcsMenuMugshot>();
+                return mugshotVMs;
+            })
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Do(vms =>
+            {
+                // Before the OAPH swaps in the freshly-built collection, dispose the
+                // tiles from the previously-displayed NPC. Each VM_NpcsMenuMugshot
+                // holds a frozen BitmapImage AND a subscription to the SingleInstance
+                // NpcConsistencyProvider.NpcSelectionChanged Subject, which roots the
+                // tile for the life of the app. Without disposing here, every tile
+                // (and its bitmap) from every NPC ever viewed stays resident, which
+                // is the dominant source of the monotonic RAM growth while browsing.
+                // CreateMugShotViewModelsAsync always builds fresh tiles via the
+                // factory, so the outgoing collection is never reused.
+                var previousTiles = CurrentNpcAppearanceMods;
+                if (previousTiles != null)
+                {
+                    foreach (var tile in previousTiles)
+                    {
+                        tile.Dispose();
+                    }
+                }
+                // The tile set is being swapped — the next generation trigger
+                // must cancel the old batch and mint a fresh token.
+                _generationTilesDirty = true;
+                Debug.WriteLine($"[NpcPerf] T+{SelectionPerfSw.ElapsedMilliseconds}ms CurrentNpcAppearanceMods bound (count={vms.Count})");
+
+                // Opt-in memory sample, one row per NPC switch (no-op unless LogMemory.txt is present).
+                // Placed after the previous NPC's tiles are disposed so the sample reflects the steady state
+                // for the newly-shown NPC rather than a transient two-NPCs-resident peak.
+                if (MemoryLogger.IsEnabled)
+                    MemoryLogger.LogSample(SelectedNpc?.DisplayName ?? "(none)", vms.Count);
+            })
+            .ToPropertyEx(this, x => x.CurrentNpcAppearanceMods)
+            .DisposeWith(_disposables);
+        
+        Observable.FromEventPattern<ImagePacker.PackingCompletedEventArgs>(
+                _imagePacker, nameof(ImagePacker.PackingCompleted))
+            .Throttle(TimeSpan.FromMilliseconds(100))
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(_ => TriggerAsyncMugshotGeneration())
+            .DisposeWith(_disposables);
+
+        // Re-pack after the current NPC's tiles finish loading their images.
+        // Tile image loads are async (LoadInitialImageAsync / SetImageSource
+        // decode their bitmap off the UI thread), so the 50ms
+        // CurrentNpcAppearanceMods throttle below can fire RefreshImageSizes
+        // while every tile is still 0×0 — RefreshImageSizes then finds nothing
+        // packable and early-returns, and nothing else re-triggers it, leaving
+        // the mugshots at full display size until the user forces a refresh.
+        // Each tile signals via NotifyTileImageReady once its dimensions are
+        // set; the throttle coalesces the burst of loads into one re-pack shortly
+        // after they settle. This does NOT feed back on itself: the packer's
+        // crop step reassigns MugshotSource but never calls NotifyTileImageReady.
+        _tileImageReadySubject
+            .Throttle(TimeSpan.FromMilliseconds(150), RxApp.MainThreadScheduler)
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(_ => _refreshImageSizesSubject.OnNext(Unit.Default))
+            .DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.CurrentNpcAppearanceMods)
+            // Add a 50ms throttle. This gives the UI thread a moment to complete the
+            // layout pass for the newly loaded mugshots before the resize signal is sent.
+            .Throttle(TimeSpan.FromMilliseconds(50), RxApp.MainThreadScheduler)
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(_ =>
+            {
+                ToggleModVisibility();
+                _refreshImageSizesSubject.OnNext(Unit.Default);
+                // Backstop: kick off the priority-loop generation directly. The
+                // packer-event chain (PackingCompleted -> TriggerAsyncMugshotGeneration)
+                // only fires when ImagePacker.FitOriginalImagesToContainer runs,
+                // which RefreshImageSizes skips when the user has manually zoomed
+                // or locked the zoom. Without this call, an override-only change
+                // (or any rebuild while the packer is bypassed) leaves all tiles
+                // spinning forever waiting on GenerateMugshotAsync.
+                TriggerAsyncMugshotGeneration();
+            })
+            .DisposeWith(_disposables);
+
+        InitFaceGenCoordinator();
+
+        _consistencyProvider.NpcSelectionChanged
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(args => UpdateSelectionState(args.NpcFormKey, args.SelectedModName, args.SourceNpcFormKey))
+            .DisposeWith(_disposables);
+        
+        _consistencyProvider.NpcSelectionChanged
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(args => RecalculateTemplateIndicatorsForSelection(args.NpcFormKey))
+            .DisposeWith(_disposables);
+
+        // Refresh selection indicator brushes when theme changes. Hold the handler
+        // in a field so Dispose can detach it from the static event (otherwise the
+        // closure roots this VM via ThemeManager for the life of the process).
+        _themeChangedHandler = _ => RefreshAllSelectionIndicators();
+        ThemeManager.ThemeChanged += _themeChangedHandler;
+
+        // Listen for the request to share an appearance
+        MessageBus.Current.Listen<ShareAppearanceRequest>()
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(request => HandleShareAppearanceRequest(request.MugshotToShare))
+            .DisposeWith(_disposables);
+        
+        MessageBus.Current.Listen<UnshareAppearanceRequest>()
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(request => HandleUnshareAppearanceRequest(request.MugshotToUnshare))
+            .DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.SearchType1)
+            .Select(type => type == NpcSearchType.SelectionState)
+            .ToPropertyEx(this, x => x.IsSelectionStateSearch1).DisposeWith(_disposables);
+        this.WhenAnyValue(x => x.SearchType1)
+            .Select(type => type == NpcSearchType.Group)
+            .ToPropertyEx(this, x => x.IsGroupSearch1).DisposeWith(_disposables);
+        this.WhenAnyValue(x => x.SearchType1)
+            .Select(type => type == NpcSearchType.ShareStatus)
+            .ToPropertyEx(this, x => x.IsShareStatusSearch1).DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.SearchType2)
+            .Select(type => type == NpcSearchType.SelectionState)
+            .ToPropertyEx(this, x => x.IsSelectionStateSearch2).DisposeWith(_disposables);
+        this.WhenAnyValue(x => x.SearchType2)
+            .Select(type => type == NpcSearchType.Group)
+            .ToPropertyEx(this, x => x.IsGroupSearch2).DisposeWith(_disposables);
+        this.WhenAnyValue(x => x.SearchType2)
+            .Select(type => type == NpcSearchType.ShareStatus)
+            .ToPropertyEx(this, x => x.IsShareStatusSearch2).DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.SearchType3)
+            .Select(type => type == NpcSearchType.SelectionState)
+            .ToPropertyEx(this, x => x.IsSelectionStateSearch3).DisposeWith(_disposables);
+        this.WhenAnyValue(x => x.SearchType3)
+            .Select(type => type == NpcSearchType.Group)
+            .ToPropertyEx(this, x => x.IsGroupSearch3).DisposeWith(_disposables);
+        this.WhenAnyValue(x => x.SearchType3)
+            .Select(type => type == NpcSearchType.ShareStatus)
+            .ToPropertyEx(this, x => x.IsShareStatusSearch3).DisposeWith(_disposables);
+        
+        this.WhenAnyValue(x => x.SearchType1)
+            .Select(type => type == NpcSearchType.Uniqueness)
+            .ToPropertyEx(this, x => x.IsUniquenessSearch1).DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.SearchType2)
+            .Select(type => type == NpcSearchType.Uniqueness)
+            .ToPropertyEx(this, x => x.IsUniquenessSearch2).DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.SearchType3)
+            .Select(type => type == NpcSearchType.Uniqueness)
+            .ToPropertyEx(this, x => x.IsUniquenessSearch3).DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.SearchType1)
+            .Select(type => type == NpcSearchType.Gender)
+            .ToPropertyEx(this, x => x.IsGenderSearch1).DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.SearchType2)
+            .Select(type => type == NpcSearchType.Gender)
+            .ToPropertyEx(this, x => x.IsGenderSearch2).DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.SearchType3)
+            .Select(type => type == NpcSearchType.Gender)
+            .ToPropertyEx(this, x => x.IsGenderSearch3).DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.SearchType1)
+            .Select(type => type == NpcSearchType.Race)
+            .ToPropertyEx(this, x => x.IsRaceSearch1).DisposeWith(_disposables);
+        this.WhenAnyValue(x => x.SearchType2)
+            .Select(type => type == NpcSearchType.Race)
+            .ToPropertyEx(this, x => x.IsRaceSearch2).DisposeWith(_disposables);
+        this.WhenAnyValue(x => x.SearchType3)
+            .Select(type => type == NpcSearchType.Race)
+            .ToPropertyEx(this, x => x.IsRaceSearch3).DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.SearchType1)
+            .Select(type => type == NpcSearchType.Template)
+            .ToPropertyEx(this, x => x.IsTemplateSearch1).DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.SearchType2)
+            .Select(type => type == NpcSearchType.Template)
+            .ToPropertyEx(this, x => x.IsTemplateSearch2).DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.SearchType3)
+            .Select(type => type == NpcSearchType.Template)
+            .ToPropertyEx(this, x => x.IsTemplateSearch3).DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.SearchType1)
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(type =>
+            {
+                if (type == NpcSearchType.Group || type == NpcSearchType.SelectionState || type == NpcSearchType.ShareStatus || type == NpcSearchType.Uniqueness || type == NpcSearchType.Gender || type == NpcSearchType.Template) SearchText1 = string.Empty;
+                if (type != NpcSearchType.Group) SelectedGroupFilter1 = null;
+            })
+            .DisposeWith(_disposables);
+        this.WhenAnyValue(x => x.SearchType2)
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(type =>
+            {
+                if (type == NpcSearchType.Group || type == NpcSearchType.SelectionState || type == NpcSearchType.ShareStatus || type == NpcSearchType.Uniqueness || type == NpcSearchType.Gender || type == NpcSearchType.Template) SearchText2 = string.Empty;
+                if (type != NpcSearchType.Group) SelectedGroupFilter2 = null;
+            })
+            .DisposeWith(_disposables);
+        this.WhenAnyValue(x => x.SearchType3)
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(type =>
+            {
+                if (type == NpcSearchType.Group || type == NpcSearchType.SelectionState || type == NpcSearchType.ShareStatus || type == NpcSearchType.Uniqueness || type == NpcSearchType.Gender || type == NpcSearchType.Template) SearchText3 = string.Empty;
+                if (type != NpcSearchType.Group) SelectedGroupFilter3 = null;
+            })
+            .DisposeWith(_disposables);
+        
+        ShowSingleOptionNpcs = _settings.ShowSingleOptionNpcs;
+        this.WhenAnyValue(x => x.ShowSingleOptionNpcs)
+            .Skip(1) // Skip the initial value on load
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(show => 
+            {
+                _settings.ShowSingleOptionNpcs = show;
+                ApplyFilter(false);
+            })
+            .DisposeWith(_disposables);
+
+        ShowUnloadedNpcs = _settings.ShowUnloadedNpcs;
+        this.WhenAnyValue(x => x.ShowUnloadedNpcs)
+            .Skip(1) // Skip the initial value on load
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(show => 
+            {
+                _settings.ShowUnloadedNpcs = show;
+                ApplyFilter(false);
+            })
+            .DisposeWith(_disposables);
+        
+        ShowSkyPatcherTemplates = _settings.ShowSkyPatcherTemplates;
+        this.WhenAnyValue(x => x.ShowSkyPatcherTemplates)
+            .Skip(1)
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(val => 
+            {
+                _settings.ShowSkyPatcherTemplates = val;
+                ApplyFilter(false);
+            })
+            .DisposeWith(_disposables);
+
+        ShowUninstalledMods = _settings.ShowUninstalledMods;
+        this.WhenAnyValue(x => x.ShowUninstalledMods)
+            .Skip(1)
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(val =>
+            {
+                _settings.ShowUninstalledMods = val;
+                if (!NpcsViewIsZoomLocked)
+                {
+                    NpcsViewHasUserManuallyZoomed = false;
+                }
+
+                ToggleModVisibility();
+            })
+            .DisposeWith(_disposables);
+
+        // 8 properties: past the 7-arg tuple overload, so supply an explicit
+        // selector (the tuple-returning WhenAnyValue maxes out at 7).
+        var filter1Changes = this.WhenAnyValue(
+            x => x.SearchText1, x => x.SearchType1, x => x.SelectedStateFilter1, x => x.SelectedGroupFilter1, x => x.SelectedShareStatusFilter1, x => x.SelectedUniquenessFilter1, x => x.SelectedTemplateFilter1, x => x.SelectedGenderFilter1,
+            (_, _, _, _, _, _, _, _) => Unit.Default);
+        var filter2Changes = this.WhenAnyValue(
+            x => x.SearchText2, x => x.SearchType2, x => x.SelectedStateFilter2, x => x.SelectedGroupFilter2, x => x.SelectedShareStatusFilter2, x => x.SelectedUniquenessFilter2, x => x.SelectedTemplateFilter2, x => x.SelectedGenderFilter2,
+            (_, _, _, _, _, _, _, _) => Unit.Default);
+        var filter3Changes = this.WhenAnyValue(
+            x => x.SearchText3, x => x.SearchType3, x => x.SelectedStateFilter3, x => x.SelectedGroupFilter3, x => x.SelectedShareStatusFilter3, x => x.SelectedUniquenessFilter3, x => x.SelectedTemplateFilter3, x => x.SelectedGenderFilter3,
+            (_, _, _, _, _, _, _, _) => Unit.Default);
+        // Kept out of the per-row bundles above, which are already at the 8-property
+        // explicit-selector limit.
+        var inversionChanges = this.WhenAnyValue(
+            x => x.SearchInversion1, x => x.SearchInversion2, x => x.SearchInversion3
+        ).Select(_ => Unit.Default);
+
+        var logicChanges = this.WhenAnyValue(
+            x => x.CurrentSearchLogic
+        ).Select(_ => Unit.Default);
+
+        var sortChanges = this.WhenAnyValue(
+            x => x.SelectedSortProperty, x => x.IsSortReversed
+        ).Select(_ => Unit.Default);
+
+        // Throttle widens when mugshot autogeneration is enabled: the internal
+        // renderer is expensive, so intermediate keystrokes (e.g. "Kat" before
+        // "Katherine") would otherwise queue heavy render work that has to
+        // finish before the final filter result settles.
+        Observable.Merge(filter1Changes, filter2Changes, filter3Changes, inversionChanges, logicChanges, sortChanges)
+            .Throttle(_ => Observable.Timer(
+                _settings.UsePortraitCreatorFallback
+                    ? TimeSpan.FromMilliseconds(400)
+                    : TimeSpan.FromMilliseconds(100),
+                RxApp.MainThreadScheduler))
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(_ => ApplyFilter(false))
+            .DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.ShowHiddenMods)
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(_ =>
+            {
+                if (!NpcsViewIsZoomLocked)
+                {
+                    NpcsViewHasUserManuallyZoomed = false;
+                }
+
+                ToggleModVisibility();
+            })
+            .DisposeWith(_disposables);
+
+        ShowNpcDescriptions = _settings.ShowNpcDescriptions;
+        this.WhenAnyValue(x => x.ShowNpcDescriptions)
+            .Subscribe(b => _settings.ShowNpcDescriptions = b)
+            .DisposeWith(_disposables);
+
+        LoadDescriptionCommand = ReactiveCommand.CreateFromTask<Unit, string?>(
+            async (_, ct) =>
+            {
+                var npc = SelectedNpc;
+                if (npc != null && ShowNpcDescriptions)
+                {
+                    try
+                    {
+                        return await _descriptionProvider.GetDescriptionAsync(npc.NpcFormKey, npc.DisplayName,
+                            npc.NpcData?.EditorID);
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"Error executing LoadDescriptionCommand: {ex}");
+                        return null;
+                    }
+                }
+
+                return null;
+            },
+            this.WhenAnyValue(x => x.SelectedNpc, x => x.ShowNpcDescriptions, (npc, show) => npc != null && show)
+        );
+        LoadDescriptionCommand.ObserveOn(RxApp.MainThreadScheduler).BindTo(this, x => x.CurrentNpcDescription)
+            .DisposeWith(_disposables);
+        LoadDescriptionCommand.IsExecuting.ToPropertyEx(this, x => x.IsLoadingDescription)
+            .DisposeWith(_disposables);
+        this.WhenAnyValue(x => x.SelectedNpc, x => x.ShowNpcDescriptions)
+            .Throttle(TimeSpan.FromMilliseconds(200)).Select(_ => Unit.Default)
+            .InvokeCommand(LoadDescriptionCommand).DisposeWith(_disposables);
+
+        var canExecuteGroupAction = this.WhenAnyValue(
+            x => x.SelectedNpc,
+            x => x.SelectedGroupName,
+            (npc, groupName) => npc != null && !string.IsNullOrWhiteSpace(groupName));
+
+        var canExecuteAllGroupAction = this.WhenAnyValue(
+            x => x.FilteredNpcs.Count,
+            x => x.SelectedGroupName,
+            (count, groupName) => count > 0 && !string.IsNullOrWhiteSpace(groupName));
+
+        AddCurrentNpcToGroupCommand = ReactiveCommand.Create(AddCurrentNpcToGroup, canExecuteGroupAction);
+        RemoveCurrentNpcFromGroupCommand = ReactiveCommand.Create(RemoveCurrentNpcFromGroup, canExecuteGroupAction);
+        AddAllVisibleNpcsToGroupCommand =
+            ReactiveCommand.Create(AddAllVisibleNpcsToGroup, canExecuteAllGroupAction);
+        RemoveAllVisibleNpcsFromGroupCommand =
+            ReactiveCommand.Create(RemoveAllVisibleNpcsFromGroup, canExecuteAllGroupAction);
+
+        AddCurrentNpcToGroupCommand.ThrownExceptions
+            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error adding NPC to group: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .DisposeWith(_disposables);
+        RemoveCurrentNpcFromGroupCommand.ThrownExceptions
+            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error removing NPC from group: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .DisposeWith(_disposables);
+        AddAllVisibleNpcsToGroupCommand.ThrownExceptions.Subscribe(ex =>
+                ScrollableMessageBox.ShowError($"Error adding all visible NPCs to group: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .DisposeWith(_disposables);
+        RemoveAllVisibleNpcsFromGroupCommand.ThrownExceptions.Subscribe(ex =>
+                ScrollableMessageBox.ShowError($"Error removing all visible NPCs from group: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .DisposeWith(_disposables);
+
+        UpdateAvailableNpcGroups();
+
+        // Seed the Race combo from the cached scan so it is populated immediately at
+        // startup; ComputeRaceFilterOptions rebuilds it once the NPC list is finalized.
+        foreach (var race in _settings.CachedFilterRaces)
+            AvailableRaces.Add(race);
+
+        this.WhenAnyValue(x => x.NpcsViewZoomLevel)
+            .Skip(1)
+            .Throttle(TimeSpan.FromMilliseconds(100))
+            .Subscribe(zoom =>
+            {
+                bool isFromPackerUpdate = !NpcsViewIsZoomLocked && !NpcsViewHasUserManuallyZoomed;
+                Debug.WriteLine(
+                    $"VM_NpcSelectionBar: NpcsViewZoomLevel RAW input {zoom:F2}. IsFromPacker: {isFromPackerUpdate}, IsLocked: {NpcsViewIsZoomLocked}, ManualZoom: {NpcsViewHasUserManuallyZoomed}");
+
+                double previousVmZoomLevel = _settings.NpcsViewZoomLevel;
+                double newClampedZoom = Math.Max(_minZoomPercentage, Math.Min(_maxZoomPercentage, zoom));
+
+                if (Math.Abs(_settings.NpcsViewZoomLevel - newClampedZoom) > 0.001)
+                {
+                    _settings.NpcsViewZoomLevel = newClampedZoom;
+                    Debug.WriteLine(
+                        $"VM_NpcSelectionBar: Settings.NpcsViewZoomLevel updated to {newClampedZoom:F2}.");
+                }
+
+                if (Math.Abs(newClampedZoom - zoom) > 0.001)
+                {
+                    Debug.WriteLine(
+                        $"VM_NpcSelectionBar: ZoomLevel IS being clamped from {zoom:F2} to {newClampedZoom:F2}. Updating property.");
+                    NpcsViewZoomLevel = newClampedZoom;
+                    return;
+                }
+
+                if (NpcsViewIsZoomLocked || NpcsViewHasUserManuallyZoomed)
+                {
+                    Debug.WriteLine(
+                        $"VM_NpcSelectionBar: ZoomLevel processed. IsLocked or ManualZoom. Triggering refresh. Value: {newClampedZoom:F2}");
+                    _refreshImageSizesSubject.OnNext(Unit.Default);
+                }
+                else
+                {
+                    Debug.WriteLine(
+                        $"VM_NpcSelectionBar: ZoomLevel processed. Unlocked & not manual. No VM-initiated refresh. Value: {newClampedZoom:F2}");
+                }
+            })
+            .DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.NpcsViewIsZoomLocked)
+            .Skip(1)
+            .Subscribe(isLocked =>
+            {
+                _settings.NpcsViewIsZoomLocked = isLocked;
+                NpcsViewHasUserManuallyZoomed = false;
+                _refreshImageSizesSubject.OnNext(Unit.Default);
+            })
+            .DisposeWith(_disposables);
+
+
+        // --- NEW: Setup for Compare/Hide/Deselect ---
+        var checkedMugshotCountObservable = this.WhenAnyValue(x => x.CurrentNpcAppearanceMods)
+            .Select(mods =>
+            {
+                if (mods == null || !mods.Any())
+                    return Observable.Return(0);
+
+                var itemCheckedObservables = mods.Select(m =>
+                    m.WhenAnyValue(x => x.IsCheckedForCompare)
+                        .Select(_ => m.IsCheckedForCompare)
+                ).ToList();
+
+                if (!itemCheckedObservables.Any())
+                    return Observable.Return(0);
+
+                return Observable.CombineLatest(itemCheckedObservables)
+                    .Select(statuses => statuses.Count(isChecked => isChecked));
+            })
+            .Switch()
+            .StartWith(0);
+
+        checkedMugshotCountObservable
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .ToPropertyEx(this, x => x.CheckedMugshotCount)
+            .DisposeWith(_disposables);
+
+        var canCompareSelected = this.WhenAnyValue(x => x.CheckedMugshotCount)
+            .Select(count => count >= 2);
+        CompareSelectedCommand = ReactiveCommand.Create(ExecuteCompareSelected, canCompareSelected);
+        CompareSelectedCommand.ThrownExceptions
+            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error comparing selected: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .DisposeWith(_disposables);
+
+        // Define the observable for enabling the Hide/Unhide menu button
+        var atLeastOneSelected = this.WhenAnyValue(x => x.CheckedMugshotCount)
+            .Select(count => count >= 1)
+            .StartWith(false); // Start disabled until count is known
+
+        // Convert it to a property
+        atLeastOneSelected
+            .ToPropertyEx(this, x => x.CanOpenHideUnhideMenu)
+            .DisposeWith(_disposables);
+
+        var canExecuteHideUnhideActions = atLeastOneSelected; // Reuse the observable
+
+        HideAllButSelectedCommand = ReactiveCommand.Create(ExecuteHideAllButSelected, canExecuteHideUnhideActions).DisposeWith(_disposables);
+        HideAllButSelectedCommand.ThrownExceptions
+            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error hiding unselected: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .DisposeWith(_disposables);
+        HideAllSelectedCommand = ReactiveCommand.Create(ExecuteHideAllSelected, canExecuteHideUnhideActions).DisposeWith(_disposables);
+        HideAllSelectedCommand.ThrownExceptions
+            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error hiding selected: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .DisposeWith(_disposables);
+        UnhideAllSelectedCommand = ReactiveCommand.Create(ExecuteUnhideAllSelected, canExecuteHideUnhideActions).DisposeWith(_disposables);
+        UnhideAllSelectedCommand.ThrownExceptions
+            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error unhiding selected: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .DisposeWith(_disposables);
+        UnhideAllButSelectedCommand =
+            ReactiveCommand.Create(ExecuteUnhideAllButSelected, canExecuteHideUnhideActions).DisposeWith(_disposables);
+        UnhideAllButSelectedCommand.ThrownExceptions
+            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error unhiding unselected: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .DisposeWith(_disposables);
+
+        var canDeselectAll = this.WhenAnyValue(x => x.CheckedMugshotCount)
+            .Select(count => count >= 1);
+        DeselectAllCommand = ReactiveCommand.Create(ExecuteDeselectAll, canDeselectAll).DisposeWith(_disposables);
+        DeselectAllCommand.ThrownExceptions
+            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error deselecting all: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .DisposeWith(_disposables);
+        // --- End NEW Setup ---
+
+        // --- NEW: Import/Export Command Setup ---
+        ImportChoicesFromLoadOrderCommand = ReactiveCommand.CreateFromTask(ImportChoicesFromLoadOrderAsync).DisposeWith(_disposables);
+        RandomizeChoicesCommand = ReactiveCommand.CreateFromTask(RandomizeChoicesAsync).DisposeWith(_disposables);
+        ExportChoicesCommand = ReactiveCommand.CreateFromTask(ExportChoicesAsync).DisposeWith(_disposables);
+        ImportChoicesCommand = ReactiveCommand.CreateFromTask(ImportChoicesAsync).DisposeWith(_disposables);
+        ClearChoicesCommand = ReactiveCommand.Create(ClearChoices).DisposeWith(_disposables);
+
+        ImportChoicesFromLoadOrderCommand.ThrownExceptions
+            .Subscribe(ex =>
+                ScrollableMessageBox.ShowError($"Error importing choices from load order: {ExceptionLogger.GetExceptionStack(ex)}", TranslationServiceProvider.GetService()?.GetString("importError") ?? "Import Error"))
+            .DisposeWith(_disposables);
+        RandomizeChoicesCommand.ThrownExceptions
+            .Subscribe(ex =>
+                ScrollableMessageBox.ShowError($"Error randomizing choices: {ExceptionLogger.GetExceptionStack(ex)}",
+                    "Randomize Error"))
+            .DisposeWith(_disposables);
+        ExportChoicesCommand.ThrownExceptions
+            .Subscribe(ex =>
+                ScrollableMessageBox.ShowError($"Error exporting choices: {ExceptionLogger.GetExceptionStack(ex)}", TranslationServiceProvider.GetService()?.GetString("exportError") ?? "Export Error"))
+            .DisposeWith(_disposables);
+        ImportChoicesCommand.ThrownExceptions
+            .Subscribe(ex =>
+                ScrollableMessageBox.ShowError($"Error importing choices: {ExceptionLogger.GetExceptionStack(ex)}", TranslationServiceProvider.GetService()?.GetString("importError") ?? "Import Error"))
+            .DisposeWith(_disposables);
+        ClearChoicesCommand.ThrownExceptions
+            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error clearing choices: {ExceptionLogger.GetExceptionStack(ex)}", TranslationServiceProvider.GetService()?.GetString("clearError") ?? "Clear Error"))
+            .DisposeWith(_disposables);
+        // --- End Import/Export Setup ---
+        
+        ShowFavoritesCommand = ReactiveCommand.Create(ShowFavoritesWindowForSharing).DisposeWith(_disposables);
+        ShowFavoritesCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error opening favorites: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+
+        AddFavoriteFaceToNpcCommand = ReactiveCommand.Create<VM_NpcsMenuSelection>(ShowFavoritesWindowForApplying).DisposeWith(_disposables);
+        AddFavoriteFaceToNpcCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error opening favorites: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+
+
+        if (CurrentNpcAppearanceMods != null && CurrentNpcAppearanceMods.Any())
+        {
+            _refreshImageSizesSubject.OnNext(Unit.Default);
+        }
+        
+        _refreshImageSizesSubject.DisposeWith(_disposables);
+        _tileImageReadySubject.DisposeWith(_disposables);
+        _requestScrollToNpcSubject.DisposeWith(_disposables);
+    }
+
+    // --- Methods ---
+    
+    private void ShowFavoritesWindowForSharing()
+    {
+        var vm = _favoriteFacesFactory(VM_FavoriteFaces.FavoriteFacesMode.Share, null);
+        var window = new FavoriteFacesWindow { DataContext = vm, ViewModel = vm };
+
+        // Find the currently active window to set as the owner.
+        window.Owner = Application.Current.Windows.OfType<Window>().SingleOrDefault(x => x.IsActive);
+
+        window.Show();
+    }
+
+    private void ShowFavoritesWindowForApplying(VM_NpcsMenuSelection targetNpc)
+    {
+        if (targetNpc == null) return;
+        var vm = _favoriteFacesFactory(VM_FavoriteFaces.FavoriteFacesMode.Apply, targetNpc);
+        var window = new FavoriteFacesWindow { DataContext = vm, ViewModel = vm };
+    
+        // Find the currently active window to set as the owner.
+        window.Owner = Application.Current.Windows.OfType<Window>().SingleOrDefault(x => x.IsActive);
+    
+        window.ShowDialog();
+    }
+
+    // --- NEW: Command Execution Methods ---
+    private void ExecuteCompareSelected()
+    {
+        if (CurrentNpcAppearanceMods == null) return;
+
+        var selectedMugshotVMs = CurrentNpcAppearanceMods
+            .Where(m => m.IsCheckedForCompare && m.HasMugshot && 
+                        (m.MugshotSource != null || (!string.IsNullOrEmpty(m.ImagePath) && File.Exists(m.ImagePath))))
+            .ToList();
+
+        if (selectedMugshotVMs.Count < 2)
+        {
+            ScrollableMessageBox.ShowWarning(TranslationServiceProvider.GetService()?.GetString("msg_selectAtLeastTwoMugshots") ?? "Please select at least two valid mugshots to compare.", TranslationServiceProvider.GetService()?.GetString("compareSelected") ?? "Compare Selected");
+            return;
+        }
+
+        Debug.WriteLine($"CompareSelected: {selectedMugshotVMs.Count} mugshots selected for comparison.");
+
+        try
+        {
+            var multiImageVM =
+                new VM_MultiImageDisplay(selectedMugshotVMs.Cast<IHasMugshotImage>() /*, _settings */);
+            // It's good practice to ensure the new window has an owner if it's a dialog
+            var currentWindow = Application.Current.Windows.OfType<Window>().FirstOrDefault(x => x.IsActive);
+
+            var multiImageView = new MultiImageDisplayView
+            {
+                DataContext = multiImageVM,
+                ViewModel = multiImageVM,
+                Owner = currentWindow // Set owner for proper dialog behavior
+            };
+
+            multiImageView.ShowDialog();
+
+            // After the dialog closes, trigger a refresh in NpcsView to reset sizes based on its context
+            _refreshImageSizesSubject.OnNext(Unit.Default);
+            Debug.WriteLine("VM_NpcSelectionBar: Triggered NpcsView refresh after compare dialog closed.");
+        }
+        catch (Exception ex)
+        {
+            ScrollableMessageBox.ShowError($"Could not open comparison window: {ExceptionLogger.GetExceptionStack(ex)}", TranslationServiceProvider.GetService()?.GetString("errorComparing") ?? "Error Comparing");
+            Debug.WriteLine($"Error in ExecuteCompareSelected: {ex}");
+        }
+    }
+
+    private void ExecuteHideAllSelected()
+    {
+        if (CurrentNpcAppearanceMods == null) return;
+        bool refreshNeeded = false;
+
+        foreach (var mugshotVM in CurrentNpcAppearanceMods)
+        {
+            if (mugshotVM.IsCheckedForCompare)
+            {
+                if (!mugshotVM.IsSetHidden) // Only hide if *not* already hidden
+                {
+                    HideSelectedMod(mugshotVM);
+                    refreshNeeded = true;
+                }
+            }
+        }
+
+        if (refreshNeeded)
+        {
+            ToggleModVisibility();
+        }
+
+        Debug.WriteLine("HideAllSelected: Marked checked mugshots as hidden.");
+    }
+
+    private void ExecuteHideAllButSelected()
+    {
+        if (CurrentNpcAppearanceMods == null) return;
+        bool refreshNeeded = false;
+
+        foreach (var mugshotVM in CurrentNpcAppearanceMods)
+        {
+            if (!mugshotVM.IsCheckedForCompare)
+            {
+                // Call the standard hiding function on this view model.
+                if (!mugshotVM.IsSetHidden) // Prevent duplicate hiding
+                {
+                    HideSelectedMod(mugshotVM);
+                    refreshNeeded = true;
+                }
+            }
+        }
+
+        if (refreshNeeded)
+        {
+            ToggleModVisibility();
+        }
+
+        Debug.WriteLine("HideAllButSelected: Non-checked mugshots marked as hidden.");
+    }
+
+    private void ExecuteUnhideAllSelected()
+    {
+        if (CurrentNpcAppearanceMods == null) return;
+        bool refreshNeeded = false;
+
+        foreach (var mugshotVM in CurrentNpcAppearanceMods)
+        {
+            if (mugshotVM.IsCheckedForCompare)
+            {
+                if (mugshotVM.IsSetHidden) // Only unhide if *currently* hidden
+                {
+                    UnhideSelectedMod(mugshotVM);
+                    refreshNeeded = true;
+                }
+            }
+        }
+
+        if (refreshNeeded)
+        {
+            ToggleModVisibility();
+        }
+
+        Debug.WriteLine("UnhideAllSelected: Unhid checked mugshots");
+    }
+
+    private void ExecuteUnhideAllButSelected()
+    {
+        if (CurrentNpcAppearanceMods == null) return;
+        bool refreshNeeded = false;
+
+        foreach (var mugshotVM in CurrentNpcAppearanceMods)
+        {
+            if (!mugshotVM.IsCheckedForCompare)
+            {
+                if (mugshotVM.IsSetHidden) // Only unhide if *currently* hidden
+                {
+                    UnhideSelectedMod(mugshotVM);
+                    refreshNeeded = true;
+                }
+            }
+        }
+
+        if (refreshNeeded)
+        {
+            ToggleModVisibility();
+        }
+
+        Debug.WriteLine("UnhideAllSelected: Unhid checked mugshots");
+    }
+
+    // Added new version of Deselect
+    private void ExecuteDeselectAll()
+    {
+        if (CurrentNpcAppearanceMods == null) return;
+        foreach (var mugshotVM in CurrentNpcAppearanceMods)
+        {
+            mugshotVM.IsCheckedForCompare = false; // Clears the compare selection
+        }
+
+        Debug.WriteLine("DeselectAll: All mugshot compare checkboxes cleared.");
+    }
+
+
+    // Define a small, serializable record to structure the JSON output.
+    private record NpcChoiceDto(string ModName, string SourceNpcFormKey);
+
+    private async Task ExportChoicesAsync()
+    {
+        var dialog = new SaveFileDialog
+        {
+            Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*",
+            Title = "Export NPC Choices",
+            FileName = "MyNpcChoices.json",
+            DefaultExt = "json",
+            AddExtension = true
+        };
+
+        if (dialog.ShowDialog() != DialogResult.OK) return;
+
+        // 1. Transform the settings data into the serializable DTO format.
+        // This correctly handles the new (string, FormKey) tuple structure.
+        var selectionsToExport = _settings.SelectedAppearanceMods
+            .ToDictionary(
+                kvp => kvp.Key.ToString(), // Key: The target NPC's FormKey as a string.
+                kvp => new NpcChoiceDto(kvp.Value.ModName,
+                    kvp.Value.NpcFormKey.ToString()) // Value: The structured choice.
+            );
+
+        try
+        {
+            // 2. Run the synchronous file I/O on a background thread.
+            // This keeps the UI responsive and makes the method truly async.
+            bool success = await Task.Run(() =>
+            {
+                JSONhandler<Dictionary<string, NpcChoiceDto>>.SaveJSONFile(
+                    selectionsToExport,
+                    dialog.FileName,
+                    out bool wasSuccessful,
+                    out var exceptionString);
+
+                if (!wasSuccessful)
+                {
+                    // Show the error message on the UI thread.
+                    Application.Current.Dispatcher.Invoke(() =>
+                        ScrollableMessageBox.ShowError(exceptionString, TranslationServiceProvider.GetService()?.GetString("errorExportingNpcChoices") ?? "Error while exporting NPC Choices"));
+                }
+
+                return wasSuccessful;
+            });
+
+            if (success)
+            {
+                ScrollableMessageBox.Show(
+                    $"Successfully exported {selectionsToExport.Count} choices to {Path.GetFileName(dialog.FileName)}.",
+                    "Export Complete");
+            }
+        }
+        catch (Exception ex)
+        {
+            // Catch any other unexpected exceptions from Task.Run or message boxes.
+            ScrollableMessageBox.ShowError($"Failed to export choices: {ExceptionLogger.GetExceptionStack(ex)}", TranslationServiceProvider.GetService()?.GetString("exportError") ?? "Export Error");
+        }
+    }
+
+    private void ClearChoices()
+    {
+        int currentCount = _settings.SelectedAppearanceMods.Count;
+        if (currentCount == 0)
+        {
+            ScrollableMessageBox.Show(TranslationServiceProvider.GetService()?.GetString("msg_noChoicesToClear") ?? "There are no choices to clear.", "No Choices");
+            return;
+        }
+
+        if (!ScrollableMessageBox.Confirm(
+                $"Are you sure you want to clear all {currentCount} of your current NPC choices? This action cannot be undone.",
+                "Confirm Clear Choices", MessageBoxImage.Warning))
+        {
+            return; // User cancelled
+        }
+
+        _consistencyProvider.ClearAllSelections();
+    }
+
+    /// <summary>
+    /// Follows a Traits template link through the load order. Used as the hop resolver for
+    /// <see cref="Auxilliary.IsValidAppearanceRace"/>, which judges a templated NPC on the race
+    /// of its chain terminus rather than the inert race field on its own record.
+    /// </summary>
+    private INpcGetter? ResolveNpcFromLoadOrder(FormKey formKey)
+    {
+        return _environmentStateProvider.LinkCache.TryResolve<INpcGetter>(formKey, out var getter) ? getter : null;
+    }
+
+    private async Task ImportChoicesFromLoadOrderAsync()
+    {
+        if (!ScrollableMessageBox.Confirm(
+                "This will overwrite your current choices based on your load order. This action cannot be undone. Are you sure you want to continue?",
+                "Confirm Import Choices", MessageBoxImage.Warning))
+        {
+            return; // User cancelled
+        }
+
+        // Run the entire heavy operation on a background thread.
+        var (missingNpcs, unMatchedNpcs) = await Task.Run(() =>
+        {
+            var missing = new List<string>();
+            var unmatched = new List<string>();
+
+            foreach (var npc in AllNpcs)
+            {
+                if (!_environmentStateProvider.LinkCache.TryResolve<INpcGetter>(npc.NpcFormKey, out var npcGetter) || npcGetter == null)
+                {
+                    missing.Add($"{npc.DisplayName} ({npc.NpcFormKeyString})");
+                    continue;
+                }
+                
+                // NEW: Skip creatures (bears, spiders, etc.) by checking for a valid appearance race.
+                // Templated NPCs are judged on their chain terminus, so hand it a resolver; the
+                // load order is the only scope available here.
+                if (!_auxilliary.IsValidAppearanceRace(npcGetter.Race.FormKey, npcGetter, _settings.LocalizationLanguage,
+                        out _, out _, resolveNpc: ResolveNpcFromLoadOrder))
+                {
+                    continue;
+                }
+
+                // NEW: Skip NPCs that fully inherit their appearance from a template via the "Traits" flag.
+                if (Auxilliary.IsValidTemplatedNpc(npcGetter))
+                {
+                    continue;
+                }
+
+                var winningMod = FindWinningModForNpc(npcGetter);
+
+                if (winningMod != null)
+                {
+                    // Correctly call the updated SetSelectedMod with the NPC's own FormKey as the source.
+                    _consistencyProvider.SetSelectedMod(npc.NpcFormKey, winningMod.DisplayName, npc.NpcFormKey);
+                }
+                else
+                {
+                    if (npcGetter.Configuration.Flags.HasFlag(NpcConfiguration.Flag.IsCharGenFacePreset))
+                    {
+                        continue; // don't log missing chargen presets (but still try to look for them if a mod provides them, 
+                        // so don't perform this check until after calling FindWinningModForNpc()
+                    }
+                    
+                    unmatched.Add(Auxilliary.GetLogString(npcGetter, _settings.LocalizationLanguage, true));
+                }
+            }
+            return (missing, unmatched);
+        });
+
+        // Display results on the UI thread after the work is done.
+        if (missingNpcs.Any())
+        {
+            string message = "The following NPCs could not be found in your load order and were skipped:" +
+                             Environment.NewLine + Environment.NewLine + string.Join(Environment.NewLine, missingNpcs);
+            ScrollableMessageBox.ShowWarning(message, TranslationServiceProvider.GetService()?.GetString("missingNpcs") ?? "Missing NPCs");
+        }
+
+        if (unMatchedNpcs.Any())
+        {
+            string message = "A winning mod could not be identified for the following NPCs:" + Environment.NewLine +
+                             Environment.NewLine + string.Join(Environment.NewLine, unMatchedNpcs);
+            ScrollableMessageBox.ShowWarning(message, TranslationServiceProvider.GetService()?.GetString("unassignedNpcs") ?? "Unassigned NPCs");
+        }
+        
+        ScrollableMessageBox.Show(TranslationServiceProvider.GetService()?.GetString("msg_importFromLoadOrderComplete") ?? "Import from load order complete.", "Import Complete");
+    }
+
+    // One eligible appearance for an NPC during randomize. OwnModSetting is set only
+    // for the NPC's own faces (used for master/template validation); shared and
+    // favorite candidates go through the existing share flow with no validation.
+    private readonly record struct RandomCandidate(
+        string ModName, FormKey SourceKey, VM_ModSetting? OwnModSetting, bool IsShared);
+
+    private async Task RandomizeChoicesAsync()
+    {
+        // Gather the installed (non-mugshot-only) appearance mods for the dialog's checklist.
+        var installedMods = _lazyModsVm.Value.AllModSettings
+            .Where(m => m != null && !m.IsMugshotOnlyEntry &&
+                        (m.CorrespondingFolderPaths.Any() || m.IsAutoGenerated))
+            .ToList();
+
+        // Collect the user's randomize options (modal). The dialog persists nothing.
+        var optionsVm = new VM_RandomizeOptions(installedMods.Select(m => m.DisplayName), ClearRandomizedNpcs);
+        var owner = Application.Current.Windows.OfType<Window>().SingleOrDefault(x => x.IsActive);
+        var optionsView = new RandomizeOptionsView { DataContext = optionsVm, Owner = owner };
+        optionsView.ShowDialog();
+
+        if (!optionsVm.Confirmed)
+        {
+            optionsVm.Dispose();
+            return;
+        }
+
+        var scope = optionsVm.Scope;
+        bool allowBaseMod = optionsVm.AllowBaseMod;
+        bool allowSingleOptionNpcs = optionsVm.AllowSingleOptionNpcs;
+        bool sharingEnabled = optionsVm.AllowSharedAppearance;
+        bool forceShared = sharingEnabled && optionsVm.ForceSharedAppearance;
+        bool sameRace = sharingEnabled && optionsVm.ShareFromSameRace;
+        bool sameGender = sharingEnabled && optionsVm.ShareFromSameGender;
+        bool sameWeight = sharingEnabled && optionsVm.ShareFromSameWeight;
+        bool allowDuplicateShares = optionsVm.AllowDuplicateShares;
+        var appearanceSource = optionsVm.AppearanceSource;
+        var selectedModNames = optionsVm.GetSelectedModNames();
+        optionsVm.Dispose();
+
+        bool sourceIncludesMods = appearanceSource != RandomizeAppearanceSource.FavoriteFaces;
+        bool sourceIncludesFavorites = appearanceSource != RandomizeAppearanceSource.SelectedMods;
+
+        // Target set: either the full list or the current filtered view. NPCs whose
+        // defining plugin isn't in the load order are skipped (can't be resolved/validated).
+        IEnumerable<VM_NpcsMenuSelection> scopeList = scope == RandomizeScope.AllNpcs ? AllNpcs : FilteredNpcs;
+        var targetNpcs = scopeList.Where(n => n != null && n.IsInLoadOrder).ToList();
+
+        // Memoized gender/weight resolution (used by the share filters).
+        var npcByKey = AllNpcs.Where(n => n != null)
+            .GroupBy(n => n.NpcFormKey)
+            .ToDictionary(g => g.Key, g => g.First());
+
+        var genderCache = new Dictionary<FormKey, Gender?>();
+        Gender? GenderOf(FormKey key)
+        {
+            if (genderCache.TryGetValue(key, out var cached)) return cached;
+            Gender? result = null;
+            if (npcByKey.TryGetValue(key, out var vm) && vm.NpcData != null)
+                result = vm.NpcData.Gender;
+            else if (_environmentStateProvider.LinkCache.TryResolve<INpcGetter>(key, out var getter))
+                result = Auxilliary.GetGender(getter);
+            genderCache[key] = result;
+            return result;
+        }
+
+        var weightCache = new Dictionary<FormKey, float?>();
+        float? WeightOf(FormKey key)
+        {
+            if (weightCache.TryGetValue(key, out var cached)) return cached;
+            float? result = _environmentStateProvider.LinkCache.TryResolve<INpcGetter>(key, out var getter)
+                ? getter.Weight
+                : (float?)null;
+            weightCache[key] = result;
+            return result;
+        }
+
+        var raceCache = new Dictionary<FormKey, FormKey?>();
+        FormKey? RaceOf(FormKey key)
+        {
+            if (raceCache.TryGetValue(key, out var cached)) return cached;
+            FormKey? result = null;
+            if (_environmentStateProvider.LinkCache.TryResolve<INpcGetter>(key, out var getter)
+                && getter.Race != null && !getter.Race.IsNull)
+                result = getter.Race.FormKey;
+            raceCache[key] = result;
+            return result;
+        }
+
+        // Donor pools for shared faces: (mod, sourceNpc) pairs borrowed from OTHER NPCs.
+        // Resolved once; per-target gender/weight filtering is then cheap.
+        var modByName = installedMods
+            .GroupBy(m => m.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+        var modDonors = new List<(string ModName, FormKey SourceKey)>();
+        if (sharingEnabled && sourceIncludesMods)
+        {
+            foreach (var name in selectedModNames)
+            {
+                if (!modByName.TryGetValue(name, out var mod)) continue;
+                if (_hiddenModNames.Contains(mod.DisplayName)) continue;
+                foreach (var sourceKey in mod.NpcFormKeys)
+                    modDonors.Add((mod.DisplayName, sourceKey));
+            }
+        }
+
+        var favoriteDonors = new List<(string ModName, FormKey SourceKey)>();
+        if (sharingEnabled && sourceIncludesFavorites)
+        {
+            foreach (var fav in _settings.FavoriteFaces)
+                favoriteDonors.Add((fav.ModName, fav.NpcFormKey));
+        }
+
+        // Build each target NPC's candidate pool of (mod, sourceNpc) appearances.
+        var eligibleByNpc = new Dictionary<FormKey, List<RandomCandidate>>();
+        int singleOptionSkipCount = 0;
+        foreach (var npc in targetNpcs)
+        {
+            var targetKey = npc.NpcFormKey;
+            var sourceModKey = targetKey.ModKey;
+            var perNpcHidden = _hiddenModsPerNpc.GetValueOrDefault(targetKey);
+            var targetRace = sameRace ? RaceOf(targetKey) : null;
+            var targetGender = sameGender ? GenderOf(targetKey) : null;
+            var targetWeight = sameWeight ? WeightOf(targetKey) : null;
+
+            var pool = new List<RandomCandidate>();
+            var seen = new HashSet<(string, FormKey)>();
+
+            // The NPC's own face from the selected mods. "Base" = the NPC's appearance
+            // from its own source plugin; excluded unless the user allows it.
+            if (!forceShared && sourceIncludesMods)
+            {
+                foreach (var mod in npc.AppearanceMods)
+                {
+                    if (mod == null || mod.IsMugshotOnlyEntry) continue;
+                    if (!(mod.CorrespondingFolderPaths.Any() || mod.IsAutoGenerated)) continue;
+                    if (!selectedModNames.Contains(mod.DisplayName)) continue;
+                    if (_hiddenModNames.Contains(mod.DisplayName)) continue;
+                    if (perNpcHidden?.Contains(mod.DisplayName) ?? false) continue;
+                    bool isBase = mod.CorrespondingModKeys.Contains(sourceModKey);
+                    if (isBase && !allowBaseMod) continue;
+                    if (seen.Add((mod.DisplayName, targetKey)))
+                        pool.Add(new RandomCandidate(mod.DisplayName, targetKey, mod, false));
+                }
+            }
+
+            // Faces borrowed from other NPCs (mods and/or favorites).
+            if (sharingEnabled)
+            {
+                void TryAddShared(string modName, FormKey sourceKey)
+                {
+                    if (sourceKey.Equals(targetKey)) return;            // not a borrowed face
+                    if (_hiddenModNames.Contains(modName)) return;
+                    if (perNpcHidden?.Contains(modName) ?? false) return;
+                    if (sameRace)
+                    {
+                        var sr = RaceOf(sourceKey);
+                        if (sr == null || targetRace == null || !sr.Value.Equals(targetRace.Value)) return;
+                    }
+                    if (sameGender)
+                    {
+                        var sg = GenderOf(sourceKey);
+                        if (sg == null || targetGender == null || sg.Value != targetGender.Value) return;
+                    }
+                    if (sameWeight)
+                    {
+                        var sw = WeightOf(sourceKey);
+                        if (sw == null || targetWeight == null || sw.Value != targetWeight.Value) return;
+                    }
+                    if (seen.Add((modName, sourceKey)))
+                        pool.Add(new RandomCandidate(modName, sourceKey, null, true));
+                }
+
+                if (sourceIncludesMods)
+                    foreach (var d in modDonors) TryAddShared(d.ModName, d.SourceKey);
+                if (sourceIncludesFavorites)
+                    foreach (var d in favoriteDonors) TryAddShared(d.ModName, d.SourceKey);
+            }
+
+            // A one-candidate pool isn't a random pick, it's a forced one. Unless the user opts
+            // in, keep those NPCs out of the run entirely (like the ones with no candidates at
+            // all) so whatever they came in with — including a curated pick — survives untouched.
+            if (pool.Count > 1 || (pool.Count == 1 && allowSingleOptionNpcs))
+                eligibleByNpc[targetKey] = pool;
+            else if (pool.Count == 1)
+                singleOptionSkipCount++;
+        }
+
+        var applicableNpcs = targetNpcs
+            .Where(n => eligibleByNpc.ContainsKey(n.NpcFormKey))
+            .ToList();
+        int noEligibleCount = targetNpcs.Count - applicableNpcs.Count - singleOptionSkipCount;
+
+        // Face owners first, then the NPCs that copy from them, deepest chains last. A templated
+        // NPC's own selection is inert — the game draws the terminus's face — so it can only be
+        // made consistent against a terminus that has already been decided: it then either draws
+        // the same mod (pinning the whole chain) or, per the contract in
+        // ValidateAndHandleTemplatesForBatch, gets no selection at all. Processed the other way
+        // round, a recipient compares itself against whatever its terminus happened to be set to
+        // BEFORE this run and keeps a stale selection the terminus later contradicts, which is
+        // exactly the mismatch the output validator reports. OrderBy is stable, so NPCs at the
+        // same depth keep the list's order.
+        var templateDepths = new Dictionary<FormKey, int>();
+        applicableNpcs = applicableNpcs
+            .OrderBy(n =>
+            {
+                if (!templateDepths.TryGetValue(n.NpcFormKey, out var depth))
+                {
+                    depth = Auxilliary.TemplateChainDepth(n.NpcFormKey, ResolveNpcFromLoadOrder);
+                    templateDepths[n.NpcFormKey] = depth;
+                }
+                return depth;
+            })
+            .ToList();
+
+        if (!applicableNpcs.Any())
+        {
+            var nothingMessage = new StringBuilder();
+            nothingMessage.Append(
+                "No NPCs in the selected set have an eligible appearance under these options. " +
+                "Make sure at least one source mod is checked (and, for borrowed faces, that 'Allow shared appearances' is enabled).");
+            if (singleOptionSkipCount > 0)
+            {
+                nothingMessage.AppendLine();
+                nothingMessage.AppendLine();
+                nothingMessage.Append($"{singleOptionSkipCount} NPC(s) have exactly one eligible appearance — " +
+                                      "check 'Allow single-option NPCs' to include them.");
+            }
+
+            ScrollableMessageBox.Show(nothingMessage.ToString(), "Nothing to Randomize");
+            return;
+        }
+
+        int overwriteCount = applicableNpcs.Count(n => _consistencyProvider.DoesNpcHaveSelection(n.NpcFormKey));
+
+        var confirmation = new StringBuilder();
+        confirmation.AppendLine($"This will pick a random appearance for {applicableNpcs.Count} NPC(s) from the {(scope == RandomizeScope.AllNpcs ? "full" : "current (filtered)")} list.");
+        if (noEligibleCount > 0)
+        {
+            confirmation.AppendLine();
+            confirmation.AppendLine($"{noEligibleCount} NPC(s) in the set have no eligible appearance under these options and will be skipped.");
+        }
+        if (singleOptionSkipCount > 0)
+        {
+            confirmation.AppendLine();
+            confirmation.AppendLine($"{singleOptionSkipCount} NPC(s) have only one eligible appearance and will be left alone " +
+                                    "('Allow single-option NPCs' is off).");
+        }
+        if (overwriteCount > 0)
+        {
+            confirmation.AppendLine();
+            confirmation.AppendLine($"{overwriteCount} NPC(s) already have a selection that will be replaced — or removed, " +
+                                    "for any NPC no appearance can be picked for. This action cannot be undone.");
+        }
+        confirmation.AppendLine();
+        confirmation.Append("Are you sure you want to proceed?");
+
+        if (!ScrollableMessageBox.Confirm(confirmation.ToString(), "Confirm Randomize",
+                overwriteCount > 0 ? MessageBoxImage.Warning : MessageBoxImage.Question))
+        {
+            return;
+        }
+
+        var rng = new Random();
+        int successCount = 0;
+        int totalAffectedCount = 0;
+        var fullyExhausted = new List<string>();
+        int inheritedTemplateCount = 0;
+        int clearedCount = 0;
+        var processedNpcs = new HashSet<FormKey>();
+
+        // Snapshot of the active load order, used by the master-availability check
+        // to mirror what Validator.cs enforces during patching.
+        var loadOrderKeys = _environmentStateProvider.LoadOrder?.ListedOrder
+            .Select(x => x.ModKey).ToHashSet() ?? new HashSet<ModKey>();
+        var masterCache = new Dictionary<ModKey, HashSet<ModKey>>();
+
+        // Tracks (mod, sourceNpc) faces already shared during this run so the same borrowed
+        // face isn't reused when "Allow duplicate shares" is off. Seeded with the shared
+        // selections of NPCs that AREN'T being re-randomized, so randomize also won't collide
+        // with the user's preserved/curated shares.
+        var applicableKeys = applicableNpcs.Select(n => n.NpcFormKey).ToHashSet();
+        var usedShares = new HashSet<(string ModName, FormKey SourceKey)>();
+        if (sharingEnabled && !allowDuplicateShares)
+        {
+            foreach (var (npcKey, sel) in _settings.SelectedAppearanceMods)
+            {
+                if (!string.IsNullOrEmpty(sel.ModName) && !sel.NpcFormKey.Equals(npcKey)
+                    && !applicableKeys.Contains(npcKey))
+                {
+                    usedShares.Add((sel.ModName, sel.NpcFormKey));
+                }
+            }
+        }
+
+        VM_SplashScreen? splash = null;
+        if (applicableNpcs.Count > BulkSelectionSplashThreshold)
+        {
+            splash = VM_SplashScreen.InitializeAndShow(App.ProgramVersion, isModal: true);
+            splash.UpdateStep("Randomizing Selections", applicableNpcs.Count);
+            // Let the splash render its initial state before we hand the work off.
+            await Task.Yield();
+        }
+
+        try
+        {
+            // Loop runs on the UI thread because Mutagen's binary overlays (touched by
+            // ValidateTemplateChain → sourcePlugin.Npcs) aren't thread-safe and were
+            // first opened from this thread during init. Task.Delay(1) — not Task.Yield —
+            // is what lets the splash repaint and progress fire: Yield's continuation
+            // is scheduled at Normal priority, ahead of WPF's Render pass, and the
+            // 100ms-Throttle on _progressSubject never clears its quiet window if we
+            // emit faster than that. Task.Delay yields real wall-clock time.
+            int processedCount = 0;
+            foreach (var npcVM in applicableNpcs)
+            {
+                if (!processedNpcs.Contains(npcVM.NpcFormKey))
+                {
+                    var pool = new List<RandomCandidate>(eligibleByNpc[npcVM.NpcFormKey]);
+                    bool succeeded = false;
+                    string lastFailure = string.Empty;
+
+                    while (pool.Count > 0 && !succeeded)
+                    {
+                        int idx = rng.Next(pool.Count);
+                        var candidate = pool[idx];
+                        pool.RemoveAt(idx);
+
+                        // Each Mutagen call below can throw on a malformed plugin
+                        // (we've seen ExtractGroupMemory bail with "argument out of
+                        // range" on at least one user's mod). Treat it as a per-
+                        // candidate failure so one bad plugin can't kill the run.
+                        try
+                        {
+                            if (candidate.IsShared)
+                            {
+                                // Skip this borrowed face if it's already used elsewhere and
+                                // duplicate shares aren't allowed.
+                                if (!allowDuplicateShares &&
+                                    usedShares.Contains((candidate.ModName, candidate.SourceKey)))
+                                {
+                                    lastFailure = $"borrowed face '{candidate.ModName}' from {candidate.SourceKey} is already used by another NPC";
+                                    continue;
+                                }
+
+                                // Borrowed face: screen the guest mod's record graph like an own
+                                // face (a donor record can reference unloadable dependencies just
+                                // as easily). Mugshot-only/favorite sources without an installed
+                                // ModSetting can't be validated and pass through as before.
+                                if (modByName.TryGetValue(candidate.ModName, out var guestMod) &&
+                                    !CandidateAppearanceDependenciesAreResolvable(candidate.SourceKey, guestMod,
+                                        out var guestDependencyFailure))
+                                {
+                                    lastFailure = guestDependencyFailure;
+                                    continue;
+                                }
+
+                                // Register the guest then select it. Replace this NPC's previous
+                                // *randomized* shares first; curated/manual shares are left
+                                // untouched.
+                                ClearRandomizedGuestAppearancesForNpc(npcVM.NpcFormKey);
+                                var sourceDisplay = npcByKey.TryGetValue(candidate.SourceKey, out var srcVm)
+                                    ? srcVm.DisplayName
+                                    : candidate.SourceKey.ToString();
+                                AddRandomizedGuestAppearance(npcVM.NpcFormKey, candidate.ModName, candidate.SourceKey, sourceDisplay);
+                                _consistencyProvider.SetSelectedMod(npcVM.NpcFormKey, candidate.ModName, candidate.SourceKey);
+                                _settings.RandomizedSelections[npcVM.NpcFormKey] = (candidate.ModName, candidate.SourceKey);
+                                usedShares.Add((candidate.ModName, candidate.SourceKey));
+                                successCount++;
+                                totalAffectedCount++;
+                                processedNpcs.Add(npcVM.NpcFormKey);
+                                succeeded = true;
+                            }
+                            else
+                            {
+                                var ownMod = candidate.OwnModSetting!;
+
+                                // Check masters first -- cheaper than template validation,
+                                // and template validation has side-effects (applies template-
+                                // chain selections on success) we'd have to undo on a master
+                                // failure.
+                                if (!CandidateMastersAreAvailable(npcVM.NpcFormKey, ownMod,
+                                        loadOrderKeys, masterCache, out var masterFailure))
+                                {
+                                    lastFailure = masterFailure;
+                                    continue;
+                                }
+
+                                // Record-graph screening: resolve the mod's actual NPC record and
+                                // its dependencies the same way patching will, so a candidate whose
+                                // record references something unloadable (e.g. a head part in a
+                                // bundled-but-inactive master) is skipped instead of poisoning the
+                                // output plugin at save time.
+                                if (!CandidateAppearanceDependenciesAreResolvable(npcVM.NpcFormKey, ownMod,
+                                        out var dependencyFailure))
+                                {
+                                    lastFailure = dependencyFailure;
+                                    continue;
+                                }
+
+                                // Randomizer contract (see ValidateAndHandleTemplatesForBatch):
+                                // templated candidates are only eligible when their whole template
+                                // chain resolves in the game load order AND every reference is
+                                // either unassigned (and provided by this mod, so it gets selected
+                                // along) or already assigned to this same mod. Anything else skips
+                                // the candidate rather than overwriting other NPCs' selections.
+                                var (isValid, failureReason, _, affectedNpcs) =
+                                    ValidateAndHandleTemplatesForBatch(npcVM.NpcFormKey, ownMod,
+                                        enforceRandomizerRules: true, decidedNpcs: processedNpcs);
+
+                                if (isValid)
+                                {
+                                    // Switching to an own face: drop any previous randomized
+                                    // shares for this NPC so they don't linger as stale options.
+                                    ClearRandomizedGuestAppearancesForNpc(npcVM.NpcFormKey);
+                                    _consistencyProvider.SetSelectedMod(npcVM.NpcFormKey, ownMod.DisplayName, npcVM.NpcFormKey);
+                                    _settings.RandomizedSelections[npcVM.NpcFormKey] = (ownMod.DisplayName, npcVM.NpcFormKey);
+                                    successCount++;
+                                    totalAffectedCount += affectedNpcs.Count;
+                                    foreach (var affectedKey in affectedNpcs)
+                                    {
+                                        processedNpcs.Add(affectedKey);
+                                    }
+                                    succeeded = true;
+                                }
+                                else
+                                {
+                                    lastFailure = failureReason;
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            lastFailure = $"candidate '{candidate.ModName}' threw while parsing its plugin ({ex.GetType().Name}: {ex.Message})";
+                            Debug.WriteLine($"Randomize: skipping {candidate.ModName} for {npcVM.NpcFormKeyString} -- {ex}");
+                        }
+                    }
+
+                    if (!succeeded)
+                    {
+                        // Randomize replaces the selection of every NPC it was handed, so an NPC it
+                        // could not place ends the run with NO selection rather than keeping the one
+                        // it came in with. A survivor is how a templated NPC and its template end up
+                        // on different mods: the pair was consistent when it was made, this run
+                        // reassigned the template, and the recipient's now-stale half outlives it to
+                        // be reported (and patched, inertly) later. The whole eligible set is in
+                        // scope, curated picks included — being offered up for replacement is what
+                        // eligibility means; NPCs with no candidate pool at all were never in the
+                        // run and keep what they have.
+                        //
+                        // Counted before anything is removed: dropping a randomized guest face
+                        // clears the selection that pointed at it, so asking afterwards would
+                        // undercount exactly the NPCs whose pick came from an earlier run.
+                        bool hadSelection = _consistencyProvider.DoesNpcHaveSelection(npcVM.NpcFormKey);
+                        ClearRandomizedGuestAppearancesForNpc(npcVM.NpcFormKey);
+                        _consistencyProvider.ClearSelectedMod(npcVM.NpcFormKey);
+                        _settings.RandomizedSelections.Remove(npcVM.NpcFormKey);
+                        if (hadSelection) clearedCount++;
+
+                        // Mark it decided: leaving it out would let a recipient processed later
+                        // hand it a selection through template propagation — resurrecting the very
+                        // NPC this run just declined to place.
+                        processedNpcs.Add(npcVM.NpcFormKey);
+
+                        // An NPC whose winning override inherits through a Traits chain has no face
+                        // of its own — the game draws the record at the end of the chain — so leaving
+                        // it unassigned still renders correctly, whatever the candidates failed on.
+                        // Listing it as a validation failure reads as breakage when the NPC is simply
+                        // meant to look like someone else, so it is counted and summarised instead.
+                        // GiveEachNpcOwnCopy is the exception: there the user asked for a private
+                        // face per NPC, so a miss is a real miss and keeps its entry.
+                        if (npcVM.WinningOverrideHasTemplate &&
+                            !TemplateChainWillBeFlattened(null, npcVM.NpcData?.TemplateFormKey))
+                        {
+                            inheritedTemplateCount++;
+                        }
+                        else
+                        {
+                            fullyExhausted.Add(string.IsNullOrWhiteSpace(lastFailure)
+                                ? $"{npcVM.DisplayName} ({npcVM.NpcFormKeyString})"
+                                : $"{npcVM.DisplayName} ({npcVM.NpcFormKeyString}) — last reason: {lastFailure}");
+                        }
+                    }
+                }
+
+                splash?.IncrementProgress(string.Empty);
+                processedCount++;
+                if (splash != null && processedCount % BulkSelectionYieldInterval == 0)
+                {
+                    // Bypass the splash's 100ms Throttle: continuous UI-thread emissions
+                    // never clear its quiet window, so the bar would otherwise jump
+                    // straight from 0 → 100. UpdateProgress writes ProgressValue
+                    // synchronously; Task.Delay then gives WPF time to render.
+                    var pct = (double)processedCount / applicableNpcs.Count * 100.0;
+                    splash.UpdateProgress(pct, string.Empty);
+                    await Task.Delay(1);
+                }
+            }
+        }
+        finally
+        {
+            if (splash != null)
+            {
+                await splash.CloseSplashScreenAsync();
+            }
+        }
+
+        var resultMessage = new StringBuilder();
+        if (totalAffectedCount > successCount)
+        {
+            resultMessage.AppendLine($"Randomized appearances for {successCount} NPC(s) " +
+                                     $"(plus {totalAffectedCount - successCount} template(s)).");
+        }
+        else
+        {
+            resultMessage.AppendLine($"Randomized appearances for {successCount} NPC(s).");
+        }
+
+        if (inheritedTemplateCount > 0)
+        {
+            resultMessage.AppendLine();
+            resultMessage.AppendLine(BuildInheritedTemplateRandomizeNote(inheritedTemplateCount));
+        }
+
+        if (clearedCount > 0)
+        {
+            resultMessage.AppendLine();
+            resultMessage.AppendLine(BuildClearedSelectionsRandomizeNote(clearedCount));
+        }
+
+        if (fullyExhausted.Any())
+        {
+            resultMessage.AppendLine();
+            resultMessage.AppendLine($"{fullyExhausted.Count} NPC(s) had no candidate that passed validation:");
+            resultMessage.AppendLine();
+            foreach (var entry in fullyExhausted)
+            {
+                resultMessage.AppendLine($"• {entry}");
+            }
+
+            ScrollableMessageBox.ShowWarning(resultMessage.ToString(), TranslationServiceProvider.GetService()?.GetString("randomizeCompleteWithWarnings") ?? "Randomize Complete with Warnings");
+        }
+        else
+        {
+            ScrollableMessageBox.Show(resultMessage.ToString(), "Randomize Complete");
+        }
+    }
+
+    /// <summary>
+    /// Finds the best-matching appearance mod for a given NPC based on load order and file conflicts.
+    /// </summary>
+    private VM_ModSetting? FindWinningModForNpc(INpcGetter npcGetter)
+    {
+        // ResolveAllContexts returns plugins in load order, so the last one is the winner.
+        var contexts = _environmentStateProvider.LinkCache.ResolveAllContexts<INpc, INpcGetter>(npcGetter.FormKey);
+
+        foreach (var context in contexts.ToArray()) // Iterate backwards from the winning plugin.
+        {
+            if (_settings.ImportFromLoadOrderExclusions.Contains(context.ModKey))
+            {
+                continue;
+            }
+
+            var correspondingMods = _lazyModsVm.Value.AllModSettings
+                .Where(x => x.CorrespondingModKeys.Contains(context.ModKey)).ToList();
+
+            if (correspondingMods.Count == 1)
+            {
+                return correspondingMods.First(); // Simple case: one plugin maps to one mod setting.
+            }
+
+            if (correspondingMods.Count > 1)
+            {
+                // Complex case: one plugin maps to multiple mod settings (e.g., FOMOD).
+                // We need to check for FaceGen files to find the real winner.
+                var winningMod = DisambiguateModsByFaceGen(correspondingMods, npcGetter.FormKey);
+                if (winningMod != null)
+                {
+                    return winningMod;
+                }
+            }
+        }
+
+        return null; // No matching mod found.
+    }
+
+    /// <summary>
+    /// For a list of candidate mods from the same plugin, determines the winner by matching FaceGen files.
+    /// </summary>
+    private VM_ModSetting? DisambiguateModsByFaceGen(List<VM_ModSetting> candidateMods, FormKey npcFormKey)
+    {
+        var (meshSubPath, texSubPath) = Auxilliary.GetFaceGenSubPathStrings(npcFormKey);
+        var meshToMatchPath = Path.Combine(_environmentStateProvider.DataFolderPath, "meshes", meshSubPath);
+        var texToMatchPath = Path.Combine(_environmentStateProvider.DataFolderPath, "textures", texSubPath);
+
+        bool mustMatchMesh = File.Exists(meshToMatchPath);
+        (int meshRefSize, string meshRefHash) = mustMatchMesh ? Auxilliary.GetCheapFileEqualityIdentifiers(meshToMatchPath) : (0, string.Empty);
+
+        bool mustMatchTex = File.Exists(texToMatchPath);
+        (int texRefSize, string texRefHash) = mustMatchTex ? Auxilliary.GetCheapFileEqualityIdentifiers(texToMatchPath) : (0, string.Empty);
+        
+        if (!mustMatchMesh && !mustMatchTex) return null; // No loose files to match against.
+
+        foreach (var candidate in candidateMods)
+        {
+            foreach (var modFolder in candidate.CorrespondingFolderPaths)
+            {
+                bool matchedMesh = !mustMatchMesh;
+                bool matchedTex = !mustMatchTex;
+
+                if (mustMatchMesh)
+                {
+                    var candidateMeshPath = Path.Combine(modFolder, "meshes", meshSubPath);
+                    if (File.Exists(candidateMeshPath) && Auxilliary.FastFilesAreIdentical(candidateMeshPath, meshRefSize, meshRefHash))
+                    {
+                        matchedMesh = true;
+                    }
+                }
+
+                if (mustMatchTex)
+                {
+                    var candidateTexPath = Path.Combine(modFolder, "textures", texSubPath);
+                    if (File.Exists(candidateTexPath) && Auxilliary.FastFilesAreIdentical(candidateTexPath, texRefSize, texRefHash))
+                    {
+                        matchedTex = true;
+                    }
+                }
+
+                if (matchedMesh && matchedTex)
+                {
+                    return candidate; // Found the mod that provides the winning loose files.
+                }
+            }
+        }
+
+        return null; // No candidate provided matching files.
+    }
+
+    /// <summary>
+    /// Holds the results of the import file validation process.
+    /// </summary>
+    private record ImportValidationReport(
+        Dictionary<FormKey, (string ModName, FormKey NpcFormKey)> ValidSelections,
+        List<string> MalformedEntries,
+        List<string> UnresolvedNpcs,
+        List<string> UnrecognizedMods
+    );
+    
+    private async Task ImportChoicesAsync()
+    {
+        var dialog = new OpenFileDialog
+        {
+            Filter = "JSON files (*.json)|*.json|All files (*.*)|*.*",
+            Title = "Import NPC Choices",
+            CheckFileExists = true,
+            CheckPathExists = true
+        };
+
+        if (dialog.ShowDialog() != DialogResult.OK) return;
+
+        try
+        {
+            // Run the entire import and validation process on a background thread.
+            await Task.Run(() =>
+            {
+                // 1. Deserialize the JSON into our new DTO format.
+                var importedData = JSONhandler<Dictionary<string, NpcChoiceDto>>.LoadJSONFile(
+                    dialog.FileName, 
+                    out bool readSuccess, 
+                    out var exceptionStr);
+
+                if (!readSuccess)
+                {
+                    Application.Current.Dispatcher.Invoke(() => 
+                        ScrollableMessageBox.ShowError(exceptionStr, TranslationServiceProvider.GetService()?.GetString("failedToReadImportFile") ?? "Failed to Read Import File"));
+                    return;
+                }
+
+                if (importedData == null || !importedData.Any())
+                {
+                    Application.Current.Dispatcher.Invoke(() => 
+                        ScrollableMessageBox.ShowWarning(TranslationServiceProvider.GetService()?.GetString("msg_selectedFileEmptyOrInvalid") ?? "The selected file is empty or contains no valid data.", "Import Warning"));
+                    return;
+                }
+
+                // 2. Validate the data against the current load order and settings.
+                var report = ValidateImportData(importedData);
+                var issues = report.MalformedEntries.Concat(report.UnresolvedNpcs).Concat(report.UnrecognizedMods).ToList();
+
+                // 3. Show a confirmation dialog on the UI thread.
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    var reportMessage = new StringBuilder();
+                    if (issues.Any())
+                    {
+                        reportMessage.AppendLine($"The import file contains {issues.Count} issue(s) that will be skipped.\n");
+                        if(report.MalformedEntries.Any()) reportMessage.AppendLine("--- Malformed Entries ---\n" + string.Join('\n', report.MalformedEntries) + "\n");
+                        if(report.UnresolvedNpcs.Any()) reportMessage.AppendLine("--- Unresolved NPCs ---\n" + string.Join('\n', report.UnresolvedNpcs) + "\n");
+                        if(report.UnrecognizedMods.Any()) reportMessage.AppendLine("--- Unrecognized Mods/Choices ---\n" + string.Join('\n', report.UnrecognizedMods) + "\n");
+                        reportMessage.AppendLine($"Do you want to proceed with importing the {report.ValidSelections.Count} valid choices?");
+                    }
+                    else
+                    {
+                        reportMessage.Append($"This will overwrite your current choices with {report.ValidSelections.Count} choice(s) from the file. Proceed?");
+                    }
+
+                    if (ScrollableMessageBox.Confirm(reportMessage.ToString(), "Confirm Import", issues.Any() ? MessageBoxImage.Warning : MessageBoxImage.Question))
+                    {
+                        // 4. If confirmed, apply the valid selections.
+                        _consistencyProvider.ClearAllSelections();
+                        foreach (var kvp in report.ValidSelections)
+                        {
+                            var targetNpcKey = kvp.Key;
+                            var sourceNpcKey = kvp.Value.NpcFormKey;
+                            var modName = kvp.Value.ModName;
+
+                            // Apply the selection
+                            _consistencyProvider.SetSelectedMod(targetNpcKey, modName, sourceNpcKey);
+
+                            // If it's a shared ("guest") appearance, we must ensure it's
+                            // added to the GuestAppearances list so the UI can see it.
+                            if (targetNpcKey != sourceNpcKey)
+                            {
+                                // Find the source NPC's display name to add to the guest entry.
+                                var sourceNpcVm = AllNpcs.FirstOrDefault(n => n.NpcFormKey.Equals(sourceNpcKey));
+                                // Use the found name, or fall back to the FormKey string if not found.
+                                var sourceNpcDisplayName = sourceNpcVm?.DisplayName ?? sourceNpcKey.ToString(); 
+
+                                AddGuestAppearance(targetNpcKey, modName, sourceNpcKey, sourceNpcDisplayName);
+                            }
+                        }
+                        ScrollableMessageBox.Show($"Import complete. {report.ValidSelections.Count} choices have been applied.", "Import Successful");
+                    }
+                    else
+                    {
+                        ScrollableMessageBox.Show(TranslationServiceProvider.GetService()?.GetString("msg_importCancelledByUser") ?? "Import cancelled by user.", "Import Cancelled");
+                    }
+                });
+            });
+        }
+        catch (Exception ex)
+        {
+            ScrollableMessageBox.ShowError($"An unexpected error occurred during import: {ExceptionLogger.GetExceptionStack(ex)}", TranslationServiceProvider.GetService()?.GetString("importError") ?? "Import Error");
+        }
+    }
+
+    /// <summary>
+    /// Validates deserialized import data against the current application state.
+    /// </summary>
+    private ImportValidationReport ValidateImportData(Dictionary<string, NpcChoiceDto> importedData)
+    {
+        var validSelections = new Dictionary<FormKey, (string ModName, FormKey NpcFormKey)>();
+        var malformed = new List<string>();
+        var unresolved = new List<string>();
+        var unrecognized = new List<string>();
+
+        var availableModNames = new HashSet<string>(_lazyModsVm.Value.AllModSettings.Select(m => m.DisplayName), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var kvp in importedData)
+        {
+            // Validate and parse FormKeys
+            if (!FormKey.TryFactory(kvp.Key, out var targetNpcKey))
+            {
+                malformed.Add($"- Invalid target NPC FormKey string: {kvp.Key}");
+                continue;
+            }
+            if (!FormKey.TryFactory(kvp.Value.SourceNpcFormKey, out var sourceNpcKey))
+            {
+                malformed.Add($"- Invalid source NPC FormKey string for {targetNpcKey}: {kvp.Value.SourceNpcFormKey}");
+                continue;
+            }
+
+            // Validate existence of NPCs and Mod
+            bool targetNpcExists = _environmentStateProvider.LinkCache.TryResolve<INpcGetter>(targetNpcKey, out _);
+            bool sourceNpcExists = _environmentStateProvider.LinkCache.TryResolve<INpcGetter>(sourceNpcKey, out _);
+            bool modExists = availableModNames.Contains(kvp.Value.ModName);
+
+            if (!targetNpcExists) unresolved.Add($"- Target NPC {targetNpcKey} not found in load order.");
+            if (!sourceNpcExists) unresolved.Add($"- Source NPC {sourceNpcKey} (for {targetNpcKey}) not found in load order.");
+            if (!modExists) unrecognized.Add($"- Appearance Mod '{kvp.Value.ModName}' (for {targetNpcKey}) not found or installed.");
+            
+            if (targetNpcExists && sourceNpcExists && modExists)
+            {
+                validSelections.Add(targetNpcKey, (kvp.Value.ModName, sourceNpcKey));
+            }
+        }
+
+        return new ImportValidationReport(validSelections, malformed, unresolved, unrecognized);
+    }
+
+    public bool CanJumpToMod(string appearanceModName)
+    {
+        var modsVm = _lazyModsVm.Value;
+        if (modsVm == null)
+        {
+            return false;
+        }
+
+        var targetModSetting = modsVm.AllModSettings.FirstOrDefault(ms =>
+            ms.DisplayName.Equals(appearanceModName, StringComparison.OrdinalIgnoreCase));
+        return targetModSetting != null;
+    }
+
+    public void JumpToMod(VM_NpcsMenuMugshot npcsMenuMugshot)
+    {
+        if (npcsMenuMugshot == null || string.IsNullOrWhiteSpace(npcsMenuMugshot.ModName)) return;
+
+        string targetModName = npcsMenuMugshot.ModName;
+        Debug.WriteLine($"VM_NpcSelectionBar.JumpToMod: Requested for {targetModName}");
+
+        var modsVm = _lazyModsVm.Value;
+        if (modsVm == null)
+        {
+            ScrollableMessageBox.ShowError(TranslationServiceProvider.GetService()?.GetString("msg_modsViewModelNotAvailable") ?? TranslationServiceProvider.GetService()?.GetString("msg_modsViewModelNotAvailable") ?? "Mods view model is not available.");
+            return;
+        }
+
+        var targetModSetting = modsVm.AllModSettings.FirstOrDefault(ms =>
+            ms.DisplayName.Equals(targetModName, StringComparison.OrdinalIgnoreCase));
+
+        if (targetModSetting != null)
+        {
+            Debug.WriteLine(
+                $"VM_NpcSelectionBar.JumpToMod: Found target VM_ModSetting: {targetModSetting.DisplayName}");
+            var mainWindowVm = _lazyMainWindowVm.Value;
+            if (mainWindowVm == null)
+            {
+                ScrollableMessageBox.ShowError(TranslationServiceProvider.GetService()?.GetString("msg_mainWindowViewModelNotAvailable") ?? TranslationServiceProvider.GetService()?.GetString("msg_mainWindowViewModelNotAvailable") ?? "Main window view model is not available.");
+                return;
+            }
+
+            mainWindowVm.IsModsTabSelected = true;
+
+            RxApp.MainThreadScheduler.Schedule(TimeSpan.FromMilliseconds(100), () =>
+            {
+                if (!modsVm.ModSettingsList.Contains(targetModSetting))
+                {
+                    Debug.WriteLine(
+                        $"VM_NpcSelectionBar.JumpToMod: Target mod {targetModSetting.DisplayName} not in filtered list. Clearing filters.");
+                    modsVm.NameFilterText = string.Empty;
+                    modsVm.PluginFilterText = string.Empty;
+                    modsVm.NpcSearchText = string.Empty;
+                }
+
+                modsVm.ShowMugshotsCommand.Execute(targetModSetting)
+                    .ObserveOn(RxApp.MainThreadScheduler)
+                    .Subscribe(
+                        _ =>
+                        {
+                            Debug.WriteLine(
+                                $"VM_NpcSelectionBar.JumpToMod: Successfully triggered ShowMugshots for {targetModSetting.DisplayName}.");
+
+                            // *** THE FIX: Explicitly signal scroll after a small delay ***
+                            RxApp.MainThreadScheduler.Schedule(TimeSpan.FromMilliseconds(50), () =>
+                            {
+                                Debug.WriteLine(
+                                    $"VM_NpcSelectionBar.JumpToMod: Signaling scroll for {targetModSetting.DisplayName}.");
+                                modsVm.SignalScrollToMod(targetModSetting);
+                            });
+                        },
+                        ex =>
+                        {
+                            Debug.WriteLine(
+                                $"VM_NpcSelectionBar.JumpToMod: Error executing ShowMugshotsCommand: {ExceptionLogger.GetExceptionStack(ex)}");
+                        }
+                    ).DisposeWith(_disposables);
+            });
+        }
+        else
+        {
+            Debug.WriteLine(
+                $"VM_NpcSelectionBar.JumpToMod: Could not find VM_ModSetting with DisplayName: {targetModName}");
+            ScrollableMessageBox.ShowWarning($"Could not find the mod '{targetModName}' in the Mods list.",
+                "Mod Not Found");
+        }
+    }
+    
+    public void JumpToTemplate(VM_NpcsMenuMugshot mugshot)
+    {
+        if (mugshot?.TemplateNpcKey != null && !mugshot.TemplateNpcKey.Value.IsNull)
+        {
+            // Reuses the existing logic that clears filters and scrolls to the NPC
+            JumpToTemplateReference(mugshot.TemplateNpcKey.Value);
+        }
+    }
+
+    private void UpdateSelectionState(FormKey npcFormKey, string? selectedModName, FormKey sourceNpcFormKey)
+    {
+        var npcVM = AllNpcs.FirstOrDefault(n => n.NpcFormKey.Equals(npcFormKey));
+
+        if (npcVM != null)
+        {
+            npcVM.SelectedAppearanceModName = selectedModName;
+
+            // Determine if the selected mod has associated data (not mugshot-only)
+            if (!string.IsNullOrEmpty(selectedModName) && _lazyModsVm.Value?.AllModSettings != null)
+            {
+                var modSetting = _lazyModsVm.Value.AllModSettings.FirstOrDefault(ms =>
+                    ms.DisplayName.Equals(selectedModName, StringComparison.OrdinalIgnoreCase));
+                npcVM.SelectedModHasData = modSetting != null &&
+                    (modSetting.CorrespondingFolderPaths.Any() || modSetting.IsAutoGenerated);
+            }
+            else
+            {
+                npcVM.SelectedModHasData = false;
+            }
+
+            // Compute selection indicator brush
+            if (string.IsNullOrEmpty(selectedModName))
+                npcVM.SelectionIndicatorBrush = null;
+            else if (!npcVM.IsInLoadOrder)
+                npcVM.SelectionIndicatorBrush = NpcIndicatorRedBrush;
+            else if (!npcVM.SelectedModHasData)
+                npcVM.SelectionIndicatorBrush = NpcIndicatorPurpleBrush;
+            else
+                npcVM.SelectionIndicatorBrush = NpcIndicatorGreenBrush;
+            if (SelectedNpc == npcVM && CurrentNpcAppearanceMods != null)
+            {
+                foreach (var modVM in CurrentNpcAppearanceMods)
+                {
+                    modVM.IsSelected = modVM.ModName.Equals(selectedModName, StringComparison.OrdinalIgnoreCase) &&
+                                       modVM.SourceNpcFormKey.Equals(sourceNpcFormKey);
+                }
+            }
+        }
+    }
+
+    private void RefreshAllSelectionIndicators()
+    {
+        foreach (var npcVM in AllNpcs)
+        {
+            if (string.IsNullOrEmpty(npcVM.SelectedAppearanceModName))
+                continue;
+
+            if (!npcVM.IsInLoadOrder)
+                npcVM.SelectionIndicatorBrush = NpcIndicatorRedBrush;
+            else if (!npcVM.SelectedModHasData)
+                npcVM.SelectionIndicatorBrush = NpcIndicatorPurpleBrush;
+            else
+                npcVM.SelectionIndicatorBrush = NpcIndicatorGreenBrush;
+        }
+    }
+
+    private static readonly Regex PluginRegex =
+        new(@"^.+\.(esm|esp|esl)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex HexFileRegex = new(@"^[0-9A-F]{8}\.(png|jpg|jpeg|bmp)$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private Dictionary<FormKey, List<(string ModName, string ImagePath)>> ScanMugshotDirectory(
+        VM_SplashScreen? splashReporter)
+    {
+        var results = new Dictionary<FormKey, List<(string ModName, string ImagePath)>>();
+
+        // Only the user-curated MugshotsFolder is indexed here. FaceFinder and
+        // AutoGen folders are session-managed by their respective sources
+        // (BatchMugshotGenerator.TryFaceFinderAsync owns its on-disk cache;
+        // the renderer's AlreadyCurrent path owns reuse of existing autogen
+        // PNGs). Folding them into _downloadedMugshotData previously caused
+        // a destructive cache-overwrite when fallback sources ran for a mod
+        // that already had a curated mugshot — the curated entry got displaced,
+        // and the Downloaded priority branch then couldn't find it.
+        if (string.IsNullOrWhiteSpace(_settings.MugshotsFolder)
+            || !Directory.Exists(_settings.MugshotsFolder))
+        {
+            return results;
+        }
+
+        ScanMugshotRoot(_settings.MugshotsFolder, results, splashReporter);
+
+        System.Diagnostics.Debug.WriteLine(
+            $"Mugshot scan complete. Found entries for {results.Count} unique FormKeys.");
+        return results;
+    }
+
+    private void ScanMugshotRoot(
+        string root,
+        Dictionary<FormKey, List<(string ModName, string ImagePath)>> results,
+        VM_SplashScreen? splashReporter)
+    {
+        System.Diagnostics.Debug.WriteLine($"Scanning mugshot directory: {root}");
+        string expectedParentPath = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+        try
+        {
+            var potentialFiles = Directory
+                .EnumerateFiles(root, "*.*", SearchOption.AllDirectories)
+                .Where(f => HexFileRegex.IsMatch(Path.GetFileName(f)));
+
+            int fileCount = potentialFiles.Count();
+            int scannedFileCount = 0;
+            using (ContextualPerformanceTracer.Trace("ScanMugshotDirectory.FileLoop"))
+            {
+                foreach (var filePath in potentialFiles)
+                {
+                    scannedFileCount++;
+                    if (scannedFileCount % 200 == 0)
+                    {
+                        var progress = (double)scannedFileCount / fileCount * 100.0;
+                        splashReporter?.UpdateProgress(progress, $"Scanning mugshot files: {scannedFileCount} / {fileCount}");
+                    }
+
+                    try
+                    {
+                        var fileInfo = new FileInfo(filePath);
+                        string hexFileName = fileInfo.Name;
+                        DirectoryInfo? pluginDir = fileInfo.Directory;
+                        if (pluginDir == null || !PluginRegex.IsMatch(pluginDir.Name)) continue;
+                        string pluginName = pluginDir.Name;
+                        DirectoryInfo? modDir = pluginDir.Parent;
+                        if (modDir == null || string.IsNullOrWhiteSpace(modDir.Name)) continue;
+                        string modName = modDir.Name;
+                        if (modDir.Parent == null ||
+                            !modDir.Parent.FullName.Equals(expectedParentPath, StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        string hexPart = Path.GetFileNameWithoutExtension(hexFileName);
+                        if (hexPart.Length != 8) continue;
+                        string formKeyString = $"{hexPart.Substring(hexPart.Length - 6)}:{pluginName}";
+                        try
+                        {
+                            var formKey = FormKey.Factory(formKeyString);
+                            var mugshotInfo = (ModName: modName, ImagePath: filePath);
+                            if (results.TryGetValue(formKey, out var list))
+                            {
+                                if (!list.Any(i => i.ModName.Equals(modName, StringComparison.OrdinalIgnoreCase)))
+                                {
+                                    list.Add(mugshotInfo);
+                                }
+                            }
+                            else
+                            {
+                                results[formKey] = new List<(string ModName, string ImagePath)> { mugshotInfo };
+                            }
+                        }
+                        catch
+                        {
+                            continue;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"Error processing mugshot file '{filePath}': {ExceptionLogger.GetExceptionStack(ex)}");
+                    }
+                }
+            }
+
+            splashReporter?.UpdateProgress(100, $"Finished scanning {fileCount.ToString()} Mugshots.");
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Error scanning mugshot directory '{root}': {ExceptionLogger.GetExceptionStack(ex)}");
+        }
+    }
+
+    // This used to safely transfer processed data from the background thread to the UI thread.
+    private record NpcInitializationData
+    {
+        public NpcDisplayData NpcData { get; init; }
+        public List<VM_ModSetting> AppearanceMods { get; init; } = new();
+    }
+    
+    public void RefreshAllNpcDisplayNames()
+    {
+        // Step 1: Handle expensive FormID calculation only if the user has checked the box.
+        if (_settings.ShowNpcFormIdInList)
+        {
+            // This iterates only through NPCs for whom the calculation hasn't been done yet.
+            foreach (var npc in AllNpcs.Where(n => string.IsNullOrWhiteSpace(n.FormIdString)))
+            {
+                npc.FormIdString = _auxilliary.FormKeyToFormIDString(npc.NpcFormKey);
+            }
+        }
+
+        // Step 2: Update the display name for every NPC using the latest settings.
+        foreach (var npc in AllNpcs)
+        {
+            npc.UpdateDisplayName();
+        }
+    }
+    
+    public async Task InitializeAsync(VM_SplashScreen? splashReporter)
+    {
+        // 1. UI-thread cleanup (unchanged)
+        await Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            SelectedNpc = null;
+            AllNpcs.Clear();
+            FilteredNpcs.Clear();
+            CurrentNpcDescription = null;
+        });
+
+        if (_environmentStateProvider.Status != EnvironmentStateProvider.EnvironmentStatus.Valid)
+        {
+            splashReporter?.UpdateStep("Environment not valid for NPC list.");
+            splashReporter?.ShowMessagesOnClose(
+                $"NPC Bar: InitializeAsync: Environment is not valid. You should only see this message if you launch this program and you don't have Skyrim SE/AE installed in your SteamApps directory. Go to your settings and point them at your correct Data folder and Game version.");
+
+            _downloadedMugshotData.Clear();
+            return;
+        }
+
+        // --- Scan Mugshots (largely unchanged) ---
+        StartupLogger.LogPhase("NPC Initialization - Mugshot Scan");
+        splashReporter?.UpdateStep("Scanning mugshot directory...");
+        StartupLogger.Log("Scanning mugshot directory");
+        using (ContextualPerformanceTracer.Trace("InitializeNpcs.ScanMugshots"))
+        {
+            _downloadedMugshotData = await Task.Run(() => ScanMugshotDirectory(splashReporter));
+        }
+        StartupLogger.Log($"Mugshot scan complete, found {_downloadedMugshotData.Count} entries");
+
+        await Application.Current.Dispatcher.InvokeAsync(UpdateAvailableNpcGroups);
+        splashReporter?.UpdateStep("Analyzing NPC data...");
+
+        // --- OPTIMIZATION: New batched approach ---
+        Dictionary<FormKey, NpcDisplayData> npcDisplayDataCache = new();
+        Dictionary<FormKey, VM_NpcsMenuSelection> npcViewModelMap = new();
+
+        await Task.Run(() =>
+        {
+            // 2. AGGREGATE all unique FormKeys from all sources first.
+            var allRequiredNpcKeys = new HashSet<FormKey>();
+            if (_lazyModsVm.Value?.AllModSettings != null)
+            {
+                foreach (var modSetting in _lazyModsVm.Value.AllModSettings)
+                {
+                    foreach (var formKey in modSetting.NpcFormKeysToDisplayName.Keys)
+                    {
+                        allRequiredNpcKeys.Add(formKey);
+                    }
+                }
+            }
+
+            foreach (var key in _downloadedMugshotData.Keys)
+            {
+                allRequiredNpcKeys.Add(key);
+            }
+
+            // 3. BATCH PROCESS: Resolve all NPCs in a single pass.
+            StartupLogger.Log($"Resolving {allRequiredNpcKeys.Count} unique NPC records");
+            splashReporter?.UpdateStep("Resolving NPC records", allRequiredNpcKeys.Count);
+            foreach (var npcFormKey in allRequiredNpcKeys)
+            {
+                if (_environmentStateProvider.LinkCache.TryResolve<INpcGetter>(npcFormKey, out var npcGetter))
+                {
+                    // Store lightweight data, discard the heavy getter.
+                    var npcData = NpcDisplayData.FromGetter(npcGetter);
+                    npcDisplayDataCache[npcFormKey] = npcData;
+                }
+                else
+                {
+                    var npcData = NpcDisplayData.FromFormKey(npcFormKey);
+                    if (!npcDisplayDataCache.ContainsKey(npcFormKey))
+                    {
+                        npcDisplayDataCache.Add(npcFormKey, npcData);
+                    }
+                    splashReporter?.IncrementProgress(npcFormKey.ToString());
+                }
+            }
+
+            // 4. POPULATE: Create all ViewModel objects from the cached data.
+            splashReporter?.UpdateStep("Creating NPC list", npcDisplayDataCache.Count);
+
+            // Create VMs for NPCs that were successfully resolved
+            foreach (var kvp in npcDisplayDataCache)
+            {
+                var npcVM = new VM_NpcsMenuSelection(kvp.Key, _environmentStateProvider, this, _auxilliary, _settings);
+                npcVM.UpdateWithData(kvp.Value);
+                npcViewModelMap[kvp.Key] = npcVM;
+                splashReporter?.IncrementProgress(npcVM.DisplayName);
+            }
+
+            // Create placeholder VMs for mugshot-only NPCs that couldn't be resolved in the load order
+            splashReporter?.UpdateStep("Adding Loose Mugshots", _downloadedMugshotData.Count);
+            foreach (var mugshotKey in _downloadedMugshotData.Keys)
+            {
+                if (!npcViewModelMap.ContainsKey(mugshotKey))
+                {
+                    var npcVM = new VM_NpcsMenuSelection(mugshotKey, _environmentStateProvider, this, _auxilliary, _settings);
+                    npcVM.IsInLoadOrder = false;
+                    npcViewModelMap[mugshotKey] = npcVM;
+                    splashReporter?.IncrementProgress(npcVM.DisplayName);
+                }
+            }
+
+            // Assign appearance mods to the newly created ViewModels
+            if (_lazyModsVm.Value?.AllModSettings != null)
+            {
+                foreach (var modSetting in _lazyModsVm.Value.AllModSettings)
+                {
+                    foreach (var npcFormKey in modSetting.NpcFormKeysToDisplayName.Keys)
+                    {
+                        if (npcViewModelMap.TryGetValue(npcFormKey, out var npcVM))
+                        {
+                            npcVM.AppearanceMods.Add(modSetting);
+                        }
+                    }
+                }
+            }
+
+            // --- Build template caches ---
+            StartupLogger.Log($"NPC list created with {npcViewModelMap.Count} entries, building template index");
+            splashReporter?.UpdateStep("Building template index...");
+            
+            var newBaseIsTemplate = new HashSet<FormKey>();
+            var newOverrideIsTemplate = new HashSet<FormKey>();
+            var newAppModUsedAsTemplate = new HashSet<FormKey>();
+
+            // NEW: reverse maps for tooltip content
+            var newWinOverrideTemplateUsers = new Dictionary<FormKey, List<FormKey>>();
+            var newAppModTemplateUsers = new Dictionary<FormKey, List<(string ModName, FormKey NpcFormKey)>>();
+
+            // Pass 1: Compute per-NPC "has template" flags and build reverse "is template" indices
+            foreach (var kvp in npcViewModelMap)
+            {
+                var fk = kvp.Key;
+                var vm = kvp.Value;
+
+                // --- Winning override (already resolved during NpcDisplayData pass) ---
+                if (_environmentStateProvider.LinkCache.TryResolve<INpcGetter>(fk, out var winOverride))
+                {
+                    bool winHasTemplate = Auxilliary.IsValidTemplatedNpc(winOverride);
+                    vm.WinningOverrideHasTemplate = winHasTemplate;
+                    if (winHasTemplate)
+                    {
+                        var templateFk = winOverride.Template.FormKey;
+                        newOverrideIsTemplate.Add(templateFk);
+
+                        // Build reverse mapping for tooltip
+                        if (!newWinOverrideTemplateUsers.TryGetValue(templateFk, out var winUsers))
+                        {
+                            winUsers = new List<FormKey>();
+                            newWinOverrideTemplateUsers[templateFk] = winUsers;
+                        }
+                        winUsers.Add(fk);
+                    }
+                }
+
+                // --- Base record (original definition in the NPC's origin plugin) ---
+                try
+                {
+                    var allContexts = _environmentStateProvider.LinkCache
+                        .ResolveAllContexts<INpc, INpcGetter>(fk).ToList();
+                    if (allContexts.Any())
+                    {
+                        // Last context = lowest priority = the original/base record
+                        var baseGetter = allContexts.Last().Record;
+                        bool baseHasTemplate = Auxilliary.IsValidTemplatedNpc(baseGetter);
+                        vm.BaseRecordHasTemplate = baseHasTemplate;
+                        if (baseHasTemplate)
+                        {
+                            newBaseIsTemplate.Add(baseGetter.Template.FormKey);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Template cache: could not resolve base record for {fk}: {ex.Message}");
+                }
+            }
+
+            // Pass 2: Build "appearance mod uses as template" index
+            if (_lazyModsVm.Value?.AllModSettings != null)
+            {
+                foreach (var modSetting in _lazyModsVm.Value.AllModSettings)
+                {
+                    foreach (var (npcFormKey, notification) in modSetting.NpcFormKeysToNotifications)
+                    {
+                        if (notification.IssueType == NpcIssueType.Template &&
+                            notification.ReferencedFormKey.HasValue &&
+                            !notification.ReferencedFormKey.Value.IsNull)
+                        {
+                            var templateFk = notification.ReferencedFormKey.Value;
+                            newAppModUsedAsTemplate.Add(templateFk);
+
+                            // Build reverse mapping
+                            if (!newAppModTemplateUsers.TryGetValue(templateFk, out var appUsers))
+                            {
+                                appUsers = new List<(string, FormKey)>();
+                                newAppModTemplateUsers[templateFk] = appUsers;
+                            }
+                            appUsers.Add((modSetting.DisplayName, npcFormKey));
+                        }
+                    }
+                }
+            }
+
+            // Store all caches
+            _baseRecordIsTemplateSources = newBaseIsTemplate;
+            _winOverrideIsTemplateSources = newOverrideIsTemplate;
+            _appModUsedAsTemplateSources = newAppModUsedAsTemplate;
+            _winOverrideTemplateUsers = newWinOverrideTemplateUsers;
+            _appModTemplateUsers = newAppModTemplateUsers;
+
+            // Build reverse lookup: "when NPC X's selection changes, recalculate these template sources"
+            var newNpcToAffected = new Dictionary<FormKey, HashSet<FormKey>>();
+            foreach (var (templateFk, references) in newAppModTemplateUsers)
+            {
+                foreach (var (_, npcFk) in references)
+                {
+                    if (!newNpcToAffected.TryGetValue(npcFk, out var set))
+                    {
+                        set = new HashSet<FormKey>();
+                        newNpcToAffected[npcFk] = set;
+                    }
+                    set.Add(templateFk);
+                }
+            }
+            _npcToAffectedTemplateSources = newNpcToAffected;
+
+            // Build VM lookup for fast access during recalculation
+            _npcVmLookup = new Dictionary<FormKey, VM_NpcsMenuSelection>(npcViewModelMap);
+
+            Debug.WriteLine($"Template cache built: BaseIsTemplate={newBaseIsTemplate.Count}, WinnerIsTemplate={newOverrideIsTemplate.Count}, AppModUsedAsTemplate={newAppModUsedAsTemplate.Count}");
+
+            // --- Populate template-source indicators on each NPC VM ---
+            foreach (var kvp in npcViewModelMap)
+            {
+                var fk = kvp.Key;
+                var vm = kvp.Value;
+
+                // Grey T — winning override template source (static)
+                if (newWinOverrideTemplateUsers.TryGetValue(fk, out var winUsersForVm) && winUsersForVm.Count > 0)
+                {
+                    vm.IsWinningOverrideTemplateSource = true;
+                    var lines = winUsersForVm.Select(userFk =>
+                    {
+                        if (npcViewModelMap.TryGetValue(userFk, out var userVm))
+                            return $"{userVm.DisplayName} ({userFk})";
+                        return userFk.ToString();
+                    });
+                    vm.WinningOverrideTemplateUsersTooltip =
+                        "Winning override template source for:\n" + string.Join("\n", lines);
+                }
+
+                // Store raw app-mod references with display names baked in
+                if (newAppModTemplateUsers.TryGetValue(fk, out var appRefs) && appRefs.Count > 0)
+                {
+                    vm.AppModTemplateReferences = appRefs.Select(entry =>
+                    {
+                        string displayName = npcViewModelMap.TryGetValue(entry.NpcFormKey, out var userVm)
+                            ? userVm.DisplayName
+                            : entry.NpcFormKey.ToString();
+                        return (entry.ModName, entry.NpcFormKey, displayName);
+                    }).ToList();
+
+                    // Initial calculation of purple/green/red state
+                    RecalculateAppModTemplateIndicators(vm);
+                }
+
+                // Populate "Jump to Template Reference" context menu entries
+                var jumpEntries = new List<TemplateReferenceEntry>();
+
+                if (newWinOverrideTemplateUsers.TryGetValue(fk, out var winJumpUsers))
+                {
+                    foreach (var userFk in winJumpUsers)
+                    {
+                        string label = npcViewModelMap.TryGetValue(userFk, out var userVm)
+                            ? $"{userVm.DisplayName}  (winning override)"
+                            : $"{userFk}  (winning override)";
+                        jumpEntries.Add(new TemplateReferenceEntry(label, userFk));
+                    }
+                }
+
+                if (newAppModTemplateUsers.TryGetValue(fk, out var appJumpRefs))
+                {
+                    foreach (var (modName, npcFk) in appJumpRefs)
+                    {
+                        // Avoid duplicates if already added as a winning override user
+                        if (jumpEntries.Any(e => e.NpcFormKey.Equals(npcFk)))
+                            continue;
+                        string label = npcViewModelMap.TryGetValue(npcFk, out var userVm)
+                            ? $"{userVm.DisplayName}  (in [{modName}])"
+                            : $"{npcFk}  (in [{modName}])";
+                        jumpEntries.Add(new TemplateReferenceEntry(label, npcFk));
+                    }
+                }
+
+                if (jumpEntries.Count > 0)
+                {
+                    vm.TemplateReferenceEntries = new ObservableCollection<TemplateReferenceEntry>(jumpEntries);
+                    vm.HasTemplateReferences = true;
+                }
+            }
+        });
+
+        // 5. Finalize on UI thread
+        splashReporter?.UpdateStep("Finalizing NPC List...");
+        using (ContextualPerformanceTracer.Trace("InitializeNpcs.FinalCleanup"))
+        {
+            // Add all created VMs to the final list
+            AllNpcs.AddRange(npcViewModelMap.Values);
+            
+            // Update group display string and selection indicator for each NPC on initial load
+            foreach (var npcVM in AllNpcs)
+            {
+                _settings.NpcGroupAssignments.TryGetValue(npcVM.NpcFormKey, out var groups);
+                npcVM.UpdateGroupDisplay(groups);
+
+                var selection = _consistencyProvider.GetSelectedMod(npcVM.NpcFormKey);
+                if (!string.IsNullOrEmpty(selection.ModName))
+                {
+                    npcVM.SelectedAppearanceModName = selection.ModName;
+                    if (_lazyModsVm.Value?.AllModSettings != null)
+                    {
+                        var modSetting = _lazyModsVm.Value.AllModSettings.FirstOrDefault(ms =>
+                            ms.DisplayName.Equals(selection.ModName, StringComparison.OrdinalIgnoreCase));
+                        npcVM.SelectedModHasData = modSetting != null &&
+                            (modSetting.CorrespondingFolderPaths.Any() || modSetting.IsAutoGenerated);
+                    }
+
+                    if (!npcVM.IsInLoadOrder)
+                        npcVM.SelectionIndicatorBrush = NpcIndicatorRedBrush;
+                    else if (!npcVM.SelectedModHasData)
+                        npcVM.SelectionIndicatorBrush = NpcIndicatorPurpleBrush;
+                    else
+                        npcVM.SelectionIndicatorBrush = NpcIndicatorGreenBrush;
+                }
+            }
+
+            // Remove any NPCs that ultimately have no appearance sources
+            for (int i = AllNpcs.Count - 1; i >= 0; i--)
+            {
+                var currentNpc = AllNpcs[i];
+                if (!currentNpc.AppearanceMods.Any() && !_downloadedMugshotData.ContainsKey(currentNpc.NpcFormKey))
+                {
+                    AllNpcs.RemoveAt(i);
+                }
+            }
+        }
+        RefreshAllNpcDisplayNames();
+
+        // Rebuild the Race filter dropdown from the finalized NPC list (winning-override
+        // races) and cache it so it populates instantly on the next startup. Computed
+        // off-UI; the ObservableCollection is refilled on the UI thread below.
+        var raceOptions = ComputeRaceFilterOptions();
+        _settings.CachedFilterRaces = raceOptions;
+
+        await Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            AvailableRaces.Clear();
+            foreach (var race in raceOptions) AvailableRaces.Add(race);
+            ApplyFilter(initializing: true);
+        });
+
+        // 6. Restore selection (unchanged)
+        VM_NpcsMenuSelection? npcToSelectOnLoad = null;
+        if (!_settings.LastSelectedNpcFormKey.IsNull)
+        {
+            npcToSelectOnLoad = FilteredNpcs.FirstOrDefault(n => n.NpcFormKey.Equals(_settings.LastSelectedNpcFormKey))
+                                ?? AllNpcs.FirstOrDefault(n => n.NpcFormKey.Equals(_settings.LastSelectedNpcFormKey));
+        }
+
+        SelectedNpc = npcToSelectOnLoad ?? FilteredNpcs.FirstOrDefault();
+
+        if (SelectedNpc != null)
+        {
+            _requestScrollToNpcSubject.OnNext(SelectedNpc);
+        }
+
+        splashReporter?.UpdateStep("NPC list initialized.");
+    }
+
+
+    public void SignalScrollToNpc(VM_NpcsMenuSelection? npc)
+    {
+        if (npc != null)
+        {
+            Debug.WriteLine($"VM_NpcSelectionBar: Explicit signal to scroll to {npc.DisplayName}");
+            _requestScrollToNpcSubject.OnNext(npc);
+        }
+        else
+        {
+            _requestScrollToNpcSubject.OnNext(null);
+        }
+    }
+
+    /// <summary>
+    /// Ctrl+Shift+C — resets the filter *values*, leaving the chosen search-field types (and the
+    /// AND/OR logic) in place. Mirrors the Favorites window's "Clear" button; see
+    /// <see cref="ISearchFilterHost.ClearSearchFilters"/> for what is deliberately left alone.
+    ///
+    /// Every value is reset regardless of which type its row is currently showing, since a stale
+    /// value on a hidden control would come back into effect the moment the user reselects that
+    /// type. Gender and Uniqueness reset to "Any", which AddRowPredicate treats as a real
+    /// always-true criterion, and Group to null, which yields no criterion at all; the three
+    /// below with no such value go to their construction-time defaults.
+    ///
+    /// The setters fire the throttled filter pipeline (the Observable.Merge in the constructor),
+    /// so the whole reset coalesces into a single <see cref="ApplyFilter"/> pass.
+    /// </summary>
+    public void ClearSearchFilters()
+    {
+        SearchText1 = string.Empty;
+        SearchText2 = string.Empty;
+        SearchText3 = string.Empty;
+        SelectedGroupFilter1 = null;
+        SelectedGroupFilter2 = null;
+        SelectedGroupFilter3 = null;
+        SelectedGenderFilter1 = GenderFilterType.Any;
+        SelectedGenderFilter2 = GenderFilterType.Any;
+        SelectedGenderFilter3 = GenderFilterType.Any;
+        SelectedUniquenessFilter1 = UniquenessFilterType.Any;
+        SelectedUniquenessFilter2 = UniquenessFilterType.Any;
+        SelectedUniquenessFilter3 = UniquenessFilterType.Any;
+        SelectedStateFilter1 = SelectionStateFilterType.NotMade;
+        SelectedStateFilter2 = SelectionStateFilterType.NotMade;
+        SelectedStateFilter3 = SelectionStateFilterType.NotMade;
+        SelectedShareStatusFilter1 = ShareStatusFilterType.Any;
+        SelectedShareStatusFilter2 = ShareStatusFilterType.Any;
+        SelectedShareStatusFilter3 = ShareStatusFilterType.Any;
+        SelectedTemplateFilter1 = TemplateFilterType.BaseHasTemplate;
+        SelectedTemplateFilter2 = TemplateFilterType.BaseHasTemplate;
+        SelectedTemplateFilter3 = TemplateFilterType.BaseHasTemplate;
+        SearchInversion1 = FilterInversionType.Is;
+        SearchInversion2 = FilterInversionType.Is;
+        SearchInversion3 = FilterInversionType.Is;
+
+        // SelectionState, Template and ShareStatus have NO neutral member — every value of those
+        // enums is a live criterion, and ShareStatus's "Any" means "involved in sharing at all"
+        // rather than "don't care", so a row on one of them keeps filtering no matter what value
+        // we write. Resetting the row's type is the only way to switch it off, so those three
+        // are the sole exception to leaving the type dropdowns alone.
+        SearchType1 = ClearedSearchType(SearchType1, NpcSearchType.Name);
+        SearchType2 = ClearedSearchType(SearchType2, NpcSearchType.InAppearanceMod);
+        SearchType3 = ClearedSearchType(SearchType3, NpcSearchType.Group);
+    }
+
+    /// <summary>
+    /// Returns the type a cleared row should end up on: <paramref name="type"/> itself when that
+    /// type has some inactive value, otherwise <paramref name="defaultType"/>.
+    /// </summary>
+    private static NpcSearchType ClearedSearchType(NpcSearchType type, NpcSearchType defaultType) =>
+        type switch
+        {
+            NpcSearchType.SelectionState or NpcSearchType.Template or NpcSearchType.ShareStatus => defaultType,
+            _ => type
+        };
+
+    // In VM_NpcSelectionBar.cs
+    public void ApplyFilter(bool initializing, bool preserveSelection = true)
+    {
+        List<VM_NpcsMenuSelection> results = AllNpcs;
+
+        if (!ShowSingleOptionNpcs)
+        {
+            results = results.Where(n => n.AppearanceMods.Count > 1).ToList();
+        }
+
+        if (!ShowUnloadedNpcs)
+        {
+            results = results.Where(n => n.IsInLoadOrder).ToList();
+        }
+        
+        if (!ShowSkyPatcherTemplates)
+        {
+            // Exclude if the NPC's FormKey is in the known templates list
+            results = results.Where(n => !_settings.CachedSkyPatcherTemplates.Contains(n.NpcFormKey)).ToList();
+        }
+        
+        var predicates = new List<Func<VM_NpcsMenuSelection, bool>>();
+        
+        // Preserve the currently selected NPC
+        var npcToPreserve = SelectedNpc;
+        
+        // cache share status if necessary
+
+        HashSet<FormKey> allShareSources = new();
+        HashSet<FormKey> allSelectedShareSources = new();
+
+        if (SearchType1 == NpcSearchType.ShareStatus || SearchType2 == NpcSearchType.ShareStatus ||
+            SearchType3 == NpcSearchType.ShareStatus)
+        {
+            allShareSources.UnionWith(
+                _settings.GuestAppearances.Values.SelectMany(guestSet => guestSet.Select(g => g.Item2))
+            );
+
+            foreach (var (targetNpc, guestSet) in _settings.GuestAppearances)
+            {
+                foreach (var (modName, sourceNpc, _) in guestSet)
+                {
+                    if (_consistencyProvider.IsModSelected(targetNpc, modName, sourceNpc))
+                    {
+                        allSelectedShareSources.Add(sourceNpc);
+                    }
+                }
+            }
+        }
+
+        // --- Predicate building (one call per search row) ---
+        // Builds the row's criterion, then flips it if the row is set to "Is Not".
+        //
+        // A row that yields no criterion at all (empty text box, Group left on
+        // "All NPCs") stays inactive regardless of Is/Is Not — inverting "no filter"
+        // is still "no filter", not "match nothing".
+        //
+        // Note the Gender/Uniqueness "Any" options are real always-true criteria, not
+        // absent ones, so "Is Not / Any" correctly matches nothing. ShareStatus's "Any"
+        // is not a wildcard — it means "involved in sharing at all" — so "Is Not / Any"
+        // there usefully selects the NPCs with no sharing relationship.
+        void AddRowPredicate(
+            NpcSearchType type, FilterInversionType inversion, string searchText,
+            SelectionStateFilterType stateFilter, ShareStatusFilterType shareStatusFilter,
+            UniquenessFilterType uniquenessFilter, GenderFilterType genderFilter,
+            TemplateFilterType templateFilter, string? groupFilter)
+        {
+            Func<VM_NpcsMenuSelection, bool>? p;
+            switch (type)
+            {
+                case NpcSearchType.SelectionState:
+                    p = npc => CheckSelectionState(npc, stateFilter);
+                    break;
+                case NpcSearchType.ShareStatus:
+                    p = npc => CheckShareStatus(npc, shareStatusFilter, allShareSources, allSelectedShareSources);
+                    break;
+                case NpcSearchType.Uniqueness:
+                    p = npc => CheckUniqueness(npc, uniquenessFilter);
+                    break;
+                case NpcSearchType.Gender:
+                    p = npc => CheckGender(npc, genderFilter);
+                    break;
+                case NpcSearchType.Template:
+                    p = npc => CheckTemplate(npc, templateFilter);
+                    break;
+                case NpcSearchType.Group:
+                    p = BuildGroupPredicate(groupFilter);
+                    break;
+                default:
+                    p = BuildTextPredicate(type, searchText);
+                    break;
+            }
+
+            if (p == null) return;
+
+            var criterion = p;
+            predicates.Add(inversion == FilterInversionType.IsNot ? npc => !criterion(npc) : criterion);
+        }
+
+        AddRowPredicate(SearchType1, SearchInversion1, SearchText1, SelectedStateFilter1,
+            SelectedShareStatusFilter1, SelectedUniquenessFilter1, SelectedGenderFilter1,
+            SelectedTemplateFilter1, SelectedGroupFilter1);
+        AddRowPredicate(SearchType2, SearchInversion2, SearchText2, SelectedStateFilter2,
+            SelectedShareStatusFilter2, SelectedUniquenessFilter2, SelectedGenderFilter2,
+            SelectedTemplateFilter2, SelectedGroupFilter2);
+        AddRowPredicate(SearchType3, SearchInversion3, SearchText3, SelectedStateFilter3,
+            SelectedShareStatusFilter3, SelectedUniquenessFilter3, SelectedGenderFilter3,
+            SelectedTemplateFilter3, SelectedGroupFilter3);
+        // --- End predicate building ---
+
+        if (predicates.Any())
+        {
+            if (CurrentSearchLogic == SearchLogic.AND)
+            {
+                results = results.Where(npc => predicates.All(p => p(npc))).ToList();
+            }
+            else
+            {
+                results = results.Where(npc => predicates.Any(p => p(npc))).ToList();
+            }
+        }
+        
+        results.Sort((a, b) =>
+        {
+            int comparison = 0;
+            switch (SelectedSortProperty)
+            {
+                case NpcSortProperty.Name:
+                    // Natural sort for names with numbers (e.g., "Bandit 2" vs "Bandit 10")
+                    comparison = StrCmpLogicalW(a.NpcName, b.NpcName);
+                    break;
+                case NpcSortProperty.EditorID:
+                    comparison = StrCmpLogicalW(a.NpcEditorId, b.NpcEditorId);
+                    break;
+                case NpcSortProperty.FormKey:
+                    comparison = a.NpcFormKey.ModKey.Name.CompareTo(b.NpcFormKey.ModKey.Name);
+                    if (comparison == 0)
+                        comparison = a.NpcFormKey.ID.CompareTo(b.NpcFormKey.ID);
+                    break;
+                case NpcSortProperty.FormID:
+                default:
+                    // This logic preserves the original FormID sort behavior
+                    bool aInLoadOrder = !string.IsNullOrEmpty(a.FormIdString);
+                    bool bInLoadOrder = !string.IsNullOrEmpty(b.FormIdString);
+
+                    if (aInLoadOrder && !bInLoadOrder) comparison = -1;
+                    else if (!aInLoadOrder && bInLoadOrder) comparison = 1;
+                    else if (aInLoadOrder) // both in LO
+                        comparison = string.Compare(a.FormIdString, b.FormIdString, StringComparison.Ordinal);
+                    else // both not in LO
+                    {
+                        comparison = string.Compare(a.NpcFormKey.ModKey.FileName, b.NpcFormKey.ModKey.FileName, StringComparison.OrdinalIgnoreCase);
+                        if (comparison == 0)
+                            comparison = string.Compare(a.NpcFormKey.IDString(), b.NpcFormKey.IDString(), StringComparison.OrdinalIgnoreCase);
+                    }
+                    break;
+            }
+            // Apply reversal if the checkbox is ticked
+            return IsSortReversed ? -comparison : comparison;
+        });
+
+        FilteredNpcs.Clear();
+        foreach (var npc in results)
+        {
+            FilteredNpcs.Add(npc);
+        }
+
+        // If a programmatic navigation is in progress, VM_Mods will handle setting SelectedNpc.
+        // ApplyFilter should only update the FilteredNpcs list and not interfere with the selection.
+        if (IsProgrammaticNavigationInProgress)
+        {
+            Debug.WriteLine(
+                $"ApplyFilter: Programmatic navigation in progress (IsProgrammaticNavigationInProgress=true). FilteredNpcs updated. Deferring selection to VM_Mods.");
+            // We don't change SelectedNpc here. VM_Mods will set it explicitly.
+            // We must ensure that the target NPC (which VM_Mods *will* select) is actually in FilteredNpcs.
+            // If SelectedNpc is already set to the navigation target, and it's NOT in FilteredNpcs,
+            // then SelectedNpc might become null due to ListBox behavior.
+            // However, VM_Mods will re-set it.
+            return; // Exit early, let VM_Mods control selection.
+        }
+
+        // Standard selection logic if not navigating programmatically
+        var previouslySelectedNpcKey = npcToPreserve?.NpcFormKey;
+        VM_NpcsMenuSelection? newSelection = null;
+
+        if (previouslySelectedNpcKey != null)
+        {
+            newSelection = FilteredNpcs.FirstOrDefault(n => n.NpcFormKey.Equals(previouslySelectedNpcKey));
+        }
+
+        if (newSelection == null && FilteredNpcs.Any() && !initializing)
+        {
+            Debug.WriteLine(
+                $"ApplyFilter: Auto-selecting first NPC ('{FilteredNpcs[0]?.DisplayName ?? "null"}') from filtered list because previous selection was lost or null, and not initializing.");
+            newSelection = FilteredNpcs[0];
+        }
+
+        if (SelectedNpc != newSelection && preserveSelection) // Only update if it's actually different
+        {
+            Debug.WriteLine(
+                $"ApplyFilter: Setting SelectedNpc to '{newSelection?.DisplayName ?? "null"}'. Previous was '{SelectedNpc?.DisplayName ?? "null"}'.");
+            SelectedNpc = newSelection;
+        }
+        else
+        {
+            Debug.WriteLine(
+                $"ApplyFilter: SelectedNpc ('{SelectedNpc?.DisplayName ?? "null"}') remains unchanged.");
+        }
+    }
+
+    private bool CheckSelectionState(VM_NpcsMenuSelection npcMenu, SelectionStateFilterType filterState)
+    {
+        // 1. Get the selection tuple. A selection is considered "made" if a ModName exists.
+        var selection = _consistencyProvider.GetSelectedMod(npcMenu.NpcFormKey);
+        bool isSelected = !string.IsNullOrEmpty(selection.ModName);
+
+        // 2. Determine the desired state from the filter.
+        bool filterWantsSelectionMade = (filterState == SelectionStateFilterType.Made);
+
+        // 3. Return true only if the NPC's state matches the filter's desired state.
+        return isSelected == filterWantsSelectionMade;
+    }
+
+    private Func<VM_NpcsMenuSelection, bool>? BuildGroupPredicate(string? selectedGroup)
+    {
+        if (string.IsNullOrWhiteSpace(selectedGroup) || selectedGroup == AllNpcsGroup)
+        {
+            return null;
+        }
+
+        return npc => _settings.NpcGroupAssignments.TryGetValue(npc.NpcFormKey, out var groups) &&
+                      groups != null &&
+                      groups.Contains(selectedGroup);
+    }
+    
+    private bool CheckShareStatus(
+        VM_NpcsMenuSelection npcMenu, 
+        ShareStatusFilterType filterType,
+        HashSet<FormKey> allShareSources,
+        HashSet<FormKey> allSelectedShareSources)
+    {
+        // Check if the NPC is a guest at all (i.e., has shared appearances available).
+        bool isGuest = _settings.GuestAppearances.ContainsKey(npcMenu.NpcFormKey);
+
+        // Check if the NPC's currently selected appearance is a guest appearance.
+        var selection = _consistencyProvider.GetSelectedMod(npcMenu.NpcFormKey);
+        bool isGuestSelected = isGuest && selection.ModName != null && !selection.SourceNpcFormKey.Equals(npcMenu.NpcFormKey);
+
+        switch (filterType)
+        {
+            case ShareStatusFilterType.Any:
+                // An NPC is involved in sharing if it's a guest OR a source.
+                return isGuest || allShareSources.Contains(npcMenu.NpcFormKey);
+
+            case ShareStatusFilterType.GuestAvailable:
+                // The NPC has guest appearances available but does NOT have one selected.
+                return isGuest && !isGuestSelected;
+
+            case ShareStatusFilterType.GuestSelected:
+                // The NPC has a guest appearance currently selected.
+                return isGuestSelected;
+
+            case ShareStatusFilterType.Shared:
+                // The NPC provides an appearance to at least one other NPC.
+                return allShareSources.Contains(npcMenu.NpcFormKey);
+
+            case ShareStatusFilterType.SharedAndSelected:
+                // The NPC is a share source AND at least one guest has it selected.
+                return allSelectedShareSources.Contains(npcMenu.NpcFormKey);
+
+            default:
+                return true;
+        }
+    }
+    
+    private bool CheckUniqueness(VM_NpcsMenuSelection npcMenu, UniquenessFilterType filterType)
+    {
+        switch (filterType)
+        {
+            case UniquenessFilterType.Unique:
+                return npcMenu.IsUnique;
+            case UniquenessFilterType.Generic:
+                return !npcMenu.IsUnique;
+            case UniquenessFilterType.Any:
+            default:
+                return true;
+        }
+    }
+
+    private bool CheckGender(VM_NpcsMenuSelection npcMenu, GenderFilterType filterType)
+    {
+        switch (filterType)
+        {
+            case GenderFilterType.Male:
+                // NpcData is null for mugshot-only NPCs not in the load order, so
+                // their gender is unknown and they fall out of a concrete filter.
+                return npcMenu.NpcData?.Gender == Gender.Male;
+            case GenderFilterType.Female:
+                return npcMenu.NpcData?.Gender == Gender.Female;
+            case GenderFilterType.Any:
+            default:
+                return true;
+        }
+    }
+
+    private bool CheckTemplate(VM_NpcsMenuSelection npcMenu, TemplateFilterType filterType)
+    {
+        switch (filterType)
+        {
+            case TemplateFilterType.BaseHasTemplate:
+                return npcMenu.BaseRecordHasTemplate;
+
+            case TemplateFilterType.BaseIsTemplate:
+                return _baseRecordIsTemplateSources.Contains(npcMenu.NpcFormKey);
+
+            case TemplateFilterType.WinnerHasTemplate:
+                return npcMenu.WinningOverrideHasTemplate;
+
+            case TemplateFilterType.WinnerIsTemplate:
+                return _winOverrideIsTemplateSources.Contains(npcMenu.NpcFormKey);
+
+            case TemplateFilterType.AppModsHaveTemplate:
+                // At least one appearance mod for this NPC has a template notification
+                return npcMenu.AppearanceMods.Any(mod =>
+                    mod.NpcFormKeysToNotifications.TryGetValue(npcMenu.NpcFormKey, out var notification) &&
+                    notification.IssueType == NpcIssueType.Template);
+
+            case TemplateFilterType.AppModsUseAsTemplate:
+                // Some appearance mod for another NPC references this NPC as a template
+                return _appModUsedAsTemplateSources.Contains(npcMenu.NpcFormKey);
+
+            default:
+                return true;
+        }
+    }
+
+    private Func<VM_NpcsMenuSelection, bool>? BuildTextPredicate(NpcSearchType type, string searchText)
+    {
+        if (type == NpcSearchType.SelectionState || type == NpcSearchType.Group || type == NpcSearchType.ShareStatus || type == NpcSearchType.Uniqueness || type == NpcSearchType.Gender || type == NpcSearchType.Template ||
+            string.IsNullOrWhiteSpace(searchText))
+        {
+            return null;
+        }
+
+        string searchTextLower = searchText.Trim().ToLowerInvariant();
+        switch (type)
+        {
+            case NpcSearchType.Name:
+                return npc => npc.DisplayName?.Contains(searchText, StringComparison.OrdinalIgnoreCase) ?? false;
+            case NpcSearchType.EditorID:
+                // Use the lightweight NpcData object
+                return npc =>
+                    npc.NpcData?.EditorID?.Contains(searchText, StringComparison.OrdinalIgnoreCase) ?? false;
+            case NpcSearchType.InAppearanceMod:
+                return npc =>
+                    npc.AppearanceMods.Any(m =>
+                        m.DisplayName.Contains(searchText, StringComparison.OrdinalIgnoreCase)) ||
+                    (_downloadedMugshotData.TryGetValue(npc.NpcFormKey, out var mugshots) &&
+                     mugshots.Any(m => m.ModName.Contains(searchText, StringComparison.OrdinalIgnoreCase)));
+            case NpcSearchType.ChosenInMod:
+                return npc =>
+                    _consistencyProvider.GetSelectedMod(npc.NpcFormKey).ModName?
+                        .Contains(searchText, StringComparison.OrdinalIgnoreCase) ?? false;
+            case NpcSearchType.FromPlugin:
+                return npc =>
+                    npc.NpcFormKey.ModKey.FileName.String.Contains(searchText, StringComparison.OrdinalIgnoreCase);
+            case NpcSearchType.FormKey:
+                return npc => npc.NpcFormKey.ToString().Contains(searchText, StringComparison.OrdinalIgnoreCase);
+            case NpcSearchType.Race:
+            {
+                var (term, exact) = Auxilliary.ParseRaceSearchTerm(searchText);
+                if (string.IsNullOrEmpty(term)) return null;
+                // One race-info cache per filter pass, shared across all NPCs. Cheap:
+                // there are only a few dozen distinct races, so each resolves once.
+                var raceInfoCache = new Dictionary<FormKey, (string? Name, string? EditorId)>();
+                return npc =>
+                {
+                    var raceKey = npc.NpcData?.RaceFormKey;
+                    if (raceKey == null || raceKey.Value.IsNull) return false;
+                    var info = GetRaceInfo(raceKey.Value, raceInfoCache);
+                    return Auxilliary.RaceMatches(info.Name, info.EditorId, term, exact);
+                };
+            }
+            default:
+                return null;
+        }
+    }
+
+    /// <summary>Resolves a race FormKey to its (Name, EditorID) for the Race filter,
+    /// memoized in the supplied per-filter-pass cache.</summary>
+    private (string? Name, string? EditorId) GetRaceInfo(
+        FormKey raceKey, Dictionary<FormKey, (string? Name, string? EditorId)> cache)
+    {
+        if (cache.TryGetValue(raceKey, out var cached)) return cached;
+        (string? Name, string? EditorId) result = (null, null);
+        if (_environmentStateProvider.LinkCache.TryResolve<IRaceGetter>(raceKey, out var race))
+            result = (race.Name?.String, race.EditorID);
+        cache[raceKey] = result;
+        return result;
+    }
+
+    /// <summary>Builds the sorted, distinct Race-filter option list from the finalized
+    /// NPC list (each NPC's winning-override race, Name + EditorID). Resolves each
+    /// distinct race once. Pure of UI state, so it is safe to call off the UI thread.</summary>
+    private List<string> ComputeRaceFilterOptions()
+    {
+        var cache = new Dictionary<FormKey, (string? Name, string? EditorId)>();
+        var pairs = AllNpcs
+            .Select(n => n.NpcData?.RaceFormKey)
+            .Where(k => k != null && !k.Value.IsNull)
+            .Select(k => k!.Value)
+            .Distinct()
+            .Select(k => GetRaceInfo(k, cache));
+        return Auxilliary.BuildRaceFilterOptions(pairs);
+    }
+
+    private async Task<ObservableCollection<VM_NpcsMenuMugshot>> CreateMugShotViewModelsAsync(VM_NpcsMenuSelection selectionVm,
+        Dictionary<FormKey, List<(string ModName, string ImagePath)>> mugshotData)
+    {
+        if (selectionVm == null) return new ObservableCollection<VM_NpcsMenuMugshot>();
+
+        Debug.WriteLine($"[NpcPerf] T+{SelectionPerfSw.ElapsedMilliseconds}ms CreateMugShotViewModelsAsync ENTER");
+
+        _eventLogger.LogHeader($"Resolving Appearances for: {selectionVm.DisplayName} [{selectionVm.NpcFormKey}]");
+
+        var finalModVMs = new Dictionary<(string ModName, FormKey SourceKey), VM_NpcsMenuMugshot>();
+        var targetNpcFormKey = selectionVm.NpcFormKey;
+
+        // Helper function to centralize VM creation and prevent duplicates.
+        void CreateVmIfNotExists(string modName, FormKey sourceNpcKey, string? overrideSourceNpc = null, string sourceCategory = "Unknown")
+        {
+            var vmKey = (modName.ToLowerInvariant(), sourceNpcKey);
+            if (finalModVMs.ContainsKey(vmKey))
+            {
+                _eventLogger.Log($"Duplicate prevented: {modName} (Source: {sourceCategory}) already exists.");
+                return;
+            }
+
+            // Find an associated mod setting if it exists. This is optional.
+            var modSettingVM = _lazyModsVm.Value.AllModSettings.FirstOrDefault(m => m.DisplayName.Equals(modName, StringComparison.OrdinalIgnoreCase));
+            _eventLogger.Log($"Adding: '{modName}' via [{sourceCategory}]", "MUGSHOT");
+            
+            string? imagePath = GetImagePathForNpc(modSettingVM, sourceNpcKey, mugshotData, targetNpcFormKey);
+            var specificPluginKey = GetPluginKeyForNpc(modSettingVM, sourceNpcKey);
+
+            var appearanceVM = _appearanceModFactory(
+                modName,
+                selectionVm.DisplayName,
+                targetNpcFormKey,
+                sourceNpcKey,
+                specificPluginKey,
+                imagePath
+            );
+            
+            // Add issue notifications if the mod setting exists and has them.
+            if (modSettingVM != null && modSettingVM.NpcFormKeysToNotifications.TryGetValue(sourceNpcKey, out var notif))
+            {
+                appearanceVM.HasIssueNotification = true;
+                appearanceVM.IssueType = notif.IssueType;
+                appearanceVM.IssueNotificationText = notif.IssueMessage;
+
+                if (notif.IssueType == NpcIssueType.Template)
+                {
+                    // The stored message is written at scan time and states the DEFAULT rule
+                    // (inherit). Template Handling Mode can change afterwards without a rescan, so
+                    // whether that rule still holds is decided here, at display time.
+                    bool flattens = TemplateChainWillBeFlattened(modSettingVM, notif.ReferencedFormKey);
+                    appearanceVM.TemplateResolvesPerNpc = flattens;
+
+                    if (notif.ReferencedFormKey != null)
+                    {
+                        appearanceVM.TemplateNpcKey = notif.ReferencedFormKey.Value;
+                        appearanceVM.CanJumpToTemplate = true;
+                    }
+
+                    if (flattens)
+                    {
+                        // REPLACES the stored message rather than adding to it: that message
+                        // states the inherit rule ("regardless of which mod you select here..."),
+                        // which is precisely what this mode undoes. Appending a correction to it
+                        // left the tooltip arguing with itself.
+                        //
+                        // The template NPC's own selection is likewise not reported here — in this
+                        // mode the appearance is read from the mod picked HERE, so naming the
+                        // template's assignment would point at something that has no effect.
+                        appearanceVM.IssueNotificationText = BuildPerNpcTemplateTooltip(modName);
+                    }
+                    else if (notif.ReferencedFormKey != null)
+                    {
+                        var assignment = _consistencyProvider.GetSelectedMod(notif.ReferencedFormKey.Value);
+                        if (assignment.ModName != null)
+                        {
+                            appearanceVM.IssueNotificationText += "\n" + $"The template NPC is currently set to: {assignment.ModName}";
+                            if (!assignment.SourceNpcFormKey.Equals(notif.ReferencedFormKey))
+                            {
+                                appearanceVM.IssueNotificationText +=
+                                    $" (using appearance from {assignment.SourceNpcFormKey.ToString()})";
+                            }
+                        }
+                        else
+                        {
+                            appearanceVM.IssueNotificationText += "\n" + $"The template NPC does not yet have an appearance mod assigned";
+                        }
+                    }
+                }
+            }
+            
+            // Add the name of the original NPC, if different from source
+            if (overrideSourceNpc is not null)
+            {
+                appearanceVM.OriginalTargetName = overrideSourceNpc;
+            }
+
+            finalModVMs.Add(vmKey, appearanceVM);
+        }
+
+        // --- Source 1: Standard appearances from the NPC's game data ---
+        int source1Count = 0;
+        foreach (var modSetting in selectionVm.AppearanceMods)
+        {
+            CreateVmIfNotExists(modSetting.DisplayName, targetNpcFormKey, sourceCategory: "Saved Mod Setting");
+            source1Count++;
+        }
+        _eventLogger.Log($"Found {source1Count} saved appearance mods.", "SOURCE 1");
+
+        // --- Source 2: Guest appearances from settings ---
+        int source2Count = 0;
+        if (_settings.GuestAppearances.TryGetValue(targetNpcFormKey, out var guestList))
+        {
+            foreach (var guest in guestList)
+            {
+                CreateVmIfNotExists(guest.ModName, guest.NpcFormKey, guest.NpcDisplayName, sourceCategory: "Guest/Shared");
+                source2Count++;
+            }
+        }
+        _eventLogger.Log($"Found {source2Count} guest appearance assignments.", "SOURCE 2");
+
+        // --- Source 3: All other mugshots from the cache for this NPC ---
+        // This corrected section ensures mugshot-only mods are always included.
+        int source3Count = 0;
+        if (mugshotData.TryGetValue(targetNpcFormKey, out var allMugshotsForNpc))
+        {
+            foreach (var mugshotInfo in allMugshotsForNpc)
+            {
+                // The source NPC for a standard mugshot is the target NPC itself.
+                if (_lazyModsVm.Value.AllModSettings.Any(m => m.DisplayName.Equals(mugshotInfo.ModName, StringComparison.OrdinalIgnoreCase)))
+                {
+                    // Skip if this mod is already represented as a SkyPatcher guest for this NPC:
+                    // the guest entry already carries the (now mugshot-linked) donor source key,
+                    // and a target-keyed entry would point at an NPC the mod's plugin doesn't contain.
+                    bool alreadySkyPatcherGuest = finalModVMs.Any(kvp =>
+                        kvp.Key.ModName.Equals(mugshotInfo.ModName, StringComparison.OrdinalIgnoreCase)
+                        && _settings.CachedSkyPatcherTemplates.Contains(kvp.Key.SourceKey));
+                    if (alreadySkyPatcherGuest)
+                    {
+                        _eventLogger.Log($"Skipping mugshot-match for '{mugshotInfo.ModName}': already present as SkyPatcher guest.", "SOURCE 3");
+                        continue;
+                    }
+
+                    // If it wasn't added in Source 1 (e.g. data mismatch), add it here
+                    CreateVmIfNotExists(mugshotInfo.ModName, targetNpcFormKey, sourceCategory: "Mugshot Match");
+                    source3Count++;
+                }
+            }
+        }
+        _eventLogger.Log($"Scanned {source3Count} directory mugshots (some may have been native matches).", "SOURCE 3");
+        
+        // --- NEW: Source 4: FaceFinder fallback ---
+        if (_settings.UseFaceFinderFallback)
+        {
+            _eventLogger.Log("FaceFinder fallback is enabled. Querying API...", "SOURCE 4");
+            // --- NEW: Create a reverse lookup for efficient checking ---
+            var serverToLocalMap = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var mapping in _settings.FaceFinderModNameMappings) //
+            {
+                var localName = mapping.Key;
+                foreach (var serverName in mapping.Value)
+                {
+                    if (!serverToLocalMap.TryGetValue(serverName, out var localNames))
+                    {
+                        localNames = new List<string>();
+                        serverToLocalMap[serverName] = localNames;
+                    }
+                    localNames.Add(localName);
+                }
+            }
+
+            // Uses the v2 search endpoint by default; drops back to the v1 amalgamation hack when
+            // FaceFinderSearchFallback.txt is present next to the exe (see SearchFacesForNpcAsync).
+            var faceFinderResults = await _faceFinderClient.SearchFacesForNpcAsync(targetNpcFormKey);
+
+            var preLogging = faceFinderResults.Select(x => x.ModName + ": " + x.ImageUrl).ToList();
+            string indexedList = String.Empty;
+            for (int i = 0; i < preLogging.Count; i++)
+            {
+                indexedList += i+1 + ": " + preLogging[i] + Environment.NewLine;
+            }
+            _eventLogger.Log($"Received the following appearance mod list from FaceFinder server: {preLogging.Count}" + Environment.NewLine + indexedList, "FACEFINDER");
+
+            int ffCount = 0;
+            foreach (var serverResult in faceFinderResults)
+            {
+                bool alreadyExists = false;
+                var serverModName = serverResult.ModName;
+                var vmKey = (serverModName, targetNpcFormKey);
+
+                // Check 1: Does a VM with the exact server name already exist?
+                if (finalModVMs.ContainsKey(vmKey))
+                {
+                    _eventLogger.Log($"FaceFinder Match: '{serverModName}' already exists locally.", "SOURCE 4");
+                    alreadyExists = true;
+                }
+                // Check 2: If not, is this server name mapped to any local mods that already exist?
+                else if (serverToLocalMap.TryGetValue(serverModName, out var linkedLocalNames))
+                {
+                    foreach (var localName in linkedLocalNames)
+                    {
+                        if (finalModVMs.ContainsKey((localName, targetNpcFormKey)))
+                        {
+                            _eventLogger.Log($"FaceFinder Match (Linked): '{serverModName}' mapped to existing '{localName}'.", "SOURCE 4");
+                            alreadyExists = true;
+                            break;
+                        }
+                    }
+                }
+                
+                // Only create the new VM if no existing local version (direct or linked) was found.
+                if (!alreadyExists)
+                {
+                    CreateVmIfNotExists(serverModName, targetNpcFormKey, sourceCategory: "FaceFinder");
+                    Debug.WriteLine($"Discovered new unlinked appearance for {selectionVm.DisplayName} from '{serverModName}' via FaceFinder.");
+                    ffCount++;
+                }
+            }
+            _eventLogger.Log($"Added {ffCount} new options via FaceFinder.", "SOURCE 4");
+        }
+        else
+        {
+            _eventLogger.Log("FaceFinder fallback is disabled.", "SOURCE 4");
+        }
+        
+        _eventLogger.Log($"Final count: {finalModVMs.Count} appearance options generated.", "SUMMARY");
+
+        // --- Finalize: Sort, configure, and set the current selection ---
+        var npcSourcePlugin = targetNpcFormKey.ModKey;
+        var sortedVMs = finalModVMs.Values
+                        // Primary sort: Use OrderByDescending on a boolean to put the "native" mod first.
+                        .OrderByDescending(vm => vm.AssociatedModSetting?.CorrespondingModKeys.Contains(npcSourcePlugin) ?? false)
+                        // Secondary sort: Alphabetical by the appearance mod's name.
+                        .ThenBy(vm => vm.ModName)
+                        // Tertiary sort: For guest appearances from the same mod, sort by source NPC.
+                        .ThenBy(vm => vm.SourceNpcFormKey.ToString())
+                        .ToList();
+        
+        // Configure IsSetHidden and IsCheckedForCompare properties
+        foreach (var m in sortedVMs)
+        {
+            bool isGloballyHidden = _hiddenModNames.Contains(m.ModName);
+            bool isPerNpcHidden = _hiddenModsPerNpc.TryGetValue(targetNpcFormKey, out var hiddenSet) && hiddenSet.Contains(m.ModName);
+            m.IsSetHidden = isGloballyHidden || isPerNpcHidden;
+            m.IsCheckedForCompare = false;
+        }
+
+        // Set the currently selected item's border
+        var (selectedModName, selectedSourceKey) = _consistencyProvider.GetSelectedMod(targetNpcFormKey);
+        if (!string.IsNullOrEmpty(selectedModName))
+        {
+            var selectedVmInstance = sortedVMs.FirstOrDefault(x =>
+                x.ModName.Equals(selectedModName, StringComparison.OrdinalIgnoreCase) && x.SourceNpcFormKey.Equals(selectedSourceKey));
+            if (selectedVmInstance != null)
+            {
+                selectedVmInstance.IsSelected = true;
+            }
+        }
+
+        Debug.WriteLine($"[NpcPerf] T+{SelectionPerfSw.ElapsedMilliseconds}ms CreateMugShotViewModelsAsync EXIT (count={sortedVMs.Count})");
+
+        return new ObservableCollection<VM_NpcsMenuMugshot>(sortedVMs);
+    }
+
+    /// <summary>
+    /// Will this NPC's Traits chain actually be flattened on the next run — i.e. does the mod you
+    /// pick for it decide its face individually, rather than the template's own selection?
+    ///
+    /// <para>Mirrors the patcher's gate (<c>Patcher.ResolveAppearanceTerminusRecord</c>): the
+    /// effective mode must be <see cref="TemplateHandlingMode.GiveEachNpcOwnCopy"/> AND the chain
+    /// must resolve to a concrete NPC. A chain ending in a levelled list keeps inheriting whatever
+    /// the mode says — the game picks the actor at runtime — and that covers whole classes of
+    /// generic vanilla actors, so claiming per-NPC control for them would be wrong.</para>
+    ///
+    /// <para>Approximation, deliberately: the levelled check walks from the load order's record
+    /// rather than the mod's own, and an unfollowable chain (cycle / dangling template) is not
+    /// detected at all. Both are far rarer than the levelled case, both only ever produce a
+    /// too-optimistic tooltip on an NPC the patcher then leaves inheriting, and neither is worth a
+    /// mod-scoped plugin load per mugshot tile.</para>
+    /// </summary>
+    private bool TemplateChainWillBeFlattened(VM_ModSetting? modSettingVM, FormKey? templateFormKey)
+    {
+        var mode = _settings.ResolveTemplateHandlingMode(modSettingVM?.OverrideTemplateHandlingMode);
+
+        // Gathering the facts costs a link-cache resolve per tile, so the cheap gate goes first —
+        // in the default (inherit) mode nothing below is consulted at all.
+        if (mode != TemplateHandlingMode.GiveEachNpcOwnCopy) return false;
+        if (templateFormKey == null || templateFormKey.Value.IsNull) return false;
+
+        var linkCache = _environmentStateProvider.LinkCache;
+        if (linkCache == null) return false;
+
+        // A template link resolving to a Leveled NPC rather than an NPC IS the levelled terminus;
+        // otherwise walk on (Auxilliary caches the verdict per session).
+        bool levelled = linkCache.TryResolve<ILeveledNpcGetter>(templateFormKey.Value, out _)
+                        || !linkCache.TryResolve<INpcGetter>(templateFormKey.Value, out var templateNpc)
+                        || _auxilliary.TemplateChainTerminatesInLeveledNpc(templateNpc);
+
+        return ShouldTreatTemplateAsPerNpc(mode, hasTemplate: true, chainIsLevelled: levelled);
+    }
+
+    /// <summary>The policy half of <see cref="TemplateChainWillBeFlattened"/>, separated from the
+    /// record lookups so it can be exercised without a link cache.</summary>
+    internal static bool ShouldTreatTemplateAsPerNpc(TemplateHandlingMode effectiveMode,
+        bool hasTemplate, bool chainIsLevelled) =>
+        effectiveMode == TemplateHandlingMode.GiveEachNpcOwnCopy && hasTemplate && !chainIsLevelled;
+
+    /// <summary>
+    /// Tooltip for a templated NPC whose chain WILL be flattened. Written for someone who has
+    /// never heard of a template flag: it says what the icon is warning about and what actually
+    /// happens, and names the setting responsible so it can be found and changed. Deliberately
+    /// carries no FormKeys — the stored inherit-mode message quotes the template's FormKey, which
+    /// is meaningless to most users and worse than saying nothing here.
+    /// </summary>
+    internal static string BuildPerNpcTemplateTooltip(string modName) =>
+        "This NPC has no face of its own — it normally copies one from another NPC. " +
+        $"Because \"Templated NPCs\" is set to \"{HandlingModeDisplay.ToDisplayString(TemplateHandlingMode.GiveEachNpcOwnCopy)}\", " +
+        $"N.P.C.2 will give it a private copy of that face from '{modName}', so the mod you pick here " +
+        "applies to this NPC normally.";
+
+    /// <summary>
+    /// Randomize's note for NPCs it deliberately left alone because they inherit their face through
+    /// a Traits chain. Phrased as an outcome rather than a warning: nothing failed, these NPCs are
+    /// meant to look like someone else and will, whether or not they carry a selection.
+    /// <para>It deliberately stops there rather than pointing at the Templated NPCs setting. The
+    /// result is already correct, so sending the average user off to a mode switch they did not ask
+    /// about is noise — and for the levelled-terminus NPCs that reach this note under
+    /// <see cref="TemplateHandlingMode.GiveEachNpcOwnCopy"/> the switch would not change anything
+    /// anyway.</para>
+    /// </summary>
+    internal static string BuildInheritedTemplateRandomizeNote(int count) =>
+        $"{count} NPC(s) were left without a selection because they copy their appearance from " +
+        "another NPC. They have no face of their own to randomize, and will keep looking like " +
+        "whatever NPC they copy from.";
+
+    /// <summary>
+    /// Randomize's note for the selections it removed. Every NPC in the run was offered up for
+    /// replacement, so one that could not be placed ends with nothing rather than with the pick it
+    /// arrived with — a survivor would be a leftover of a state the rest of the run has moved on
+    /// from, and on a templated NPC it is how a chain silently splits across two mods. Said plainly
+    /// because it is the one destructive thing a randomize run does that the user did not see
+    /// listed: the confirmation counts the selections that will be overwritten, not these.
+    /// </summary>
+    internal static string BuildClearedSelectionsRandomizeNote(int count) =>
+        $"{count} NPC(s) had their previous selection removed. Randomize replaces the appearance of " +
+        "every NPC it is given, so any it could not place is left unselected rather than keeping an " +
+        "older pick that the rest of the run has moved past.";
+
+    // You will also need this helper method if you don't have it already.
+    private ModKey? GetPluginKeyForNpc(VM_ModSetting? modSetting, FormKey npcFormKey)
+    {
+        if (modSetting == null) return null;
+
+        if (modSetting.NpcPluginDisambiguation.TryGetValue(npcFormKey, out var mappedSourceKey))
+        {
+            return mappedSourceKey;
+        }
+        
+        if (modSetting.AvailablePluginsForNpcs.TryGetValue(npcFormKey, out var candidatePlugins) && candidatePlugins.Any())
+        {
+            return candidatePlugins.First();
+        }
+        
+        return modSetting.CorrespondingModKeys.FirstOrDefault();
+    }
+    
+    // Helper method to look up image paths for any NPC
+    private string? GetImagePathForNpc(VM_ModSetting modSetting, FormKey npcFormKey, Dictionary<FormKey, List<(string ModName, string ImagePath)>> mugshotData, FormKey? targetNpcFormKey = null)
+    {
+        if (modSetting == null || !modSetting.MugShotFolderPaths.Any()) return null;
+
+        var path = TryFindImagePathForKey(modSetting, npcFormKey, mugshotData);
+        if (path != null) return path;
+
+        // SkyPatcher surrogate fallback: when the appearance source is a SkyPatcher
+        // donor/template NPC, also try looking up mugshots keyed by the target NPC,
+        // since users commonly name mugshot files after the target rather than the donor.
+        if (targetNpcFormKey.HasValue
+            && !targetNpcFormKey.Value.Equals(npcFormKey)
+            && _settings.CachedSkyPatcherTemplates.Contains(npcFormKey))
+        {
+            return TryFindImagePathForKey(modSetting, targetNpcFormKey.Value, mugshotData);
+        }
+
+        return null;
+    }
+
+    private static string? TryFindImagePathForKey(VM_ModSetting modSetting, FormKey npcFormKey, Dictionary<FormKey, List<(string ModName, string ImagePath)>> mugshotData)
+    {
+        if (!mugshotData.TryGetValue(npcFormKey, out var availableMugshotsForNpc)) return null;
+
+        foreach (var path in modSetting.MugShotFolderPaths)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path)) continue;
+
+            string mugshotDirName = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+            var mugshotInfo = availableMugshotsForNpc.FirstOrDefault(m => m.ModName.Equals(mugshotDirName, StringComparison.OrdinalIgnoreCase));
+
+            if (mugshotInfo != default && !string.IsNullOrWhiteSpace(mugshotInfo.ImagePath) && File.Exists(mugshotInfo.ImagePath))
+            {
+                return mugshotInfo.ImagePath;
+            }
+        }
+        return null;
+    }
+    
+    public string? GetMugshotPathForNpc(string modName, FormKey npcFormKey, FormKey? targetNpcFormKey = null)
+    {
+        // Find the mod setting associated with the given mod name.
+        var modSetting = _lazyModsVm.Value.AllModSettings.FirstOrDefault(m => m.DisplayName.Equals(modName, StringComparison.OrdinalIgnoreCase));
+        if (modSetting == null)
+        {
+            // If no mod setting exists (e.g., a mugshot-only entry not yet linked),
+            // we can still try to find a direct match in the raw mugshot data.
+            if (_downloadedMugshotData.TryGetValue(npcFormKey, out var mugshots))
+            {
+                var match = mugshots.FirstOrDefault(m => m.ModName.Equals(modName, StringComparison.OrdinalIgnoreCase));
+                if (match != default) return match.ImagePath;
+            }
+            return null;
+        }
+
+        // Use the existing private helper method to get the specific image path,
+        // ensuring consistency with the rest of the application.
+        return GetImagePathForNpc(modSetting, npcFormKey, _downloadedMugshotData, targetNpcFormKey);
+    }
+
+    /// <summary>Returns the priority order to walk when resolving a mugshot
+    /// for the currently-selected NPC. When MugshotSourceOverride is None
+    /// (the default), this is Settings.MugshotSourcePriority verbatim. When
+    /// the user has clicked an override radio button, the chosen source is
+    /// promoted to index 0 and the remaining settings entries follow in
+    /// their original relative order.</summary>
+    public List<MugshotSourceType> GetEffectiveMugshotPriority()
+    {
+        var basePriority = _settings.MugshotSourcePriority;
+        if (MugshotSourceOverride == MugshotSourceType.None)
+        {
+            return basePriority;
+        }
+
+        var result = new List<MugshotSourceType>(basePriority.Count) { MugshotSourceOverride };
+        foreach (var src in basePriority)
+        {
+            if (src != MugshotSourceOverride) result.Add(src);
+        }
+        return result;
+    }
+
+    /// <summary>Arms the one-shot forced re-render for the AG override click.
+    /// <para>Syncs VM_Mods → Settings.ModSettings first, and that ordering is the
+    /// whole point: the renderer builds its per-mod asset-resolution scope from
+    /// the PERSISTED model (BatchMugshotGenerator → NpcMeshResolver.BuildResolutionScopes),
+    /// while a folder the user just added in the Mods tab lives only on the
+    /// VM_ModSetting until something calls SaveModSettingsToModel — previously
+    /// nothing did before app exit. That gap is why a fixed mod only rendered
+    /// correctly after a restart; forcing the render without the sync would just
+    /// reproduce the same missing assets more expensively.</para></summary>
+    private void ArmForcedAutoGenRegeneration()
+    {
+        try
+        {
+            _lazyModsVm.Value.SaveModSettingsToModel();
+        }
+        catch (Exception ex)
+        {
+            // Sync failure shouldn't block the render — it just means the render
+            // sees the previously-persisted scope, i.e. the old behavior.
+            Debug.WriteLine($"ArmForcedAutoGenRegeneration: model sync failed: {ExceptionLogger.GetExceptionStack(ex)}");
+        }
+
+        lock (_forcedAutoGenLock)
+        {
+            _forcedAutoGenTilesServed.Clear();
+            _forcedAutoGenPending = true;
+        }
+    }
+
+    private void ClearForcedAutoGenRegeneration()
+    {
+        lock (_forcedAutoGenLock)
+        {
+            _forcedAutoGenPending = false;
+            _forcedAutoGenTilesServed.Clear();
+        }
+    }
+
+    /// <summary>True while <paramref name="tile"/> still owes a forced render.
+    /// Read-only probe — the tile calls this before its cached-PNG fast path so
+    /// a "fresh" verdict can't short-circuit the render the user asked for.</summary>
+    public bool IsForcedAutoGenRegenerationPending(VM_NpcsMenuMugshot tile)
+    {
+        lock (_forcedAutoGenLock)
+        {
+            return _forcedAutoGenPending && !_forcedAutoGenTilesServed.Contains(tile);
+        }
+    }
+
+    /// <summary>Records that <paramref name="tile"/> completed its forced render,
+    /// so re-kicks against the same tile object fall back to normal staleness
+    /// rules. Called only on a render that actually produced a file.</summary>
+    public void MarkForcedAutoGenRegenerationServed(VM_NpcsMenuMugshot tile)
+    {
+        lock (_forcedAutoGenLock)
+        {
+            _forcedAutoGenTilesServed.Add(tile);
+        }
+    }
+
+    // --- TEMP: auto-advance for memory profiling (paired with the fields above; remove when done) ---
+
+    /// <summary>Starts auto-advance if idle, stops it if already running (Ctrl+Shift+A toggle).</summary>
+    public void ToggleAutoAdvance()
+    {
+        if (IsAutoAdvancing) StopAutoAdvance();
+        else _ = RunAutoAdvanceAsync();
+    }
+
+    /// <summary>Stops the auto-advance loop (Escape).</summary>
+    public void StopAutoAdvance()
+    {
+        _autoAdvanceCts?.Cancel();
+        IsAutoAdvancing = false;
+    }
+
+    /// <summary>
+    /// Walks forward through the NPC list on its own: waits for the current NPC's mugshot tiles to finish
+    /// loading, dwells briefly, then advances — repeating until the end of the list or a stop. Each advance
+    /// trips the per-NPC MemoryLogger sample, so this fills MemoryLog.html without manual clicking. Runs on
+    /// the UI thread (invoked from the view's key handler); awaiting Task.Delay yields to the dispatcher.
+    /// </summary>
+    private async Task RunAutoAdvanceAsync()
+    {
+        if (IsAutoAdvancing) return;
+        _autoAdvanceCts?.Cancel();
+        _autoAdvanceCts = new CancellationTokenSource();
+        var token = _autoAdvanceCts.Token;
+        IsAutoAdvancing = true;
+        try
+        {
+            // If nothing is selected yet, seed the first NPC in the current filtered list so there is a
+            // starting point (otherwise the loop would have nothing to advance from and immediately stop).
+            if (SelectedNpc == null && FilteredNpcs.Count > 0)
+            {
+                SelectedNpc = FilteredNpcs[0];
+                await WaitUntilAsync(() => CurrentNpcAppearanceMods != null, maxMs: 8000, token);
+            }
+
+            while (IsAutoAdvancing && !token.IsCancellationRequested)
+            {
+                // 1. Wait until the current NPC's tiles have all finished loading (all IsLoading == false).
+                //    A safety timeout keeps a tile that never resolves from stalling the whole run.
+                await WaitUntilAsync(
+                    () =>
+                    {
+                        var tiles = CurrentNpcAppearanceMods;
+                        return tiles != null && (tiles.Count == 0 || tiles.All(t => !t.IsLoading));
+                    },
+                    maxMs: 30000, token);
+                if (!IsAutoAdvancing || token.IsCancellationRequested) break;
+
+                // Brief dwell so the fully-loaded state (and its memory sample) settles before moving on.
+                await Task.Delay(300, token);
+                if (!IsAutoAdvancing || token.IsCancellationRequested) break;
+
+                // Reached the last NPC in the filtered list? (same index logic NavigateNextNpcCommand uses.)
+                var idx = SelectedNpc != null ? FilteredNpcs.IndexOf(SelectedNpc) : -1;
+                if (idx < 0 || idx >= FilteredNpcs.Count - 1) break;
+
+                var before = CurrentNpcAppearanceMods;
+                await NavigateNextNpcCommand.Execute();
+
+                // 2. Wait for the rebuild to swap in the next NPC's tile collection before we poll again.
+                await WaitUntilAsync(() => !ReferenceEquals(CurrentNpcAppearanceMods, before), maxMs: 8000, token);
+            }
+        }
+        catch (OperationCanceledException) { /* stopped */ }
+        catch (Exception ex) { Debug.WriteLine($"Auto-advance error: {ExceptionLogger.GetExceptionStack(ex)}"); }
+        finally { IsAutoAdvancing = false; }
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, int maxMs, CancellationToken token)
+    {
+        var sw = Stopwatch.StartNew();
+        while (!condition() && sw.ElapsedMilliseconds < maxMs && !token.IsCancellationRequested)
+            await Task.Delay(100, token);
+    }
+
+    private void TriggerAsyncMugshotGeneration()
+    {
+        // Only cancel the in-flight batch when the tile collection has actually
+        // been swapped since the last kick (NPC switch / rebuild). This trigger
+        // fires repeatedly for the SAME tiles — the 50ms collection backstop,
+        // the throttled PackingCompleted event, and (since the tile-image-ready
+        // re-pack wiring) another PackingCompleted every time a tile's image
+        // lands. Cancelling unconditionally meant each finishing tile aborted
+        // its still-rendering neighbors' multi-second GL renders, which then
+        // restarted from scratch on the re-kick — the tiles that genuinely
+        // needed a render could be starved for a long time (kept showing the
+        // placeholder) while fast tiles churned the trigger.
+        // Handled BEFORE the empty-collection return below so that switching
+        // away from an NPC with renders in flight still cancels them even when
+        // the newly-selected NPC has no appearance options (parity with the
+        // old cancel-unconditionally behavior).
+        if (_generationTilesDirty || _mugshotGenerationCts == null
+                                  || _mugshotGenerationCts.IsCancellationRequested)
+        {
+            _mugshotGenerationCts?.Cancel();
+            _mugshotGenerationCts = new CancellationTokenSource();
+            _generationTilesDirty = false;
+        }
+
+        if (CurrentNpcAppearanceMods == null || !CurrentNpcAppearanceMods.Any())
+        {
+            return;
+        }
+        var token = _mugshotGenerationCts.Token;
+
+        Debug.WriteLine("ImagePacker has completed. Triggering background mugshot generation.");
+
+        // Asynchronously call GenerateMugshotAsync for all visible items that don't have a real mugshot yet.
+        // Wrapped in Task.Run so the method's synchronous prefix
+        // (RunSelectedRendererAsync's staleness check + renderer setup, ~500ms
+        // per tile when a render is actually needed) runs off the dispatcher.
+        // Without this the foreach blocks the UI thread for ~500ms × N tiles
+        // before each call's first true yield — the freeze users observe right
+        // after the placeholders paint.
+        int kicked = 0;
+        int skippedHasMugshot = 0;
+        int skippedInvisible = 0;
+        int skippedInFlight = 0;
+        foreach (var mugshotVM in CurrentNpcAppearanceMods)
+        {
+            if (!mugshotVM.IsVisible) { skippedInvisible++; continue; }
+            if (mugshotVM.HasMugshot) { skippedHasMugshot++; continue; }
+            // Don't stack a second run on a tile whose generation is already
+            // queued or executing — same-collection re-triggers only top up
+            // tiles that aren't covered yet.
+            if (mugshotVM.IsGenerationInFlight) { skippedInFlight++; continue; }
+            // Latch synchronously (this method runs on the UI thread) so the
+            // next trigger can't double-kick before the task starts; the tile's
+            // finally releases it.
+            mugshotVM.IsGenerationInFlight = true;
+            // Fire and forget. The VM will update its own image when the task completes.
+            // Deliberately NOT passing the token to Task.Run: a cancelled token
+            // would suppress the delegate entirely, leaving the in-flight latch
+            // set forever. GenerateMugshotAsync checks the token internally and
+            // its finally clears the latch.
+            var vmCapture = mugshotVM;
+            _ = Task.Run(() => vmCapture.GenerateMugshotAsync(token));
+            kicked++;
+        }
+        Debug.WriteLine($"[NpcPerf] T+{SelectionPerfSw.ElapsedMilliseconds}ms TriggerAsyncMugshotGeneration kicked={kicked} skipped-hasMugshot={skippedHasMugshot} skipped-invisible={skippedInvisible} skipped-inFlight={skippedInFlight}");
+    }
+
+    /// <summary>Re-renders the currently-displayed NPC's autogen mugshots when it
+    /// matches <paramref name="npcFormKey"/>. Called when that NPC's per-NPC Render
+    /// attire override changes: the existing autogen PNGs are now stale (their
+    /// stamped attire flags differ from the new effective flags).
+    /// <para>A plain <see cref="TriggerAsyncMugshotGeneration"/> won't do it — a
+    /// displayed autogen tile has HasMugshot=true (LoadInitialImageAsync's
+    /// fast-path sets it on revisit), so it's skipped, which is why the re-render
+    /// previously only happened after switching NPCs and back. Calling each
+    /// autogen tile's <see cref="VM_NpcsMenuMugshot.RegenerateAsync"/> clears that
+    /// flag so the priority loop reaches the AutoGeneration source and re-renders.
+    /// Curated / FaceFinder tiles are left untouched; non-displayed NPC = no-op.</para></summary>
+    public void RegenerateAutogenMugshotsIfDisplayed(FormKey npcFormKey)
+    {
+        if (SelectedNpc == null || !SelectedNpc.NpcFormKey.Equals(npcFormKey)) return;
+        var tiles = CurrentNpcAppearanceMods;
+        if (tiles == null) return;
+
+        // Cancel the in-flight batch and start a fresh token, mirroring
+        // TriggerAsyncMugshotGeneration, so a rapid re-toggle doesn't stack renders.
+        _mugshotGenerationCts?.Cancel();
+        _mugshotGenerationCts = new CancellationTokenSource();
+        var token = _mugshotGenerationCts.Token;
+
+        foreach (var tile in tiles)
+        {
+            if (!tile.IsVisible || !tile.IsShowingAutoGenImage) continue;
+            var capture = tile;
+            _ = Task.Run(() => capture.RegenerateAsync(token), token);
+        }
+    }
+
+    private void HandleShareAppearanceRequest(VM_NpcsMenuMugshot mugshotToShare)
+    {
+        // The appearance's own source NPC is excluded from the picker: sharing an NPC with
+        // itself produces an entry that can never be unshared (see AddGuestAppearance).
+        var selectorVm = new VM_NpcShareTargetSelector(this.AllNpcs, mugshotToShare.SourceNpcFormKey);
+        var owner = Application.Current.Windows.OfType<Window>().SingleOrDefault(x => x.IsActive);
+        
+        var selectorView = new NpcShareTargetSelectorView 
+        { 
+            DataContext = selectorVm,
+            Owner = owner
+        };
+        
+        selectorView.ShowDialog();
+
+        var result = selectorVm.ReturnStatus;
+
+        if ((result == ShareReturn.ShareAndSelect || result == ShareReturn.Share) && selectorVm.SelectedNpc != null)
+        {
+            var targetNpcKey = selectorVm.SelectedNpc.NpcFormKey;
+            AddGuestAppearance(targetNpcKey, mugshotToShare.ModName, mugshotToShare.SourceNpcFormKey, mugshotToShare.TargetDisplayName);
+
+            if (result == ShareReturn.ShareAndSelect)
+            {
+                _consistencyProvider.SetSelectedMod(targetNpcKey, mugshotToShare.ModName, mugshotToShare.SourceNpcFormKey);
+            }
+        }
+    }
+
+    /// <summary>Registers <paramref name="guestModName"/>'s appearance for
+    /// <paramref name="guestNpcKey"/> as a shared ("guest") option on <paramref name="targetNpcKey"/>.
+    /// <para>An NPC can never be a guest of itself: such an entry duplicates the NPC's own native
+    /// appearance, so its tile is built with <c>IsGuestAppearance == false</c>
+    /// (<see cref="VM_NpcsMenuMugshot"/>), the "Unshare from this NPC" menu item never appears, and
+    /// the entry becomes permanent. Self-shares are therefore dropped here — this is the single
+    /// funnel for every share path (share dialog, favorites Apply/Make Available/Share, profile
+    /// import, randomizer), and the NPC's own tile is already shown by the normal appearance
+    /// sources, so nothing is lost by ignoring it.</para></summary>
+    public void AddGuestAppearance(FormKey targetNpcKey, string guestModName, FormKey guestNpcKey, string guestDisplayStr)
+    {
+        if (targetNpcKey.Equals(guestNpcKey))
+        {
+            Debug.WriteLine($"Ignoring self-share of {targetNpcKey} from mod '{guestModName}': " +
+                            "an NPC cannot be shared with itself.");
+            return;
+        }
+
+        if (!_settings.GuestAppearances.TryGetValue(targetNpcKey, out var guestSet))
+        {
+            guestSet = new HashSet<(string, FormKey, string)>();
+            _settings.GuestAppearances[targetNpcKey] = guestSet;
+        }
+
+        if (guestSet.Add((guestModName, guestNpcKey, guestDisplayStr)))
+        {
+            if (SelectedNpc != null && SelectedNpc.NpcFormKey.Equals(targetNpcKey))
+            {
+                RefreshCurrentNpcAppearanceSources();
+            }
+        }
+    }
+    
+    private void HandleUnshareAppearanceRequest(VM_NpcsMenuMugshot mugshotToUnshare)
+    {
+        // The mugshot carries all the necessary information.
+        // The target is the currently selected NPC.
+        var targetNpcKey = this.SelectedNpc.NpcFormKey;
+        var guestModName = mugshotToUnshare.ModName;
+        var guestNpcKey = mugshotToUnshare.SourceNpcFormKey;
+        var guestNpcDisplayName = mugshotToUnshare.OriginalTargetName;
+
+        RemoveGuestAppearance(targetNpcKey, guestModName, guestNpcKey, guestNpcDisplayName);
+    }
+
+    public void RemoveGuestAppearance(FormKey targetNpcKey, string guestModName, FormKey guestNpcKey, string guestDisplayStr)
+    {
+        // Keep the randomized-share tracking in sync: if this guest was randomizer-created,
+        // drop it from the tracking set too (also covers manual unshares of a randomized face).
+        if (_settings.RandomizedGuestAppearances.TryGetValue(targetNpcKey, out var randomizedSet)
+            && randomizedSet.Remove((guestModName, guestNpcKey, guestDisplayStr))
+            && randomizedSet.Count == 0)
+        {
+            _settings.RandomizedGuestAppearances.Remove(targetNpcKey);
+        }
+
+        if (_settings.GuestAppearances.TryGetValue(targetNpcKey, out var guestSet))
+        {
+            var guestToRemove = (guestModName, guestNpcKey, guestDisplayStr);
+            if (guestSet.Remove(guestToRemove))
+            {
+                // Check if the removed guest was the active selection for the target NPC.
+                var currentSelection = _consistencyProvider.GetSelectedMod(targetNpcKey);
+                if (currentSelection.ModName == guestModName && currentSelection.SourceNpcFormKey.Equals(guestNpcKey))
+                {
+                    // If it was, clear the selection to prevent a dangling reference.
+                    _consistencyProvider.ClearSelectedMod(targetNpcKey);
+                    Debug.WriteLine($"Cleared active selection for NPC {targetNpcKey} because its guest appearance was removed.");
+                }
+                Debug.WriteLine($"Removed guest appearance {guestToRemove} from NPC {targetNpcKey}");
+                
+                // If this was the last guest for this NPC, remove the entry entirely.
+                if (!guestSet.Any())
+                {
+                    _settings.GuestAppearances.Remove(targetNpcKey);
+                }
+
+                // If the NPC whose appearances were just modified is currently selected, refresh the view.
+                // This will cause the unshared mugshot to disappear.
+                if (SelectedNpc != null && SelectedNpc.NpcFormKey.Equals(targetNpcKey))
+                {
+                    RefreshCurrentNpcAppearanceSources();
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reconciles persisted guest/shared appearances sourced from <paramref name="modName"/>
+    /// against what that mod still provides, removing entries whose donor NPC is gone. The
+    /// SkyPatcher import only ever ADDS shares, so without this sweep a donor deleted from a
+    /// mod (records + FaceGen + ini) lingers forever as a dead placeholder tile on its target
+    /// NPC. Routed through <see cref="RemoveGuestAppearance"/> so the randomized-share subset,
+    /// a dangling selection, and the on-screen tiles stay in sync. Also drops each pruned
+    /// donor's <see cref="Settings.CachedSkyPatcherTemplates"/> flag once no share from ANY
+    /// mod references it anymore, so the donor key doesn't stay hidden from the NPC list.
+    /// </summary>
+    /// <param name="modName">DisplayName of the mod whose shares are being reconciled.</param>
+    /// <param name="liveDonorKeys">Donor NPCs the mod still contains. Callers include raw
+    /// plugin records, not just analysis-accepted NPCs, so a donor that merely failed
+    /// analysis this pass (e.g. load-order drift) is not mistaken for deleted. Empty when
+    /// the mod entry itself is being removed, which sweeps every share it sourced.</param>
+    /// <param name="freshDonorKeys">Donors the current SkyPatcher ini scan just
+    /// (re-)registered; exempt because an ini donor may resolve via the load order without
+    /// being one of the mod's own NPCs.</param>
+    /// <returns>Number of shares removed.</returns>
+    public int PruneStaleGuestAppearances(string modName, IReadOnlySet<FormKey> liveDonorKeys,
+        IReadOnlySet<FormKey> freshDonorKeys)
+    {
+        // Snapshot first: RemoveGuestAppearance mutates GuestAppearances mid-enumeration otherwise.
+        var staleGuests = new List<(FormKey TargetKey, string ModName, FormKey DonorKey, string DonorDisplay)>();
+        foreach (var (targetKey, guestSet) in _settings.GuestAppearances)
+        {
+            foreach (var (guestModName, donorKey, donorDisplay) in guestSet)
+            {
+                if (!guestModName.Equals(modName, StringComparison.OrdinalIgnoreCase)) continue;
+                if (liveDonorKeys.Contains(donorKey) || freshDonorKeys.Contains(donorKey)) continue;
+                staleGuests.Add((targetKey, guestModName, donorKey, donorDisplay));
+            }
+        }
+
+        foreach (var (targetKey, guestModName, donorKey, donorDisplay) in staleGuests)
+        {
+            RemoveGuestAppearance(targetKey, guestModName, donorKey, donorDisplay);
+        }
+
+        // The template flag exists to hide a donor-only NPC from the list while shares point
+        // at it; once the last share is gone it would orphan-hide the FormKey indefinitely.
+        foreach (var donorKey in staleGuests.Select(g => g.DonorKey).Distinct())
+        {
+            bool stillReferenced = _settings.GuestAppearances.Values
+                .Any(set => set.Any(g => g.NpcFormKey.Equals(donorKey)));
+            if (!stillReferenced)
+            {
+                _settings.CachedSkyPatcherTemplates.Remove(donorKey);
+            }
+        }
+
+        if (staleGuests.Count > 0)
+        {
+            Debug.WriteLine(
+                $"PruneStaleGuestAppearances: removed {staleGuests.Count} stale share(s) sourced from '{modName}'.");
+        }
+
+        return staleGuests.Count;
+    }
+
+    /// <summary>
+    /// Clears NPC selections made from <paramref name="modName"/> — all of them when the mod entry
+    /// itself goes away, or (via <paramref name="onlyFromSources"/>) just the ones whose face the
+    /// mod stopped providing. Either way the selection would otherwise dangle: the NPC still counts
+    /// as "chosen" in the menu and filters, but nothing can supply its appearance at patch time.
+    /// Shares SOURCED from the mod are swept separately by
+    /// <see cref="PruneStaleGuestAppearances"/> (which clears a selection pointing at a share as it
+    /// removes it), so what remains here is normally a direct pick of the mod's own face; the sweep
+    /// is by mod name either way, so ordering between the two is not load-bearing. The randomizer's
+    /// record of each cleared selection goes too, otherwise re-adding the mod later would let
+    /// <see cref="ClearRandomizedNpcs"/> mistake a fresh manual pick for a randomized one.
+    /// </summary>
+    /// <param name="modName">DisplayName of the mod entry being removed.</param>
+    /// <param name="onlyFromSources">When null, every selection naming the mod is cleared — the
+    /// whole entry is going away. When supplied, only selections whose SOURCE NPC is in the set are
+    /// cleared: the entry survives but no longer provides those faces (a folder was removed, say).
+    /// Matching on the source rather than the target is what keeps a still-valid share alive on an
+    /// NPC the mod itself stopped providing.</param>
+    /// <returns>Number of selections cleared.</returns>
+    public int ClearSelectionsFromMod(string modName, IReadOnlySet<FormKey>? onlyFromSources = null)
+    {
+        if (string.IsNullOrWhiteSpace(modName)) return 0;
+        if (onlyFromSources is { Count: 0 }) return 0;
+
+        // Snapshot first: ClearSelectedMod mutates SelectedAppearanceMods.
+        var toClear = _settings.SelectedAppearanceMods
+            .Where(kvp => kvp.Value.ModName.Equals(modName, StringComparison.OrdinalIgnoreCase))
+            .Where(kvp => onlyFromSources == null || onlyFromSources.Contains(kvp.Value.NpcFormKey))
+            .Select(kvp => kvp.Key)
+            .ToList();
+
+        foreach (var npcKey in toClear)
+        {
+            _consistencyProvider.ClearSelectedMod(npcKey);
+        }
+
+        foreach (var (npcKey, randomized) in _settings.RandomizedSelections.ToList())
+        {
+            if (randomized.ModName.Equals(modName, StringComparison.OrdinalIgnoreCase) &&
+                (onlyFromSources == null || onlyFromSources.Contains(randomized.NpcFormKey)))
+            {
+                _settings.RandomizedSelections.Remove(npcKey);
+            }
+        }
+
+        if (toClear.Count > 0)
+        {
+            Debug.WriteLine($"ClearSelectionsFromMod: cleared {toClear.Count} selection(s) made from '{modName}'.");
+        }
+
+        return toClear.Count;
+    }
+
+    /// <summary>
+    /// Counts what removing the mod entry named <paramref name="modName"/> would discard: NPC
+    /// selections made from it, and guest/shared appearances it sourced onto other NPCs. Read-only
+    /// — used to spell out the cost in the delete confirmation.
+    /// </summary>
+    public (int Selections, int Shares) CountNpcStateFromMod(string modName)
+    {
+        if (string.IsNullOrWhiteSpace(modName)) return (0, 0);
+
+        int selections = _settings.SelectedAppearanceMods
+            .Count(kvp => kvp.Value.ModName.Equals(modName, StringComparison.OrdinalIgnoreCase));
+
+        int shares = _settings.GuestAppearances
+            .Sum(kvp => kvp.Value.Count(g => g.ModName.Equals(modName, StringComparison.OrdinalIgnoreCase)));
+
+        return (selections, shares);
+    }
+
+    /// <summary>Adds a guest/shared appearance AND records it as randomizer-created, so a
+    /// later re-randomize can remove it (see <see cref="ClearRandomizedGuestAppearancesForNpc"/>).</summary>
+    private void AddRandomizedGuestAppearance(FormKey targetNpcKey, string guestModName, FormKey guestNpcKey, string guestDisplayStr)
+    {
+        AddGuestAppearance(targetNpcKey, guestModName, guestNpcKey, guestDisplayStr);
+        if (!_settings.RandomizedGuestAppearances.TryGetValue(targetNpcKey, out var set))
+        {
+            set = new HashSet<(string, FormKey, string)>();
+            _settings.RandomizedGuestAppearances[targetNpcKey] = set;
+        }
+        set.Add((guestModName, guestNpcKey, guestDisplayStr));
+    }
+
+    /// <summary>Removes every randomizer-created guest appearance for the given NPC (manual/
+    /// curated shares are left untouched). Used at re-randomize time to avoid spamming options.</summary>
+    private void ClearRandomizedGuestAppearancesForNpc(FormKey targetNpcKey)
+    {
+        if (!_settings.RandomizedGuestAppearances.TryGetValue(targetNpcKey, out var set)) return;
+        foreach (var (modName, sourceKey, display) in set.ToList())
+        {
+            RemoveGuestAppearance(targetNpcKey, modName, sourceKey, display);
+        }
+        _settings.RandomizedGuestAppearances.Remove(targetNpcKey);
+    }
+
+    /// <summary>
+    /// "Clear Randomized NPCs" (Randomize dialog): deselects every NPC whose current selection
+    /// was set by randomization (own face OR shared), and removes the shared-appearance options
+    /// randomization added. NPCs the user re-selected manually since are left alone (their current
+    /// selection no longer matches what randomize assigned); manual/curated shares are preserved.
+    /// </summary>
+    private void ClearRandomizedNpcs()
+    {
+        // Only deselect NPCs whose CURRENT selection still matches what randomize assigned.
+        var toDeselect = _settings.RandomizedSelections
+            .Where(kvp =>
+            {
+                var current = _consistencyProvider.GetSelectedMod(kvp.Key);
+                return current.ModName == kvp.Value.ModName &&
+                       current.SourceNpcFormKey.Equals(kvp.Value.NpcFormKey);
+            })
+            .Select(kvp => kvp.Key)
+            .ToList();
+
+        bool hasRandomizedOptions = _settings.RandomizedGuestAppearances.Count > 0;
+
+        if (toDeselect.Count == 0 && !hasRandomizedOptions)
+        {
+            ScrollableMessageBox.Show(TranslationServiceProvider.GetService()?.GetString("msg_noRandomizedAppearancesToClear") ?? "There are no randomized appearances to clear.", "Nothing to Clear");
+            return;
+        }
+
+        var confirm = new StringBuilder();
+        confirm.AppendLine("This will:");
+        confirm.AppendLine($"• Deselect {toDeselect.Count} NPC(s) whose appearance was set by randomization");
+        confirm.AppendLine("• Remove the shared appearance options that randomization added");
+        confirm.AppendLine();
+        confirm.AppendLine("Your manually-chosen selections and manually-shared faces are not affected.");
+        confirm.AppendLine();
+        confirm.Append("Continue?");
+
+        if (!ScrollableMessageBox.Confirm(confirm.ToString(), "Clear Randomized NPCs", MessageBoxImage.Warning))
+        {
+            return;
+        }
+
+        // Deselect the still-randomized NPCs, then forget all tracked randomized selections.
+        foreach (var key in toDeselect)
+        {
+            _consistencyProvider.ClearSelectedMod(key);
+        }
+        _settings.RandomizedSelections.Clear();
+
+        // Remove every randomized shared option (also clears any that were still selected).
+        foreach (var npcKey in _settings.RandomizedGuestAppearances.Keys.ToList())
+        {
+            ClearRandomizedGuestAppearancesForNpc(npcKey);
+        }
+
+        _lazyVmSettings.Value?.RequestThrottledSave();
+
+        ScrollableMessageBox.Show($"Cleared randomized appearances for {toDeselect.Count} NPC(s).", "Clear Complete");
+    }
+
+    public void RefreshCurrentNpcAppearanceSources()
+    {
+        Debug.WriteLine("VM_NpcSelectionBar: Refreshing appearance sources after drop...");
+        var currentNpc = this.SelectedNpc;
+        if (currentNpc != null)
+        {
+            this.SelectedNpc = null;
+            this.SelectedNpc = currentNpc;
+        }
+    }
+
+    public void HideSelectedMod(VM_NpcsMenuMugshot referenceMod)
+    {
+        if (referenceMod == null) return;
+        referenceMod.IsSetHidden = true;
+
+        if (SelectedNpc != null)
+        {
+            if (!_hiddenModsPerNpc.ContainsKey(SelectedNpc.NpcFormKey))
+            {
+                _hiddenModsPerNpc[SelectedNpc.NpcFormKey] = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            _hiddenModsPerNpc[SelectedNpc.NpcFormKey].Add(referenceMod.ModName);
+        }
+
+        ToggleModVisibility();
+    }
+
+    public void UnhideSelectedMod(VM_NpcsMenuMugshot referenceMod)
+    {
+        if (referenceMod == null) return;
+        referenceMod.IsSetHidden = false;
+        if (SelectedNpc != null && _hiddenModsPerNpc.TryGetValue(SelectedNpc.NpcFormKey, out var hiddenSet))
+        {
+            if (hiddenSet.Remove(referenceMod.ModName))
+            {
+                if (!hiddenSet.Any())
+                {
+                    _hiddenModsPerNpc.Remove(SelectedNpc.NpcFormKey);
+                }
+            }
+        }
+
+        ToggleModVisibility();
+    }
+    
+    /// <summary>
+    /// Core validation logic for template chains. Returns validation result, failure reason,
+    /// the complete template chain, and NPCs that only exist in the link cache.
+    /// <para><paramref name="requireLoadOrderResolvable"/> (randomizer): NPC2 never adds new
+    /// NPCs to the world, so a forwarded template link must point at an NPC that exists in the
+    /// actual game load order. Manual/bulk selection tolerates a template that only exists in
+    /// the mod's own (possibly inactive) plugins on the assumption that patch-time merge-in
+    /// self-contains it; a template that resolves nowhere in the load order would otherwise
+    /// leave the output plugin mastered to a plugin the game doesn't load (fatal at save).</para>
+    /// </summary>
+    private (bool isValid, string failureReason, bool wasValidated, List<(FormKey formKey, string displayName)> templateChain, List<FormKey> fromLinkCacheOnly)
+        ValidateTemplateChain(FormKey npcFormKey, VM_ModSetting modSetting, bool requireLoadOrderResolvable = false)
+    {
+        var emptyChain = new List<(FormKey, string)>();
+        var emptyLinkCache = new List<FormKey>();
+        
+        // Check if this is a mugshot-only mod (no actual game data)
+        if (!modSetting.CorrespondingFolderPaths.Any() && !modSetting.IsAutoGenerated)
+        {
+            var npcName = AllNpcs.FirstOrDefault(n => n.NpcFormKey.Equals(npcFormKey))?.DisplayName ?? npcFormKey.ToString();
+            return (true, string.Empty, false, emptyChain, emptyLinkCache);
+        }
+
+        var targetNpcName = AllNpcs.FirstOrDefault(n => n.NpcFormKey.Equals(npcFormKey))?.DisplayName ?? npcFormKey.ToString();
+
+        // Trace the template chain
+        int maxCycleCount = 50;
+        List<(FormKey formKey, string displayName)> templateChain = new();
+        List<FormKey> fromLinkCacheOnly = new();
+        
+        Dictionary<ModKey, ISkyrimModGetter> plugins = new();
+        foreach (var modKey in modSetting.CorrespondingModKeys)
+        {
+            if (_lazyModsVm.Value.GetPluginProvider().TryGetPlugin(modKey, 
+                modSetting.CorrespondingFolderPaths.ToHashSet(), out var plugin) && plugin != null)
+            {
+                plugins.Add(modKey, plugin);
+            }
+        }
+
+        int cycleCount = 0;
+        ISkyrimModGetter? sourcePlugin = null;
+        INpcGetter? currentNpcGetter = null;
+        FormKey currentFormKey = npcFormKey;
+
+        while (cycleCount < maxCycleCount)
+        {
+            var availablePlugins = modSetting.AvailablePluginsForNpcs.TryGetValue(currentFormKey);
+            
+            if (availablePlugins != null && availablePlugins.Any())
+            {
+                if (availablePlugins.Count == 1)
+                {
+                    if (!plugins.TryGetValue(availablePlugins.First(), out sourcePlugin))
+                    {
+                        var chainStr = string.Join(" -> ", templateChain.Select(x => $"{x.displayName} ({x.formKey})"));
+                        return (false, $"{targetNpcName}: Could not find plugin {availablePlugins.First()}" +
+                                      (templateChain.Any() ? $"\n  Template chain: {chainStr} -> {currentFormKey}" : ""), true,
+                                      templateChain, fromLinkCacheOnly);
+                    }
+                }
+                else if (modSetting.NpcPluginDisambiguation.TryGetValue(currentFormKey, out var disambiguation))
+                {
+                    if (!plugins.TryGetValue(disambiguation, out sourcePlugin))
+                    {
+                        var chainStr = string.Join(" -> ", templateChain.Select(x => $"{x.displayName} ({x.formKey})"));
+                        return (false, $"{targetNpcName}: Could not find disambiguated plugin {disambiguation}" +
+                                      (templateChain.Any() ? $"\n  Template chain: {chainStr} -> {currentFormKey}" : ""), true,
+                                      templateChain, fromLinkCacheOnly);
+                    }
+                }
+                else
+                {
+                    var chainStr = string.Join(" -> ", templateChain.Select(x => $"{x.displayName} ({x.formKey})"));
+                    return (false, $"{targetNpcName}: Could not determine source plugin (multiple options)" +
+                                  (templateChain.Any() ? $"\n  Template chain: {chainStr} -> {currentFormKey}" : ""), true,
+                                  templateChain, fromLinkCacheOnly);
+                }
+            }
+            else if (_environmentStateProvider.LinkCache.TryResolve<INpcGetter>(currentFormKey, out currentNpcGetter))
+            {
+                // NPC exists in load order but not in this mod's plugins
+                fromLinkCacheOnly.Add(currentFormKey);
+                sourcePlugin = null;
+            }
+            else if (_environmentStateProvider.LinkCache.TryResolve<ILeveledNpcGetter>(currentFormKey, out var leveledNpcGetter))
+            {
+                templateChain.Add((leveledNpcGetter.FormKey, Auxilliary.GetLogString(leveledNpcGetter, _settings.LocalizationLanguage, true)));
+                var chainStr = string.Join(" -> ", templateChain.Select(x => $"{x.displayName} ({x.formKey})"));
+                return (false, $"{targetNpcName}: Template chain ends with Leveled NPC\n  Template chain: {chainStr}", true,
+                        templateChain, fromLinkCacheOnly);
+            }
+            else
+            {
+                var chainStr = string.Join(" -> ", templateChain.Select(x => $"{x.displayName} ({x.formKey})"));
+                return (false, $"{targetNpcName}: Template {currentFormKey} not found in load order" +
+                              (templateChain.Any() ? $"\n  Template chain: {chainStr} -> {currentFormKey}" : ""), true,
+                              templateChain, fromLinkCacheOnly);
+            }
+
+            if (sourcePlugin != null || currentNpcGetter != null)
+            {
+                if (sourcePlugin != null)
+                {
+                    currentNpcGetter = sourcePlugin.Npcs.FirstOrDefault(x => x.FormKey.Equals(currentFormKey));
+                    
+                    if (currentNpcGetter == null)
+                    {
+                        var chainStr = string.Join(" -> ", templateChain.Select(x => $"{x.displayName} ({x.formKey})"));
+                        return (false, $"{targetNpcName}: Template {currentFormKey} not found in plugin {sourcePlugin.ModKey.FileName}" +
+                                      (templateChain.Any() ? $"\n  Template chain: {chainStr} -> {currentFormKey}" : ""), true,
+                                      templateChain, fromLinkCacheOnly);
+                    }
+                }
+
+                var newEntry = (currentNpcGetter.FormKey, Auxilliary.GetLogString(currentNpcGetter, _settings.LocalizationLanguage, true));
+                templateChain.Add(newEntry);
+
+                if (Auxilliary.HasTraitsFlag(currentNpcGetter))
+                {
+                    if (currentNpcGetter.Template == null || currentNpcGetter.Template.IsNull)
+                    {
+                        var chainStr = string.Join(" -> ", templateChain.Select(x => $"{x.displayName} ({x.formKey})"));
+                        return (false, $"{targetNpcName}: Template flag set but no template specified\n  Template chain: {chainStr}", true,
+                                templateChain, fromLinkCacheOnly);
+                    }
+                    else
+                    {
+                        currentFormKey = currentNpcGetter.Template.FormKey;
+
+                        // Leveled-NPC links are allowed through here so the loop's dedicated
+                        // check can report them with the accurate "ends with Leveled NPC" reason.
+                        if (requireLoadOrderResolvable &&
+                            !_environmentStateProvider.LinkCache.TryResolve<INpcGetter>(currentFormKey, out _) &&
+                            !_environmentStateProvider.LinkCache.TryResolve<ILeveledNpcGetter>(currentFormKey, out _))
+                        {
+                            var chainStr = string.Join(" -> ", templateChain.Select(x => $"{x.displayName} ({x.formKey})"));
+                            return (false, $"{targetNpcName}: Template {currentFormKey} is not in the game load order (NPC2 cannot add new NPCs to the world)" +
+                                          $"\n  Template chain: {chainStr} -> {currentFormKey}", true,
+                                    templateChain, fromLinkCacheOnly);
+                        }
+                    }
+                }
+                else
+                {
+                    break; // Valid end of chain
+                }
+            }
+
+            cycleCount++;
+        }
+
+        if (cycleCount >= maxCycleCount)
+        {
+            var chainStr = string.Join(" -> ", templateChain.Select(x => $"{x.displayName} ({x.formKey})"));
+            return (false, $"{targetNpcName}: Template chain exceeded maximum depth of {maxCycleCount}\n  Template chain: {chainStr}", 
+                    true, templateChain, fromLinkCacheOnly);
+        }
+
+        return (true, string.Empty, true, templateChain, fromLinkCacheOnly);
+    }
+
+    /// <summary>
+    /// Validates a selection without applying any changes. Used for checking existing selections.
+    /// Returns true if valid, false if invalid along with a reason.
+    /// </summary>
+    public (bool isValid, string failureReason) ValidateSelection(FormKey npcFormKey, VM_ModSetting modSetting)
+    {
+        var (isValid, reason, wasValidated, _, _) = ValidateTemplateChain(npcFormKey, modSetting);
+    
+        if (isValid && !wasValidated)
+        {
+            return (true, "Selection allowed (mugshot-only mod, validation skipped)");
+        }
+    
+        return (isValid, reason);
+    }
+
+    /// <summary>
+    /// Validates and handles template chains for batch selection operations.
+    /// Automatically applies selections to template chains without user prompts.
+    /// Returns a tuple indicating success and detailed failure reason if unsuccessful.
+    /// <para><paramref name="enforceRandomizerRules"/> applies the randomizer's stricter
+    /// contract: every template reference must resolve in the actual game load order; a
+    /// reference that already has a DIFFERENT mod selected fails the candidate instead of
+    /// being silently overwritten; and a reference this mod does not itself provide must
+    /// fail too, since the resulting appearance would depend on whatever gets selected for
+    /// that reference rather than on the candidate mod.</para>
+    /// <para><paramref name="requireLoadOrderResolvable"/> applies ONLY the load-order chain
+    /// requirement (the missing-master save-crash guard) while keeping this method's
+    /// overwrite/propagation semantics — the right level for bulk-select, where re-assigning
+    /// template references to the chosen mod is the user's explicit intent. Implied by
+    /// <paramref name="enforceRandomizerRules"/>.</para>
+    /// <para><paramref name="decidedNpcs"/> (randomizer) names the NPCs the run has already
+    /// settled. An unselected reference in that set was deliberately left unassigned — it is not
+    /// an unclaimed NPC waiting to be propagated to, so a candidate needing it fails instead.</para>
+    /// </summary>
+    private (bool isValid, string failureReason, bool wasValidated, List<FormKey> affectedNpcs) ValidateAndHandleTemplatesForBatch(
+        FormKey npcFormKey,
+        VM_ModSetting modSetting,
+        bool enforceRandomizerRules = false,
+        bool requireLoadOrderResolvable = false,
+        IReadOnlySet<FormKey>? decidedNpcs = null)
+    {
+        var (isValid, failureReason, wasValidated, templateChain, fromLinkCacheOnly) =
+            ValidateTemplateChain(npcFormKey, modSetting,
+                requireLoadOrderResolvable: requireLoadOrderResolvable || enforceRandomizerRules);
+
+        var affectedNpcs = new List<FormKey> { npcFormKey };
+
+        if (!isValid)
+        {
+            return (false, failureReason, wasValidated, affectedNpcs);
+        }
+
+        if (enforceRandomizerRules && templateChain.Count > 1)
+        {
+            for (int i = 1; i < templateChain.Count; i++)
+            {
+                var (refKey, refName) = templateChain[i];
+                var (selectedModName, _) = _consistencyProvider.GetSelectedMod(refKey);
+
+                if (!string.IsNullOrEmpty(selectedModName))
+                {
+                    if (!string.Equals(selectedModName, modSetting.DisplayName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return (false,
+                            $"template reference {refName} already has '{selectedModName}' selected",
+                            wasValidated, affectedNpcs);
+                    }
+                }
+                else if (decidedNpcs != null && decidedNpcs.Contains(refKey))
+                {
+                    return (false,
+                        $"template reference {refName} was left unassigned by this run",
+                        wasValidated, affectedNpcs);
+                }
+                else if (fromLinkCacheOnly.Contains(refKey))
+                {
+                    return (false,
+                        $"'{modSetting.DisplayName}' does not provide an appearance for template reference {refName}, so the templated look cannot be pinned to this mod",
+                        wasValidated, affectedNpcs);
+                }
+            }
+        }
+
+        // If we got here and have a template chain, automatically apply selections for all templates
+        if (templateChain.Count > 1) // More than just the original NPC
+        {
+            Debug.WriteLine($"Batch operation: Applying {modSetting.DisplayName} to template chain for NPC {npcFormKey}");
+            
+            // Set selections for all NPCs in the chain (except the first, which caller will handle)
+            for (int i = 1; i < templateChain.Count; i++)
+            {
+                var templateFormKey = templateChain[i].formKey;
+                
+                // Skip if this template was only found in link cache (no FaceGen)
+                if (fromLinkCacheOnly.Contains(templateFormKey))
+                {
+                    Debug.WriteLine($"  - Template {templateChain[i].displayName} will be merged in from source plugin");
+                    continue;
+                }
+
+                // Apply the selection
+                _consistencyProvider.SetSelectedMod(templateFormKey, modSetting.DisplayName, templateFormKey);
+                affectedNpcs.Add(templateFormKey);
+                
+                Debug.WriteLine($"  - Also set template: {templateChain[i].displayName}");
+            }
+        }
+
+        return (true, string.Empty, wasValidated, affectedNpcs);
+    }
+
+    /// <summary>
+    /// Mirrors Validator.cs's master-availability check so randomize doesn't pick
+    /// candidates that will later fail screening. A master is available if it's in
+    /// the load order or bundled inside the candidate's own ModSetting.
+    /// </summary>
+    private bool CandidateMastersAreAvailable(
+        FormKey npcFormKey,
+        VM_ModSetting candidate,
+        HashSet<ModKey> loadOrderKeys,
+        Dictionary<ModKey, HashSet<ModKey>> masterCache,
+        out string failureReason)
+    {
+        failureReason = string.Empty;
+
+        // Replicates Validator.cs's source-plugin resolution logic.
+        ModKey? sourcePlugin = null;
+        if (candidate.IsFaceGenOnlyEntry)
+        {
+            sourcePlugin = npcFormKey.ModKey;
+        }
+        else if (candidate.NpcPluginDisambiguation != null &&
+                 candidate.NpcPluginDisambiguation.TryGetValue(npcFormKey, out var disambiguatedPlugin))
+        {
+            sourcePlugin = disambiguatedPlugin;
+        }
+        else if (candidate.AvailablePluginsForNpcs != null &&
+                 candidate.AvailablePluginsForNpcs.TryGetValue(npcFormKey, out var availablePlugins) &&
+                 availablePlugins.Any())
+        {
+            sourcePlugin = availablePlugins.FirstOrDefault();
+        }
+
+        if (!sourcePlugin.HasValue || sourcePlugin.Value.IsNull)
+        {
+            return true; // Nothing plugin-backed to check.
+        }
+
+        if (!masterCache.TryGetValue(sourcePlugin.Value, out var masters))
+        {
+            masters = _pluginProvider.GetMasterPlugins(sourcePlugin.Value, candidate.CorrespondingFolderPaths);
+            masterCache[sourcePlugin.Value] = masters;
+        }
+
+        foreach (var master in masters)
+        {
+            if (!loadOrderKeys.Contains(master) && !candidate.CorrespondingModKeys.Contains(master))
+            {
+                failureReason = $"plugin '{sourcePlugin.Value.FileName}' is missing required master '{master.FileName}'";
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // Safety valve for CandidateAppearanceDependenciesAreResolvable: an appearance
+    // record graph bigger than this is assumed fine rather than stalling the UI.
+    private const int MaxScreenedDependencyRecords = 2000;
+
+    /// <summary>
+    /// Screens a candidate appearance the way the patcher will actually consume it: loads the
+    /// donor NPC record from the candidate mod's own plugins and walks its FormLink graph,
+    /// requiring every reference to either resolve in the game load order (it stays a plain
+    /// reference) or resolve to a record in the mod's own plugins (merge-in will self-contain
+    /// it, so its own references are walked too). A reference that resolves in neither place —
+    /// e.g. a head part or template defined in a bundled master that isn't actually loadable —
+    /// would survive patching as a dangling FormKey and make the output plugin unsaveable
+    /// (missing-master error at write time), so the candidate is rejected up front.
+    /// Uses the same RecordHandler lookup the merge-in itself uses, and honours the same
+    /// engine-hardcoded-record exemption (<c>Implicits.RecordFormKeys</c>) those walkers do.
+    /// </summary>
+    private bool CandidateAppearanceDependenciesAreResolvable(
+        FormKey donorNpcFormKey,
+        VM_ModSetting? candidate,
+        out string failureReason)
+    {
+        failureReason = string.Empty;
+        if (candidate == null) return true;
+
+        // FaceGen-only appearances (whole-mod FaceGen entries, or record-less FaceGen NPCs
+        // inside a plugin-backed mod) never merge dependency records — the NPC's links keep
+        // pointing at its original plugin. Their only patch-time requirement is that the
+        // donor's origin record resolves from the load order (the patcher skips the NPC
+        // otherwise), so check exactly that. Mugshot-only mods have no plugins to validate
+        // against.
+        if (candidate.IsFaceGenOnlyEntry || candidate.FaceGenOnlyNpcFormKeys.Contains(donorNpcFormKey))
+        {
+            var faceGenLinkCache = _environmentStateProvider.LinkCache;
+            if (faceGenLinkCache != null &&
+                !faceGenLinkCache.TryResolve<INpcGetter>(donorNpcFormKey, out _, ResolveTarget.Origin))
+            {
+                failureReason =
+                    $"FaceGen-only appearance: the NPC record {donorNpcFormKey} cannot be resolved from the load order (its defining plugin is missing), so there is no plugin record to pair with the FaceGen files";
+                return false;
+            }
+            return true;
+        }
+        if (!candidate.CorrespondingFolderPaths.Any() && !candidate.IsAutoGenerated) return true;
+
+        var linkCache = _environmentStateProvider.LinkCache;
+        if (linkCache == null) return true;
+
+        var modKeyList = candidate.CorrespondingModKeys;
+        var modKeySet = modKeyList.ToHashSet();
+        var folderPaths = candidate.CorrespondingFolderPaths.ToHashSet();
+
+        var donorLink = new FormLink<INpcGetter>(donorNpcFormKey);
+        if (!_recordHandler.TryGetRecordFromMods(donorLink, modKeyList, folderPaths,
+                RecordHandler.RecordLookupFallBack.None, out var donorRecord) || donorRecord == null)
+        {
+            failureReason =
+                $"could not load NPC record {donorNpcFormKey} from '{candidate.DisplayName}'s plugins to validate its dependencies";
+            return false;
+        }
+
+        var visited = new HashSet<FormKey> { donorRecord.FormKey };
+        var queue = new Queue<IMajorRecordGetter>();
+        queue.Enqueue(donorRecord);
+
+        // Engine-hardcoded records (PlayerRef 000014, the implicit globals/actor values, ...) live in
+        // the game executable, not in Skyrim.esm, so the link cache can never resolve them — but their
+        // ModKey is a base master that the output plugin gets anyway, so they cannot dangle. Mutagen's
+        // own merge walkers skip this same set (PatcherExtensions.AddAllLinks), so screening must too;
+        // otherwise a scripted NPC whose VMAD points at PlayerRef (Miraak, DLC2MiraakSoulSteal) is
+        // rejected for a missing master that would never have happened.
+        var implicitRecords = Implicits.Get(_environmentStateProvider.SkyrimVersion.ToGameRelease())
+            .RecordFormKeys;
+
+        while (queue.Count > 0)
+        {
+            var rec = queue.Dequeue();
+            foreach (var link in rec.EnumerateFormLinks())
+            {
+                if (link.FormKey.IsNull || !visited.Add(link.FormKey)) continue;
+                if (visited.Count > MaxScreenedDependencyRecords) return true;
+                if (implicitRecords.Contains(link.FormKey)) continue;
+
+                // Resolvable in the load order: patching leaves the reference as-is.
+                if (linkCache.TryResolve(link, out _)) continue;
+
+                // Not in the load order: patching must merge it in from the mod's own plugins.
+                bool mergeable = modKeySet.Contains(link.FormKey.ModKey) || candidate.HandleInjectedRecords;
+                if (mergeable &&
+                    _recordHandler.TryGetRecordFromMods(link, modKeyList, folderPaths,
+                        RecordHandler.RecordLookupFallBack.None, out var mergeSource) &&
+                    mergeSource != null)
+                {
+                    queue.Enqueue(mergeSource);
+                    continue;
+                }
+
+                failureReason =
+                    $"its record from '{candidate.DisplayName}' references {link.FormKey} ({link.Type.Name}), " +
+                    "which resolves neither in the game load order nor in the mod's own plugins — " +
+                    "patching would produce a plugin with a missing master";
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // Show the splash screen / progress bar once a bulk-select operation has more
+    // than this many NPCs queued for template-chain validation.
+    private const int BulkSelectionSplashThreshold = 200;
+    // How often (in NPCs processed) to yield the dispatcher so the splash can repaint.
+    private const int BulkSelectionYieldInterval = 25;
+
+    public async Task SelectAllFromMod(VM_NpcsMenuMugshot referenceMod, bool onlyAvailable)
+    {
+        if (referenceMod == null || string.IsNullOrWhiteSpace(referenceMod.ModName))
+        {
+            Debug.WriteLine("SelectAllFromMod: referenceMod or its ModName is null/empty.");
+            return;
+        }
+
+        string targetModName = referenceMod.ModName;
+
+        // First, find all NPCs for whom this mod is a valid "native" appearance source.
+        var applicableNpcs = AllNpcs
+            .Where(npc => npc != null && IsModAnAppearanceSourceForNpc(npc, referenceMod) &&
+                          (!onlyAvailable || !_consistencyProvider.DoesNpcHaveSelection(npc.NpcFormKey)))
+            .ToList();
+
+        if (!applicableNpcs.Any())
+        {
+            ScrollableMessageBox.Show($"The mod '{targetModName}' is not a direct appearance source for any known NPCs.", "No Applicable NPCs");
+            return;
+        }
+
+        // Add a confirmation dialog for this potentially large-scale change.
+        var confirmationMessage =
+            $"This will set the appearance for {applicableNpcs.Count} NPC(s) to '{targetModName}'.\n\n";
+
+        if (referenceMod.AssociatedModSetting == null ||
+            !referenceMod.AssociatedModSetting.CorrespondingFolderPaths.Any())
+        {
+            confirmationMessage += $"Since only mugshots for '{referenceMod.ModName}' are installed, without the actual mod, validation can't be performed. If the mod contains templated NPCs, their appearances may get bugged without validation. It is safer to install the mod and then batch-apply it so that validation can be performed. Continue anyway?" + "\n\n";
+        }
+        confirmationMessage += "Are you sure you want to proceed?";
+
+        if (!ScrollableMessageBox.Confirm(confirmationMessage, "Confirm Bulk Selection"))
+        {
+            return;
+        }
+
+        // Track successes and failures
+        int successCount = 0;
+        int totalAffectedCount = 0; // Including templates
+        var validationFailures = new List<string>();
+        var processedNpcs = new HashSet<FormKey>(); // Avoid double-processing templates
+
+        VM_SplashScreen? splash = null;
+        if (applicableNpcs.Count > BulkSelectionSplashThreshold)
+        {
+            splash = VM_SplashScreen.InitializeAndShow(App.ProgramVersion, isModal: true);
+            splash.UpdateStep("Analyzing Selections", applicableNpcs.Count);
+            // Give the splash window a chance to render before we start the synchronous work.
+            await Task.Yield();
+        }
+
+        try
+        {
+            int processedCount = 0;
+            // Process each applicable NPC
+            foreach (var npcVM in applicableNpcs)
+            {
+                if (!processedNpcs.Contains(npcVM.NpcFormKey))
+                {
+                    // Missing-master crash guards, mirroring what patching will do with this
+                    // record: (1) its dependency graph must resolve in the load order or the
+                    // mod's own plugins; (2) a templated record's chain must stay inside the
+                    // load order (NPC2 never adds new NPCs to the world). Failures skip the
+                    // NPC and are reported instead of poisoning the output plugin at save.
+                    bool isValid;
+                    string failureReason;
+                    List<FormKey> affectedNpcs = new() { npcVM.NpcFormKey };
+                    if (!CandidateAppearanceDependenciesAreResolvable(npcVM.NpcFormKey,
+                            referenceMod.AssociatedModSetting, out var dependencyFailure))
+                    {
+                        isValid = false;
+                        failureReason = $"{npcVM.DisplayName}: {dependencyFailure}";
+                    }
+                    else
+                    {
+                        (isValid, failureReason, _, affectedNpcs) = ValidateAndHandleTemplatesForBatch(
+                            npcVM.NpcFormKey,
+                            referenceMod.AssociatedModSetting,
+                            requireLoadOrderResolvable: true);
+                    }
+
+                    if (!isValid)
+                    {
+                        validationFailures.Add(failureReason);
+                    }
+                    else
+                    {
+                        // Set the selection for the primary NPC (templates were already set by the helper)
+                        _consistencyProvider.SetSelectedMod(npcVM.NpcFormKey, targetModName, npcVM.NpcFormKey);
+                        successCount++;
+                        totalAffectedCount += affectedNpcs.Count;
+
+                        // Mark all affected NPCs (including templates) as processed
+                        foreach (var affectedKey in affectedNpcs)
+                        {
+                            processedNpcs.Add(affectedKey);
+                        }
+                    }
+                }
+
+                splash?.IncrementProgress(string.Empty);
+                processedCount++;
+                if (splash != null && processedCount % BulkSelectionYieldInterval == 0)
+                {
+                    // Let the dispatcher pump pending splash/throttled-progress updates.
+                    await Task.Yield();
+                }
+            }
+        }
+        finally
+        {
+            if (splash != null)
+            {
+                await splash.CloseSplashScreenAsync();
+            }
+        }
+
+        // Report results to user
+        var resultMessage = new StringBuilder();
+        if (totalAffectedCount > successCount)
+        {
+            resultMessage.AppendLine($"Successfully set '{targetModName}' for {successCount} NPC(s) " +
+                                    $"(plus {totalAffectedCount - successCount} template(s)).");
+        }
+        else
+        {
+            resultMessage.AppendLine($"Successfully set '{targetModName}' for {successCount} NPC(s).");
+        }
+        
+        if (validationFailures.Any())
+        {
+            resultMessage.AppendLine();
+            resultMessage.AppendLine($"{validationFailures.Count} NPC(s) were skipped due to validation issues:");
+            resultMessage.AppendLine();
+            foreach (var failure in validationFailures)
+            {
+                resultMessage.AppendLine($"• {failure}");
+            }
+            
+            ScrollableMessageBox.ShowWarning(resultMessage.ToString(), TranslationServiceProvider.GetService()?.GetString("bulkSelectionCompleteWithWarnings") ?? "Bulk Selection Complete with Warnings");
+        }
+        else
+        {
+            Debug.WriteLine($"Finished processing. Set '{targetModName}' for {successCount} NPCs (total including templates: {totalAffectedCount}).");
+        }
+    }
+    
+    public async Task SelectVisibleFromMod(VM_NpcsMenuMugshot referenceMod, bool onlyAvailable)
+    {
+        if (referenceMod == null || string.IsNullOrWhiteSpace(referenceMod.ModName))
+        {
+            Debug.WriteLine("SelectVisibleFromMod: referenceMod or its ModName is null/empty.");
+            return;
+        }
+
+        string targetModName = referenceMod.ModName;
+
+        // The query now uses the 'onlyAvailable' parameter to filter NPCs
+        var applicableNpcs = FilteredNpcs
+            .Where(npc => npc != null &&
+                          IsModAnAppearanceSourceForNpc(npc, referenceMod) &&
+                          (!onlyAvailable || !_consistencyProvider.DoesNpcHaveSelection(npc.NpcFormKey)))
+            .ToList();
+
+        if (!applicableNpcs.Any())
+        {
+            string message = onlyAvailable
+                ? $"The mod '{targetModName}' is not an available appearance source for any of the currently visible NPCs."
+                : $"The mod '{targetModName}' is not a valid appearance source for any of the currently visible NPCs.";
+            ScrollableMessageBox.Show(message, "No Applicable NPCs");
+            return;
+        }
+
+        // The confirmation message is customized based on the action
+        var confirmationMessage =
+            $"This will set the appearance for {applicableNpcs.Count} NPC(s) to '{targetModName}'.\n\n";
+
+        if (referenceMod.AssociatedModSetting == null ||
+            !referenceMod.AssociatedModSetting.CorrespondingFolderPaths.Any())
+        {
+            confirmationMessage += $"Since only mugshots for '{referenceMod.ModName}' are installed, without the actual mod, validation can't be performed. If the mod contains templated NPCs, their appearances may get bugged without validation. It is safer to install the mod and then batch-apply it so that validation can be performed. Continue anyway?" + "\n\n";
+        }
+        confirmationMessage += "Are you sure you want to proceed?";
+
+        if (!ScrollableMessageBox.Confirm(confirmationMessage, "Confirm Bulk Selection"))
+        {
+            return;
+        }
+
+        // Track successes and failures
+        int successCount = 0;
+        int totalAffectedCount = 0; // Including templates
+        var validationFailures = new List<string>();
+        var processedNpcs = new HashSet<FormKey>(); // Avoid double-processing templates
+
+        VM_SplashScreen? splash = null;
+        if (applicableNpcs.Count > BulkSelectionSplashThreshold)
+        {
+            splash = VM_SplashScreen.InitializeAndShow(App.ProgramVersion, isModal: true);
+            splash.UpdateStep("Analyzing Selections", applicableNpcs.Count);
+            await Task.Yield();
+        }
+
+        try
+        {
+            int processedCount = 0;
+            foreach (var npcVM in applicableNpcs)
+            {
+                if (!processedNpcs.Contains(npcVM.NpcFormKey))
+                {
+                    // Missing-master crash guards, mirroring what patching will do with this
+                    // record: (1) its dependency graph must resolve in the load order or the
+                    // mod's own plugins; (2) a templated record's chain must stay inside the
+                    // load order (NPC2 never adds new NPCs to the world). Failures skip the
+                    // NPC and are reported instead of poisoning the output plugin at save.
+                    bool isValid;
+                    string failureReason;
+                    List<FormKey> affectedNpcs = new() { npcVM.NpcFormKey };
+                    if (!CandidateAppearanceDependenciesAreResolvable(npcVM.NpcFormKey,
+                            referenceMod.AssociatedModSetting, out var dependencyFailure))
+                    {
+                        isValid = false;
+                        failureReason = $"{npcVM.DisplayName}: {dependencyFailure}";
+                    }
+                    else
+                    {
+                        (isValid, failureReason, _, affectedNpcs) = ValidateAndHandleTemplatesForBatch(
+                            npcVM.NpcFormKey,
+                            referenceMod.AssociatedModSetting,
+                            requireLoadOrderResolvable: true);
+                    }
+
+                    if (!isValid)
+                    {
+                        validationFailures.Add(failureReason);
+                    }
+                    else
+                    {
+                        // Set the selection for the primary NPC (templates were already set by the helper)
+                        _consistencyProvider.SetSelectedMod(npcVM.NpcFormKey, targetModName, npcVM.NpcFormKey);
+                        successCount++;
+                        totalAffectedCount += affectedNpcs.Count;
+
+                        // Mark all affected NPCs (including templates) as processed
+                        foreach (var affectedKey in affectedNpcs)
+                        {
+                            processedNpcs.Add(affectedKey);
+                        }
+                    }
+                }
+
+                splash?.IncrementProgress(string.Empty);
+                processedCount++;
+                if (splash != null && processedCount % BulkSelectionYieldInterval == 0)
+                {
+                    await Task.Yield();
+                }
+            }
+        }
+        finally
+        {
+            if (splash != null)
+            {
+                await splash.CloseSplashScreenAsync();
+            }
+        }
+
+        // Report results to user
+        var resultMessage = new StringBuilder();
+        if (totalAffectedCount > successCount)
+        {
+            resultMessage.AppendLine($"Successfully set '{targetModName}' for {successCount} visible NPC(s) " +
+                                    $"(plus {totalAffectedCount - successCount} template(s)).");
+        }
+        else
+        {
+            resultMessage.AppendLine($"Successfully set '{targetModName}' for {successCount} visible NPC(s).");
+        }
+        
+        if (validationFailures.Any())
+        {
+            resultMessage.AppendLine();
+            resultMessage.AppendLine($"{validationFailures.Count} NPC(s) were skipped due to validation issues:");
+            resultMessage.AppendLine();
+            foreach (var failure in validationFailures)
+            {
+                resultMessage.AppendLine($"• {failure}");
+            }
+            
+            ScrollableMessageBox.ShowWarning(resultMessage.ToString(), TranslationServiceProvider.GetService()?.GetString("bulkSelectionCompleteWithWarnings") ?? "Bulk Selection Complete with Warnings");
+        }
+        else
+        {
+            Debug.WriteLine($"Finished processing. Set '{targetModName}' for {successCount} visible NPCs (total including templates: {totalAffectedCount}). (onlyAvailable={onlyAvailable})");
+        }
+    }
+    
+    public void UnselectAllFromMod(VM_NpcsMenuMugshot referenceMod)
+    {
+        if (referenceMod == null || string.IsNullOrWhiteSpace(referenceMod.ModName))
+        {
+            Debug.WriteLine("UnselectAllFromMod: referenceMod or its ModName is null/empty.");
+            return;
+        }
+
+        string targetModName = referenceMod.ModName;
+
+        // Find all NPCs that currently have this mod selected.
+        var npcsToUnselect = _settings.SelectedAppearanceMods
+            .Where(kvp => kvp.Value.ModName.Equals(targetModName, StringComparison.OrdinalIgnoreCase))
+            .Select(kvp => kvp.Key)
+            .ToList();
+
+        if (!npcsToUnselect.Any())
+        {
+            ScrollableMessageBox.Show($"No NPCs currently have '{targetModName}' selected.", "No Action Taken");
+            return;
+        }
+
+        // Display the confirmation dialog with the required warning message.
+        string confirmationMessage = $"{npcsToUnselect.Count} NPC selections will be cleared, and will no longer have an appearance selected. Are you sure you want to proceed?";
+        if (!ScrollableMessageBox.Confirm(confirmationMessage, "Confirm Bulk Unselection", MessageBoxImage.Warning))
+        {
+            return;
+        }
+
+        // If confirmed, clear the selection for each applicable NPC.
+        foreach (var npcKey in npcsToUnselect)
+        {
+            _consistencyProvider.ClearSelectedMod(npcKey);
+        }
+
+        Debug.WriteLine($"Finished processing. Cleared '{targetModName}' as the selected appearance for {npcsToUnselect.Count} NPC(s).");
+    }
+    
+    public void UnselectVisibleFromMod(VM_NpcsMenuMugshot referenceMod)
+    {
+        if (referenceMod == null || string.IsNullOrWhiteSpace(referenceMod.ModName))
+        {
+            Debug.WriteLine("UnselectVisibleFromMod: referenceMod or its ModName is null/empty.");
+            return;
+        }
+
+        string targetModName = referenceMod.ModName;
+
+        // Find all VISIBLE NPCs that currently have this mod selected.
+        var npcsToUnselect = FilteredNpcs
+            .Where(npc => {
+                var selection = _consistencyProvider.GetSelectedMod(npc.NpcFormKey);
+                return selection.ModName != null && selection.ModName.Equals(targetModName, StringComparison.OrdinalIgnoreCase);
+            })
+            .Select(npc => npc.NpcFormKey)
+            .ToList();
+
+        if (!npcsToUnselect.Any())
+        {
+            ScrollableMessageBox.Show($"No currently visible NPCs have '{targetModName}' selected.", "No Action Taken");
+            return;
+        }
+
+        // Display the confirmation dialog for visible NPCs.
+        string confirmationMessage = $"{npcsToUnselect.Count} visible NPC selections will be cleared, and will no longer have an appearance selected. Are you sure you want to proceed?";
+        if (!ScrollableMessageBox.Confirm(confirmationMessage, "Confirm Visible Unselection", MessageBoxImage.Warning))
+        {
+            return;
+        }
+
+        // If confirmed, clear the selection for each applicable NPC.
+        foreach (var npcKey in npcsToUnselect)
+        {
+            _consistencyProvider.ClearSelectedMod(npcKey);
+        }
+
+        Debug.WriteLine($"Finished processing. Cleared '{targetModName}' as the selected appearance for {npcsToUnselect.Count} visible NPC(s).");
+    }
+
+    private bool IsModAnAppearanceSourceForNpc(VM_NpcsMenuSelection npcSelectionVm, VM_NpcsMenuMugshot referenceMod)
+    {
+        if (npcSelectionVm == null || referenceMod == null || string.IsNullOrEmpty(referenceMod.ModName))
+            return false;
+
+        if (referenceMod.AssociatedModSetting != null &&
+            npcSelectionVm.AppearanceMods.Contains(referenceMod.AssociatedModSetting))
+        {
+            return true;
+        }
+
+        if (_downloadedMugshotData.TryGetValue(npcSelectionVm.NpcFormKey, out var mugshots))
+        {
+            if (mugshots.Any(m => m.ModName.Equals(referenceMod.ModName, StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public void HideAllFromMod(VM_NpcsMenuMugshot referenceMod)
+    {
+        if (referenceMod == null || string.IsNullOrWhiteSpace(referenceMod.ModName)) return;
+        if (_hiddenModNames.Add(referenceMod.ModName))
+        {
+            if (CurrentNpcAppearanceMods != null)
+            {
+                foreach (var modVM in CurrentNpcAppearanceMods)
+                {
+                    if (modVM.ModName.Equals(referenceMod.ModName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        modVM.IsSetHidden = true;
+                    }
+                }
+            }
+        }
+
+        ToggleModVisibility();
+    }
+
+    public void UnhideAllFromMod(VM_NpcsMenuMugshot referenceMod)
+    {
+        if (referenceMod == null || string.IsNullOrWhiteSpace(referenceMod.ModName)) return;
+        if (_hiddenModNames.Remove(referenceMod.ModName))
+        {
+            if (CurrentNpcAppearanceMods != null)
+            {
+                foreach (var modVM in CurrentNpcAppearanceMods)
+                {
+                    if (modVM.ModName.Equals(referenceMod.ModName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        bool isHiddenPerNpc = SelectedNpc != null &&
+                                              _hiddenModsPerNpc.TryGetValue(SelectedNpc.NpcFormKey,
+                                                  out var hiddenSet) &&
+                                              hiddenSet.Contains(modVM.ModName);
+                        modVM.IsSetHidden = isHiddenPerNpc;
+                    }
+                }
+            }
+        }
+
+        ToggleModVisibility();
+    }
+
+    public void ToggleModVisibility()
+    {
+        if (CurrentNpcAppearanceMods == null || !CurrentNpcAppearanceMods.Any()) return;
+
+        bool needsRefresh = false;
+        var npcSpecificHidden =
+            SelectedNpc != null ? _hiddenModsPerNpc.GetValueOrDefault(SelectedNpc.NpcFormKey) : null;
+
+        foreach (var mod in CurrentNpcAppearanceMods)
+        {
+            bool isGloballyHidden = _hiddenModNames.Contains(mod.ModName);
+            bool isSpecificallyHidden = npcSpecificHidden?.Contains(mod.ModName) ?? false;
+            bool shouldBeHidden = isGloballyHidden || isSpecificallyHidden;
+            mod.IsSetHidden = shouldBeHidden;
+            bool shouldBeVisible = (ShowHiddenMods || !mod.IsSetHidden) && (ShowUninstalledMods || !mod.HasNoData);
+            if (mod.IsVisible != shouldBeVisible)
+            {
+                mod.IsVisible = shouldBeVisible;
+                needsRefresh = true;
+            }
+        }
+
+        if (needsRefresh)
+        {
+            _refreshImageSizesSubject.OnNext(Unit.Default);
+        }
+    }
+
+    // --- NPC Group Methods ---
+    private bool AddCurrentNpcToGroup()
+    {
+        if (SelectedNpc == null || string.IsNullOrWhiteSpace(SelectedGroupName)) return false;
+        
+        var npcKey = SelectedNpc.NpcFormKey;
+        var groupName = SelectedGroupName.Trim();
+        if (!_settings.NpcGroupAssignments.TryGetValue(npcKey, out var groups))
+        {
+            groups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            _settings.NpcGroupAssignments[npcKey] = groups;
+        }
+
+        if (groups.Add(groupName))
+        {
+            Debug.WriteLine($"Added NPC {npcKey} to group '{groupName}'");
+            UpdateAvailableNpcGroups();
+            SelectedNpc.UpdateGroupDisplay(groups);
+            ApplyFilter(false);
+        }
+        else
+        {
+            Debug.WriteLine($"NPC {npcKey} already in group '{groupName}'");
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool RemoveCurrentNpcFromGroup()
+    {
+        if (SelectedNpc == null || string.IsNullOrWhiteSpace(SelectedGroupName)) return false;
+        var npcKey = SelectedNpc.NpcFormKey;
+        var groupName = SelectedGroupName.Trim();
+        if (_settings.NpcGroupAssignments.TryGetValue(npcKey, out var groups))
+        {
+            if (groups.Remove(groupName))
+            {
+                Debug.WriteLine($"Removed NPC {npcKey} from group '{groupName}'");
+                SelectedNpc.UpdateGroupDisplay(groups);
+                if (!groups.Any())
+                {
+                    _settings.NpcGroupAssignments.Remove(npcKey);
+                    Debug.WriteLine($"Removed group entry for NPC {npcKey} as it's now empty.");
+                }
+
+                UpdateAvailableNpcGroups();
+                ApplyFilter(false);
+            }
+            else
+            {
+                Debug.WriteLine($"NPC {npcKey} was not in group '{groupName}'");
+                return false;
+            }
+        }
+        else
+        {
+            Debug.WriteLine($"NPC {npcKey} has no group assignments.");
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool AreAnyFiltersActive()
+    {
+        if (SearchType1 != NpcSearchType.SelectionState && SearchType1 != NpcSearchType.Group &&
+            !string.IsNullOrWhiteSpace(SearchText1)) return true;
+        if (SearchType2 != NpcSearchType.SelectionState && SearchType2 != NpcSearchType.Group &&
+            !string.IsNullOrWhiteSpace(SearchText2)) return true;
+        if (SearchType3 != NpcSearchType.SelectionState && SearchType3 != NpcSearchType.Group &&
+            !string.IsNullOrWhiteSpace(SearchText3)) return true;
+        if (SearchType1 == NpcSearchType.SelectionState) return true;
+        if (SearchType2 == NpcSearchType.SelectionState) return true;
+        if (SearchType3 == NpcSearchType.SelectionState) return true;
+        if (SearchType1 == NpcSearchType.Group && !string.IsNullOrWhiteSpace(SelectedGroupFilter1)) return true;
+        if (SearchType2 == NpcSearchType.Group && !string.IsNullOrWhiteSpace(SelectedGroupFilter2)) return true;
+        if (SearchType3 == NpcSearchType.Group && !string.IsNullOrWhiteSpace(SelectedGroupFilter3)) return true;
+        return false;
+    }
+
+    private bool AddAllVisibleNpcsToGroup()
+    {
+        if (FilteredNpcs.Count == 0 || string.IsNullOrWhiteSpace(SelectedGroupName)) return false;
+        var groupName = SelectedGroupName.Trim();
+        int count = FilteredNpcs.Count;
+        int totalNpcCount = AllNpcs.Count;
+        if (!AreAnyFiltersActive())
+        {
+            if (!ScrollableMessageBox.Confirm(
+                    $"No filters are currently applied. Are you sure you want to add ALL {totalNpcCount} NPCs in your game to the group '{groupName}'?",
+                    "Confirm Add All NPCs"))
+            {
+                Debug.WriteLine("Add All Visible NPCs to Group cancelled by user (no filters active).");
+                return false;
+            }
+        }
+        else
+        {
+            if (!ScrollableMessageBox.Confirm($"Add all {count} currently visible NPCs to the group '{groupName}'?",
+                    "Confirm Add Visible NPCs"))
+            {
+                Debug.WriteLine("Add All Visible NPCs to Group cancelled by user.");
+                return false;
+            }
+        }
+
+        int addedCount = 0;
+        bool groupListChanged = false;
+        foreach (var npc in FilteredNpcs)
+        {
+            if (!_settings.NpcGroupAssignments.TryGetValue(npc.NpcFormKey, out var groups))
+            {
+                groups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                _settings.NpcGroupAssignments[npc.NpcFormKey] = groups;
+            }
+
+            if (groups.Add(groupName))
+            {
+                addedCount++;
+                groupListChanged = true;
+                npc.UpdateGroupDisplay(groups);
+            }
+        }
+
+        if (groupListChanged)
+        {
+            UpdateAvailableNpcGroups();
+        }
+
+        ApplyFilter(false);
+        Debug.WriteLine($"Added {addedCount} visible NPCs to group '{groupName}'.");
+        return true;
+    }
+
+    private bool RemoveAllVisibleNpcsFromGroup()
+    {
+        if (FilteredNpcs.Count == 0 || string.IsNullOrWhiteSpace(SelectedGroupName)) return false;
+        var groupName = SelectedGroupName.Trim();
+        int count = FilteredNpcs.Count;
+        int totalNpcCount = AllNpcs.Count;
+        if (!AreAnyFiltersActive())
+        {
+            if (!ScrollableMessageBox.Confirm(
+                    $"No filters are currently applied. Are you sure you want to attempt removing ALL {totalNpcCount} NPCs in your game from the group '{groupName}'?",
+                    "Confirm Remove All NPCs", MessageBoxImage.Warning))
+            {
+                Debug.WriteLine("Remove All Visible NPCs from Group cancelled by user (no filters active).");
+                return false;
+            }
+        }
+        else
+        {
+            if (!ScrollableMessageBox.Confirm(
+                    $"Remove all {count} currently visible NPCs from the group '{groupName}'?",
+                    "Confirm Remove Visible NPCs"))
+            {
+                Debug.WriteLine("Remove All Visible NPCs from Group cancelled by user.");
+                return false;
+            }
+        }
+
+        int removedCount = 0;
+        bool groupListMayNeedUpdate = false;
+        foreach (var npc in FilteredNpcs)
+        {
+            if (_settings.NpcGroupAssignments.TryGetValue(npc.NpcFormKey, out var groups))
+            {
+                if (groups.Remove(groupName))
+                {
+                    removedCount++;
+                    npc.UpdateGroupDisplay(groups);
+                    groupListMayNeedUpdate = true;
+                    if (!groups.Any())
+                    {
+                        _settings.NpcGroupAssignments.Remove(npc.NpcFormKey);
+                    }
+                }
+            }
+        }
+
+        if (groupListMayNeedUpdate)
+        {
+            UpdateAvailableNpcGroups();
+        }
+
+        ApplyFilter(false);
+        Debug.WriteLine($"Removed {removedCount} visible NPCs from group '{groupName}'.");
+        return true;
+    }
+
+    private void UpdateAvailableNpcGroups()
+    {
+        var distinctGroups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (_settings.NpcGroupAssignments != null)
+        {
+            foreach (var groupSet in _settings.NpcGroupAssignments.Values)
+            {
+                if (groupSet != null)
+                {
+                    foreach (var groupName in groupSet)
+                    {
+                        if (!string.IsNullOrWhiteSpace(groupName))
+                        {
+                            distinctGroups.Add(groupName.Trim());
+                        }
+                    }
+                }
+            }
+        }
+
+        var sortedGroups = distinctGroups.OrderBy(g => g).ToList();
+        string? currentSelection = SelectedGroupName;
+        bool selectionStillExists = false;
+        AvailableNpcGroups.Clear();
+        AvailableNpcGroups.Add(AllNpcsGroup);
+        foreach (var group in sortedGroups)
+        {
+            AvailableNpcGroups.Add(group);
+            if (group.Equals(currentSelection, StringComparison.OrdinalIgnoreCase))
+            {
+                selectionStillExists = true;
+            }
+        }
+
+        if (!selectionStillExists)
+        {
+            SelectedGroupName = string.Empty;
+        }
+        else
+        {
+            SelectedGroupName = currentSelection;
+        }
+
+        MessageBus.Current.SendMessage(new NpcGroupsChangedMessage());
+        Debug.WriteLine($"Updated AvailableNpcGroups. Count: {AvailableNpcGroups.Count}");
+    }
+    // --- End NPC Group Methods ---
+
+    public void MassUpdateNpcSelections(string fromModName, FormKey fromNpcKey, string toModName, FormKey toNpcKey)
+    {
+        if (string.Equals(fromModName, toModName, StringComparison.OrdinalIgnoreCase) && fromNpcKey.Equals(toNpcKey))
+        {
+            return;
+        }
+
+        var targetMod = _lazyModsVm.Value.AllModSettings.FirstOrDefault(x => x.DisplayName == toModName);
+        if (targetMod == null)
+        {
+            return;
+        }
+
+        var npcsToUpdate = AllNpcs
+            .Where(npc => {
+                var selection = _consistencyProvider.GetSelectedMod(npc.NpcFormKey);
+                return string.Equals(selection.ModName, fromModName, StringComparison.OrdinalIgnoreCase) && targetMod.AvailablePluginsForNpcs.ContainsKey(npc.NpcFormKey);
+            })
+            .ToList();
+
+        if (!npcsToUpdate.Any()) return;
+
+        var confirmationMessage = $"This will change the selected appearance for {npcsToUpdate.Count} NPC(s) from '{fromModName} ({fromNpcKey})' to '{toModName} ({toNpcKey})'. Proceed?";
+        string imagePath = @"Resources\Replace Selected Mod.png";
+        if (ScrollableMessageBox.Confirm(confirmationMessage, "Confirm Mass Update", displayImagePath: imagePath))
+        {
+            foreach (var npc in npcsToUpdate)
+            {
+                _consistencyProvider.SetSelectedMod(npc.NpcFormKey, toModName, toNpcKey);
+            }
+        }
+    }
+    
+    public OutfitOverride GetNpcOutfitOverride(FormKey npcFormKey)
+    {
+        if (_settings.NpcOutfitOverrides.TryGetValue(npcFormKey, out var storedOverride))
+        {
+            return storedOverride;
+        }
+        return OutfitOverride.UseModSetting;
+    }
+
+    private void SetNpcOutfitOverride(FormKey npcFormKey, OutfitOverride newOverride)
+    {
+        if (newOverride == OutfitOverride.UseModSetting)
+        {
+            // If setting back to default, remove the key to keep the dictionary clean.
+            if (_settings.NpcOutfitOverrides.Remove(npcFormKey))
+            {
+                Debug.WriteLine($"Removed outfit override for NPC {npcFormKey}.");
+            }
+        }
+        else
+        {
+            _settings.NpcOutfitOverrides[npcFormKey] = newOverride;
+            Debug.WriteLine($"Set outfit override for NPC {npcFormKey} to {newOverride}.");
+        }
+    }
+    
+
+    // --- Template Source Indicator Recalculation ---
+
+    /// <summary>
+    /// Recalculates the purple/green T and red ! indicators for a single NPC
+    /// that is an app-mod template source, based on current selections.
+    /// </summary>
+    private void RecalculateAppModTemplateIndicators(VM_NpcsMenuSelection vm)
+    {
+        if (vm.AppModTemplateReferences.Count == 0)
+        {
+            vm.ShowAppModTemplateT = false;
+            vm.HasTemplateConflict = false;
+            vm.TemplateConflictTooltip = string.Empty;
+            vm.AppModTemplateTooltip = string.Empty;
+            return;
+        }
+
+        vm.ShowAppModTemplateT = true;
+
+        var selectedRefs = new List<(string ModName, FormKey NpcFormKey, string NpcDisplayName)>();
+        var unselectedRefs = new List<(string ModName, FormKey NpcFormKey, string NpcDisplayName)>();
+
+        foreach (var entry in vm.AppModTemplateReferences)
+        {
+            var selection = _consistencyProvider.GetSelectedMod(entry.NpcFormKey);
+            if (string.Equals(selection.ModName, entry.ModName, StringComparison.OrdinalIgnoreCase))
+                selectedRefs.Add(entry);
+            else
+                unselectedRefs.Add(entry);
+        }
+
+        bool anySelected = selectedRefs.Count > 0;
+        vm.IsAppModTemplateGreen = anySelected;
+
+        // Build tooltip
+        var sb = new StringBuilder();
+        if (selectedRefs.Any())
+        {
+            sb.Append("Currently selected as template source for:");
+            foreach (var r in selectedRefs)
+                sb.Append($"\n  {r.NpcDisplayName} ({r.NpcFormKey}) in [{r.ModName}]");
+        }
+        if (unselectedRefs.Any())
+        {
+            if (sb.Length > 0) sb.Append("\n\n");
+            sb.Append("Referenced as template source by (not currently selected):");
+            foreach (var r in unselectedRefs)
+                sb.Append($"\n  {r.NpcDisplayName} ({r.NpcFormKey}) in [{r.ModName}]");
+        }
+        vm.AppModTemplateTooltip = sb.ToString();
+
+        // Red ! conflict: a selected app-mod references this NPC as template,
+        // but this NPC has a DIFFERENT mod selected for itself
+        if (anySelected)
+        {
+            var thisSelection = _consistencyProvider.GetSelectedMod(vm.NpcFormKey);
+            if (!string.IsNullOrEmpty(thisSelection.ModName))
+            {
+                var conflicting = selectedRefs
+                    .Where(r => !string.Equals(r.ModName, thisSelection.ModName,
+                        StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                if (conflicting.Any())
+                {
+                    vm.HasTemplateConflict = true;
+                    var cSb = new StringBuilder();
+                    cSb.Append($"This NPC has [{thisSelection.ModName}] selected, " +
+                        "but is used as a template source by NPCs with a different mod selected:");
+                    foreach (var c in conflicting)
+                        cSb.Append($"\n  {c.NpcDisplayName} ({c.NpcFormKey}) → [{c.ModName}]");
+                    cSb.Append("\nThe template relationship may cause appearance conflicts.");
+                    vm.TemplateConflictTooltip = cSb.ToString();
+                    return;
+                }
+            }
+        }
+
+        vm.HasTemplateConflict = false;
+        vm.TemplateConflictTooltip = string.Empty;
+    }
+
+    /// <summary>
+    /// <summary>Subscribes to the streams that drive the FaceGen-stats
+    /// overlay: tile-set swaps (new NPC selected), per-tile stats arrival
+    /// (analysis completed), and settings changes that affect overlay
+    /// display. Each event triggers a debounced
+    /// <see cref="RecomputeFaceGenOverlays"/>, which iterates the visible
+    /// tiles, refreshes their per-line text + indicator position from the
+    /// current settings, and re-ranks them per metric for the outlier
+    /// highlight.</summary>
+    private void InitFaceGenCoordinator()
+    {
+        var vmSettings = _lazyVmSettings.Value;
+        var triggers = Observable.Merge(
+            this.WhenAnyValue(x => x.CurrentNpcAppearanceMods).Select(_ => Unit.Default),
+            vmSettings.WhenAnyValue(
+                    x => x.EnableFaceGenAnalysis,
+                    x => x.ReportFaceGenSize,
+                    x => x.ReportFaceGenPolys,
+                    x => x.ReportFaceGenVerts,
+                    x => x.FaceGenDisplayMode,
+                    x => x.FaceGenTextHeightPercent,
+                    x => x.FaceGenTooltipPosition)
+                .Select(_ => Unit.Default),
+            vmSettings.WhenAnyValue(
+                    x => x.FaceGenHighlightCriterion,
+                    x => x.FaceGenHighlightThreshold,
+                    x => x.FaceGenHighlightColor,
+                    x => x.FaceGenNoHighlightColor)
+                .Select(_ => Unit.Default));
+
+        triggers
+            .Throttle(TimeSpan.FromMilliseconds(150), RxApp.MainThreadScheduler)
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(_ => RecomputeFaceGenOverlays())
+            .DisposeWith(_disposables);
+
+        // Per-tile stats-arrival stream needs to re-subscribe each time the
+        // collection swaps. A flat InnerSwitch over the visible-tile set's
+        // FaceGenStats observables avoids holding stale subscriptions to
+        // disposed tiles from prior NPCs.
+        this.WhenAnyValue(x => x.CurrentNpcAppearanceMods)
+            .Select(coll => coll == null
+                ? Observable.Empty<Unit>()
+                : coll.Select(t => t.WhenAnyValue(x => x.FaceGenStats).Select(_ => Unit.Default))
+                      .Merge())
+            .Switch()
+            .Throttle(TimeSpan.FromMilliseconds(150), RxApp.MainThreadScheduler)
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(_ => RecomputeFaceGenOverlays())
+            .DisposeWith(_disposables);
+
+        // When the master toggle flips on, kick analysis on any tile that
+        // skipped it during its initial load (toggle was off then). Lazy
+        // analysis for newly-arrived tiles still happens inside their own
+        // LoadInitialImageAsync path.
+        vmSettings.WhenAnyValue(x => x.EnableFaceGenAnalysis)
+            .Skip(1)
+            .Where(on => on)
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .Subscribe(_ =>
+            {
+                if (CurrentNpcAppearanceMods == null) return;
+                foreach (var tile in CurrentNpcAppearanceMods)
+                {
+                    tile.TriggerFaceGenAnalysisAsync();
+                }
+            })
+            .DisposeWith(_disposables);
+    }
+
+    private void RecomputeFaceGenOverlays()
+    {
+        var tiles = CurrentNpcAppearanceMods;
+        if (tiles == null || tiles.Count == 0) return;
+
+        var s = _settings;
+        var vmSettings = _lazyVmSettings.Value;
+        var highlight = vmSettings.FaceGenHighlightColor;
+        var normal = vmSettings.FaceGenNoHighlightColor;
+
+        // Push per-line text / visibility / font-size into every tile (cheap;
+        // these reads are POCO field reads and reactive setters short-circuit
+        // unchanged values).
+        foreach (var tile in tiles)
+        {
+            tile.RefreshFaceGenOverlayState();
+        }
+
+        if (!s.EnableFaceGenAnalysis)
+        {
+            foreach (var tile in tiles)
+                tile.ApplyFaceGenOutlierColors(false, false, false, highlight, normal);
+            return;
+        }
+
+        // Outlier ranks are computed independently per metric over the tiles
+        // that have non-null stats — failed-analysis tiles are excluded so
+        // they don't skew the mean/stddev.
+        var withStats = tiles.Where(t => t.FaceGenStats.HasValue).ToList();
+        if (withStats.Count == 0) return;
+
+        if (s.FaceGenHighlightCriterion == FaceGenHighlightCriterion.Spectrum)
+        {
+            var lowC = vmSettings.FaceGenSpectrumLowColor.Color;
+            var midC = vmSettings.FaceGenSpectrumMidColor.Color;
+            var highC = vmSettings.FaceGenSpectrumHighColor.Color;
+            var midBrush = vmSettings.FaceGenSpectrumMidColor;
+
+            double[] sizeT = NormalizeMetric(withStats, t => t.FaceGenStats!.Value.FileSizeBytes);
+            double[] polyT = NormalizeMetric(withStats, t => t.FaceGenStats!.Value.TotalTriangles);
+            double[] vertT = NormalizeMetric(withStats, t => t.FaceGenStats!.Value.TotalVertices);
+
+            for (int i = 0; i < withStats.Count; i++)
+            {
+                var sizeBrush = s.ReportFaceGenSize ? InterpolateSpectrumColor(sizeT[i], lowC, midC, highC) : midBrush;
+                var polyBrush = s.ReportFaceGenPolys ? InterpolateSpectrumColor(polyT[i], lowC, midC, highC) : midBrush;
+                var vertBrush = s.ReportFaceGenVerts ? InterpolateSpectrumColor(vertT[i], lowC, midC, highC) : midBrush;
+
+                // Indicator dot = average of the enabled metrics' positions.
+                double sum = 0; int count = 0;
+                if (s.ReportFaceGenSize)  { sum += sizeT[i]; count++; }
+                if (s.ReportFaceGenPolys) { sum += polyT[i]; count++; }
+                if (s.ReportFaceGenVerts) { sum += vertT[i]; count++; }
+                double avg = count > 0 ? sum / count : 0.5;
+                var indicatorBrush = InterpolateSpectrumColor(avg, lowC, midC, highC);
+
+                withStats[i].ApplyFaceGenSpectrumColors(sizeBrush, polyBrush, vertBrush, indicatorBrush);
+            }
+
+            // Tiles without stats get the mid color (no info to place them on the spectrum).
+            foreach (var tile in tiles)
+            {
+                if (!tile.FaceGenStats.HasValue)
+                    tile.ApplyFaceGenSpectrumColors(midBrush, midBrush, midBrush, midBrush);
+            }
+            return;
+        }
+
+        bool[] sizeFlags = FlagOutliers(withStats, t => t.FaceGenStats!.Value.FileSizeBytes, s);
+        bool[] polyFlags = FlagOutliers(withStats, t => t.FaceGenStats!.Value.TotalTriangles, s);
+        bool[] vertFlags = FlagOutliers(withStats, t => t.FaceGenStats!.Value.TotalVertices, s);
+
+        for (int i = 0; i < withStats.Count; i++)
+        {
+            withStats[i].ApplyFaceGenOutlierColors(
+                s.ReportFaceGenSize && sizeFlags[i],
+                s.ReportFaceGenPolys && polyFlags[i],
+                s.ReportFaceGenVerts && vertFlags[i],
+                highlight, normal);
+        }
+
+        // Tiles without stats get the no-highlight color (default text).
+        foreach (var tile in tiles)
+        {
+            if (!tile.FaceGenStats.HasValue)
+                tile.ApplyFaceGenOutlierColors(false, false, false, highlight, normal);
+        }
+    }
+
+    private static double[] NormalizeMetric(List<VM_NpcsMenuMugshot> tiles, Func<VM_NpcsMenuMugshot, double> metric)
+    {
+        int n = tiles.Count;
+        var values = new double[n];
+        for (int i = 0; i < n; i++) values[i] = metric(tiles[i]);
+        double min = double.PositiveInfinity, max = double.NegativeInfinity;
+        for (int i = 0; i < n; i++)
+        {
+            if (values[i] < min) min = values[i];
+            if (values[i] > max) max = values[i];
+        }
+        double range = max - min;
+        var t = new double[n];
+        if (range <= 0)
+        {
+            for (int i = 0; i < n; i++) t[i] = 0.5;
+            return t;
+        }
+        for (int i = 0; i < n; i++) t[i] = (values[i] - min) / range;
+        return t;
+    }
+
+    private static SolidColorBrush InterpolateSpectrumColor(double t, Color low, Color mid, Color high)
+    {
+        t = Math.Clamp(t, 0.0, 1.0);
+        Color a, b; double localT;
+        if (t < 0.5) { a = low; b = mid; localT = t * 2.0; }
+        else         { a = mid; b = high; localT = (t - 0.5) * 2.0; }
+        byte R = (byte)Math.Round(a.R + (b.R - a.R) * localT);
+        byte G = (byte)Math.Round(a.G + (b.G - a.G) * localT);
+        byte B = (byte)Math.Round(a.B + (b.B - a.B) * localT);
+        var brush = new SolidColorBrush(Color.FromRgb(R, G, B));
+        brush.Freeze();
+        return brush;
+    }
+
+    private static bool[] FlagOutliers(List<VM_NpcsMenuMugshot> tiles, Func<VM_NpcsMenuMugshot, double> metric, Settings s)
+    {
+        int n = tiles.Count;
+        var flags = new bool[n];
+        if (n == 0) return flags;
+        var values = new double[n];
+        for (int i = 0; i < n; i++) values[i] = metric(tiles[i]);
+
+        if (s.FaceGenHighlightCriterion == FaceGenHighlightCriterion.TopPercent)
+        {
+            // Mark the top ceil(threshold% * n) tiles. Single tile never
+            // self-highlights — flagging 1-of-1 is just visual noise.
+            if (n < 2) return flags;
+            int topCount = (int)Math.Ceiling(n * (s.FaceGenHighlightThreshold / 100.0));
+            topCount = Math.Clamp(topCount, 0, n);
+            if (topCount == 0) return flags;
+            var sortedIndices = Enumerable.Range(0, n).OrderByDescending(i => values[i]).Take(topCount);
+            foreach (var idx in sortedIndices) flags[idx] = true;
+        }
+        else // StdDevAbove
+        {
+            if (n < 2) return flags;
+            double mean = values.Average();
+            double sumSq = 0;
+            for (int i = 0; i < n; i++) { double d = values[i] - mean; sumSq += d * d; }
+            double std = Math.Sqrt(sumSq / n);
+            if (std <= 0) return flags;
+            double cutoff = mean + s.FaceGenHighlightThreshold * std;
+            for (int i = 0; i < n; i++)
+                if (values[i] > cutoff) flags[i] = true;
+        }
+        return flags;
+    }
+
+    /// <summary>
+    /// When a selection changes for any NPC, recalculate all template-source NPCs
+    /// that could be affected.
+    /// </summary>
+    private void RecalculateTemplateIndicatorsForSelection(FormKey changedNpcFormKey)
+    {
+        // 1. This NPC might be referenced by template sources — recalculate those
+        if (_npcToAffectedTemplateSources.TryGetValue(changedNpcFormKey, out var affectedSources))
+        {
+            foreach (var templateSourceFk in affectedSources)
+            {
+                if (_npcVmLookup.TryGetValue(templateSourceFk, out var sourceVm))
+                {
+                    RecalculateAppModTemplateIndicators(sourceVm);
+                }
+            }
+        }
+
+        // 2. This NPC might itself be a template source — its red ! depends on its own selection
+        if (_npcVmLookup.TryGetValue(changedNpcFormKey, out var thisVm) &&
+            thisVm.AppModTemplateReferences.Count > 0)
+        {
+            RecalculateAppModTemplateIndicators(thisVm);
+        }
+    }
+
+    /// <summary>
+    /// Navigates to an NPC in the list by FormKey, ensuring it is visible in the filtered list.
+    /// Used by the "Jump to Template Reference" context menu.
+    /// </summary>
+    private void JumpToTemplateReference(FormKey targetNpcFormKey)
+    {
+        if (targetNpcFormKey.IsNull) return;
+
+        var targetVm = AllNpcs.FirstOrDefault(n => n.NpcFormKey.Equals(targetNpcFormKey));
+        if (targetVm == null)
+        {
+            Debug.WriteLine($"JumpToTemplateReference: NPC {targetNpcFormKey} not found in AllNpcs.");
+            return;
+        }
+
+        // If the target is not in the current filtered list, clear filters to make it visible
+        if (!FilteredNpcs.Contains(targetVm))
+        {
+            Debug.WriteLine($"JumpToTemplateReference: NPC {targetVm.DisplayName} not in filtered list. Clearing filters.");
+            SearchText1 = string.Empty;
+            SearchText2 = string.Empty;
+            SearchText3 = string.Empty;
+            ShowSingleOptionNpcs = true;
+            ShowUnloadedNpcs = true;
+            ApplyFilter(initializing: false, preserveSelection: false);
+        }
+
+        if (FilteredNpcs.Contains(targetVm))
+        {
+            SelectedNpc = targetVm;
+            SignalScrollToNpc(targetVm);
+            Debug.WriteLine($"JumpToTemplateReference: Navigated to {targetVm.DisplayName}.");
+        }
+        else
+        {
+            Debug.WriteLine($"JumpToTemplateReference: NPC {targetVm.DisplayName} still not visible after clearing filters.");
+        }
+    }
+    
+    /// <summary>
+    /// After a version migration has removed NPC FormKeys from mod-level collections,
+    /// this method synchronizes the NPC selection bar by:
+    ///   1. Removing stale mod references from each affected NPC VM's AppearanceMods.
+    ///   2. Removing NPC VMs that no longer have any appearance source (mod or mugshot).
+    ///   3. Re-applying the current filter.
+    /// Must be called on the UI thread.
+    /// </summary>
+    public void PruneRemovedNpcs(HashSet<FormKey> prunedFormKeys)
+    {
+        if (prunedFormKeys == null || prunedFormKeys.Count == 0) return;
+
+        // Step 1: For each pruned NPC, remove mods whose NpcFormKeys no longer contain it
+        foreach (var fk in prunedFormKeys)
+        {
+            var npcVm = AllNpcs.FirstOrDefault(n => n.NpcFormKey.Equals(fk));
+            if (npcVm == null) continue;
+
+            for (int i = npcVm.AppearanceMods.Count - 1; i >= 0; i--)
+            {
+                if (!npcVm.AppearanceMods[i].NpcFormKeys.Contains(fk))
+                {
+                    npcVm.AppearanceMods.RemoveAt(i);
+                }
+            }
+        }
+
+        // Step 2: Remove NPC VMs that have no remaining appearance sources
+        for (int i = AllNpcs.Count - 1; i >= 0; i--)
+        {
+            var npc = AllNpcs[i];
+            if (!npc.AppearanceMods.Any() && !_downloadedMugshotData.ContainsKey(npc.NpcFormKey))
+            {
+                _npcVmLookup.Remove(npc.NpcFormKey);
+                AllNpcs.RemoveAt(i);
+            }
+        }
+
+        // Step 3: Re-apply the filter to update FilteredNpcs
+        ApplyFilter(initializing: false);
+
+        Debug.WriteLine($"PruneRemovedNpcs: Processed {prunedFormKeys.Count} pruned FormKey(s). AllNpcs now has {AllNpcs.Count} entries.");
+    }
+
+    // --- Disposal ---
+    public void Dispose()
+    {
+        if (_themeChangedHandler != null)
+        {
+            ThemeManager.ThemeChanged -= _themeChangedHandler;
+        }
+        _disposables.Dispose();
+        ClearAppearanceModViewModels();
+    }
+
+    private void ClearAppearanceModViewModels()
+    {
+        if (CurrentNpcAppearanceMods != null)
+        {
+            var vmsToDispose = CurrentNpcAppearanceMods.ToList();
+            CurrentNpcAppearanceMods.Clear();
+            foreach (var vm in vmsToDispose)
+            {
+                vm.Dispose();
+            }
+        }
+    }
+}
+
+public enum SearchLogic
+{
+    AND,
+    OR
+}
+
+public enum SelectionStateFilterType
+{
+    [Description("Selection Not Made")]
+    NotMade,
+    [Description("Selection Made")]
+    Made
+}
+
+public enum ShareStatusFilterType
+{
+    [Description("Any")]
+    Any,
+    [Description("Guest Available")]
+    GuestAvailable,
+    [Description("Guest Selected")]
+    GuestSelected,
+    [Description("Shared")]
+    Shared,
+    [Description("Shared & Selected")]
+    SharedAndSelected
+}
+
+public class ShareAppearanceRequest
+{
+    public VM_NpcsMenuMugshot MugshotToShare { get; }
+    public ShareAppearanceRequest(VM_NpcsMenuMugshot mugshotToShare)
+    {
+        MugshotToShare = mugshotToShare;
+    }
+}
+
+public class UnshareAppearanceRequest
+{
+    public VM_NpcsMenuMugshot MugshotToUnshare { get; }
+    public UnshareAppearanceRequest(VM_NpcsMenuMugshot mugshotToUnshare)
+    {
+        MugshotToUnshare = mugshotToUnshare;
+    }
+}
+
+public enum NpcSortProperty
+{
+    FormID,
+    Name,
+    EditorID,
+    FormKey
+}
+
+public enum TemplateFilterType
+{
+    [Description("Base Record Has Template")]
+    BaseHasTemplate,
+    [Description("Base Record Is Template")]
+    BaseIsTemplate,
+    [Description("Winning Override Has Template")]
+    WinnerHasTemplate,
+    [Description("Winning Override Is Template")]
+    WinnerIsTemplate,
+    [Description("Appearance Mod(s) Have Template")]
+    AppModsHaveTemplate,
+    [Description("Appearance Mod(s) Use as Template")]
+    AppModsUseAsTemplate
+}

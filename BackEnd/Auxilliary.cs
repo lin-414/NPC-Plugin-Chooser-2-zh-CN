@@ -1,0 +1,1993 @@
+﻿using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.IO;
+using System.Reactive.Disposables;
+using System.Reactive.Disposables.Fluent;
+using System.Reactive.Linq;
+using Loqui;
+using Mutagen.Bethesda;
+using Mutagen.Bethesda.Plugins;
+using Mutagen.Bethesda.Plugins.Assets;
+using Mutagen.Bethesda.Plugins.Cache;
+using Mutagen.Bethesda.Plugins.Order;
+using Mutagen.Bethesda.Plugins.Cache.Internals.Implementations;
+using Mutagen.Bethesda.Plugins.Records;
+using Mutagen.Bethesda.Skyrim;
+using System.Security.Cryptography;
+using System.Text;
+using Microsoft.Extensions.Primitives;
+using Mutagen.Bethesda.Plugins.Aspects;
+using Mutagen.Bethesda.Strings;
+using NPC_Plugin_Chooser_2.Views;
+using ReactiveUI;
+
+#if NET8_0_OR_GREATER
+using System.IO.Hashing;
+#endif
+
+namespace NPC_Plugin_Chooser_2.BackEnd;
+
+public class Auxilliary : IDisposable
+{
+    private readonly EnvironmentStateProvider _environmentStateProvider;
+    private IAssetLinkCache _assetLinkCache;
+    
+    private readonly CompositeDisposable _disposables = new();
+    
+    // caches to speed up building
+    public Dictionary<FormKey, string> FormIDCache = new();
+    private ConcurrentDictionary<FormKey, RaceEvaluation> _raceValidityCache = new();
+
+    /// <summary>
+    /// On-disk cache of per-race appearance verdicts. Whenever the rule in
+    /// <see cref="IsValidAppearanceRace"/> changes, an existing file holds verdicts computed under
+    /// the OLD rule and must be deleted by a version-gated migration — see
+    /// <see cref="DeletePersistedRaceValidityCache"/>.
+    /// </summary>
+    public const string RaceValidityCacheFileName = "RaceEvalCache.json";
+    private string _raceValidityCacheFileName = RaceValidityCacheFileName;
+    
+    // Session-scoped cache: true = chain terminates in a Leveled NPC, false = chain is valid.
+    // Keyed by the NPC FormKey whose template link was (or would be) followed.
+    private readonly ConcurrentDictionary<FormKey, bool> _leveledNpcChainCache = new();
+
+    public static HashSet<string> ValidPluginExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".esp",
+        ".esm",
+        ".esl"
+    };
+    
+    // Serialized to RaceEvalCache.json by ordinal — only ever APPEND members, never reorder or
+    // remove, or an existing cache file silently decodes to the wrong verdicts.
+    private enum RaceEvaluation
+    {
+        Valid,
+        InvalidNull,
+        InvalidNotInLoadOrder,
+        InvalidNullKeywords, // no longer produced; see IsValidAppearanceRace
+        InvalidNotNpc,       // no longer produced; superseded by InvalidNoFaceGenHead
+        /// <summary>Race carries no FaceGen head, so its actors have no customizable face.</summary>
+        InvalidNoFaceGenHead,
+        /// <summary>Race is Bethesda's DefaultRace placeholder (an "unset" marker, not a real race).</summary>
+        InvalidPlaceholderRace
+    }
+    
+    public Auxilliary(EnvironmentStateProvider environmentStateProvider)
+    {
+        _environmentStateProvider = environmentStateProvider;
+        
+        _environmentStateProvider.OnEnvironmentUpdated
+            .ObserveOn(RxApp.MainThreadScheduler) // Ensure re-initialization happens on the UI thread if needed
+            .Subscribe(_ =>
+            {
+                if (_environmentStateProvider is null || _environmentStateProvider?.LinkCache is null)
+                {
+                    Debug.WriteLine("Aux: Environment state is not initialized");
+                    return;
+                }
+                _assetLinkCache = new AssetLinkCache(_environmentStateProvider.LinkCache);
+            })
+            .DisposeWith(_disposables); // Add the subscription to the container for easy cleanup
+    }
+    
+    public void Dispose()
+    {
+        // Clean up all subscriptions when this object is disposed
+        _disposables.Dispose();
+    }
+
+    public void ReinitializeModDependentProperties()
+    {
+        FormIDCache.Clear();
+        _raceValidityCache.Clear();
+        _leveledNpcChainCache.Clear();
+        LoadRaceCache();
+    }
+
+    public static bool TryGetName(ITranslatedNamedGetter namedGetter, Language? language, bool fixGarbled, out string name)
+    {
+        name = string.Empty;
+
+        if (namedGetter.Name == null)
+        {
+            return false;
+        }
+
+        if (language != null && namedGetter.Name.TryLookup(language.Value, out var localizedName))
+        {
+            name = localizedName;
+            if (fixGarbled)
+            {
+                name = FixMojibake(name);
+            }
+            return true;
+        }
+        else if (namedGetter.Name.String != null)
+        {
+            name = namedGetter.Name.String;
+            if (fixGarbled)
+            {
+                name = FixMojibake(name);
+            }
+            return true;
+        }
+        return false;
+    }
+    
+    private static readonly Lazy<Encoding> _windows1252 = new(() =>
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        return Encoding.GetEncoding(1252);
+    });
+
+    /// <summary>
+    /// Attempts to fix mojibake (UTF-8 bytes misinterpreted as Windows-1252).
+    /// Only applies the fix if the input doesn't already contain valid non-Latin
+    /// script and the round-trip produces a clearly improved result.
+    ///
+    /// We intentionally do NOT pre-filter with pattern detection. Windows-1252
+    /// maps bytes 0x80-0x9F to scattered Unicode codepoints (€, ‚, ƒ, „, …),
+    /// making reliable mojibake heuristics impractical. Instead we always attempt
+    /// the round-trip and validate the result.
+    /// </summary>
+    public static string FixMojibake(string input)
+    {
+        if (string.IsNullOrEmpty(input))
+            return input;
+
+        try
+        {
+            // Already contains CJK / Cyrillic / Hangul / etc. → decoded correctly
+            if (ContainsNonLatinScript(input))
+                return input;
+
+            // Attempt Windows-1252 → bytes → UTF-8 round-trip
+            byte[] rawBytes = _windows1252.Value.GetBytes(input);
+            string candidate = Encoding.UTF8.GetString(rawBytes);
+
+            // U+FFFD means the bytes weren't valid UTF-8 — not mojibake
+            if (candidate.Contains('\uFFFD'))
+                return input;
+
+            // Accept only if the conversion actually changed something AND
+            // the result contains meaningful non-Latin text or is at least
+            // reasonable (> 50% printable, non-replacement characters)
+            if (candidate != input &&
+                (ContainsNonLatinScript(candidate) || IsReasonableText(candidate)))
+            {
+                return candidate;
+            }
+
+            return input;
+        }
+        catch
+        {
+            return input;
+        }
+    }
+
+    /// <summary>
+    /// Returns true if the string contains characters from non-Latin scripts,
+    /// indicating it was already decoded correctly.
+    /// </summary>
+    private static bool ContainsNonLatinScript(string s)
+    {
+        foreach (char c in s)
+        {
+            if (c >= 0x4E00 && c <= 0x9FFF) return true;  // CJK Unified Ideographs
+            if (c >= 0x3400 && c <= 0x4DBF) return true;  // CJK Extension A
+            if (c >= 0x3040 && c <= 0x309F) return true;  // Hiragana
+            if (c >= 0x30A0 && c <= 0x30FF) return true;  // Katakana
+            if (c >= 0xAC00 && c <= 0xD7AF) return true;  // Hangul Syllables
+            if (c >= 0x0400 && c <= 0x04FF) return true;  // Cyrillic
+            if (c >= 0x0600 && c <= 0x06FF) return true;  // Arabic
+            if (c >= 0x0590 && c <= 0x05FF) return true;  // Hebrew
+            if (c >= 0x0E00 && c <= 0x0E7F) return true;  // Thai
+            if (c >= 0x0900 && c <= 0x097F) return true;  // Devanagari
+            if (c >= 0xF900 && c <= 0xFAFF) return true;  // CJK Compat. Ideographs
+            if (c >= 0xFF65 && c <= 0xFFDC) return true;  // Halfwidth Katakana/CJK
+            if (c >= 0x3000 && c <= 0x303F) return true;  // CJK Symbols & Punctuation
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Fallback: accepts the conversion if more than half the characters are
+    /// printable non-replacement content. Catches cases where the converted
+    /// text is improved but uses scripts not explicitly listed in
+    /// ContainsNonLatinScript (e.g. Georgian, Tibetan, Ethiopic).
+    /// </summary>
+    private static bool IsReasonableText(string s)
+    {
+        int printableCount = 0;
+        foreach (char c in s)
+        {
+            if (!char.IsControl(c) && c != '\uFFFD')
+                printableCount++;
+        }
+        return printableCount > s.Length * 0.5;
+    }
+    
+    /// <summary>
+    /// Returns a directory path safe to assign to a WPF file dialog's InitialDirectory.
+    /// The Vista-style common item dialog throws E_INVALIDARG ("Value does not fall within
+    /// the expected range") when InitialDirectory does not resolve to an existing folder,
+    /// so this returns the first path that exists (preferred -> fallback -> MyDocuments).
+    /// </summary>
+    public static string GetSafeInitialDirectory(string? preferredPath, string? fallbackPath = null)
+    {
+        if (!string.IsNullOrWhiteSpace(preferredPath) && Directory.Exists(preferredPath))
+        {
+            return preferredPath;
+        }
+
+        if (!string.IsNullOrWhiteSpace(fallbackPath) && Directory.Exists(fallbackPath))
+        {
+            return fallbackPath;
+        }
+
+        return Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+    }
+
+    public static string GetLogString(IMajorRecordGetter majorRecordGetter, Language? language, bool fullString = false)
+    {
+        StringBuilder logBuilder = new();
+        if (majorRecordGetter is ITranslatedNamedGetter namedGetter)
+        {
+            if (namedGetter.Name != null && namedGetter.Name.String != null)
+            {
+                if (language != null && namedGetter.Name.TryLookup(language.Value, out var localizedName))
+                {
+                    logBuilder.Append(localizedName);
+                }
+                else
+                {
+                    logBuilder.Append(namedGetter.Name.String);
+                }
+            }
+
+            if (fullString)
+            {
+                logBuilder.Append(" | ");
+            }
+        }
+
+        if (logBuilder.Length == 0 || fullString)
+        {
+            if (majorRecordGetter.EditorID != null)
+            {
+                // The separator belongs to the full form only. In the short form nothing follows
+                // the EditorID (the FormKey below is appended only when nothing was written at
+                // all), so appending it there left a Name-less record labelled "EditorID | ".
+                logBuilder.Append(fullString ? majorRecordGetter.EditorID + " | " : majorRecordGetter.EditorID);
+            }
+
+            if (logBuilder.Length == 0 || fullString)
+            {
+                logBuilder.Append(majorRecordGetter.FormKey.ToString());
+            }
+        }
+        
+        return logBuilder.ToString();
+    }
+
+    /// <summary>
+    /// Bethesda's "unset" race placeholder. It carries the FaceGenHead flag (it is a copy of a
+    /// humanoid race), but its non-templated actors are engine plumbing — <c>AudioTemplate*</c>,
+    /// <c>VoiceType*</c>, <c>AADeleteWhenDoneTestJeremy*</c> — with no head parts and no real
+    /// face, all of which nonetheless ship FaceGen. Actors that merely CARRY it while inheriting
+    /// Traits (vanilla guards, and the overhauls that override them) are judged on their chain
+    /// terminus instead, so excluding it here drops only the plumbing.
+    /// </summary>
+    public static readonly FormKey PlaceholderRaceFormKey =
+        Mutagen.Bethesda.FormKeys.SkyrimSE.Skyrim.Race.DefaultRace.FormKey;
+
+    /// <summary>
+    /// Decides whether an NPC has a customizable face worth offering in the NPC list.
+    ///
+    /// <para>The gate is the RACE record's <see cref="Race.Flag.FaceGenHead"/> flag — the engine's
+    /// own signal for "this actor gets a built FaceGen head". It is deliberately NOT the
+    /// <c>ActorTypeNPC</c> keyword, which is a GAMEPLAY tag: mod authors correctly put it on
+    /// humanoid-shaped automatons, skeletons and monsters (Clockwork's Gilded, Vigilant's
+    /// Aurorans and Bone Humans, Unslaad's Manakins, Glenmoril's Brass Gear Knights) so they
+    /// behave as people for AI, combat and dialogue. Measured over a 183-plugin load order:
+    /// vanilla sets both signals together on every humanoid race and neither on every creature
+    /// race, and across 3,764 non-templated NPC records on FaceGenHead=false races, ZERO carry
+    /// head parts. The keyword also MISSES races that do have faces — DLC2MiraakRace being the
+    /// notable one, which is why Miraak was absent from the list.</para>
+    ///
+    /// <para>Shipped FaceGen files are NOT evidence of a face and must not be used as one: the
+    /// Creation Kit auto-exports facegeom/facetint (and writes default morph/tint records) for
+    /// any actor, headless or not. Loot the helmet off a Clockwork Gilded and there is no head
+    /// underneath, despite all 175 of them shipping FaceGen.</para>
+    ///
+    /// <para>The gate is applied to the record whose appearance actually RENDERS. A Traits-templated
+    /// NPC takes its race from its chain terminus, so the race field on its own record is inert —
+    /// which is exactly why Bethesda and mod authors leave junk there (FoxRace on templated
+    /// humans, DefaultRace on guards). Supply <paramref name="resolveNpc"/> so that walk can be
+    /// made; without it the NPC's own race is used, which is only correct for untemplated NPCs.</para>
+    /// </summary>
+    /// <param name="resolveNpc">
+    /// Resolver for each hop of the Traits chain. Should consult the mod's own plugins first and
+    /// fall back to the load order, so a chain is only reported unfollowable when its target
+    /// genuinely does not exist anywhere.
+    /// </param>
+    /// <param name="resolveRace">
+    /// Looks up a RACE record defined by a plugin that is NOT in the load order (an installed but
+    /// disabled mod), which the link cache cannot see. Required alongside
+    /// <paramref name="resolveNpc"/>: <paramref name="sourcePluginRace"/> only covers the race on
+    /// the NPC's own record, and once the walk lands on a terminus we need that terminus's race
+    /// instead — without this, a templated NPC using a custom race from a disabled plugin would be
+    /// rejected as "not in the load order".
+    /// </param>
+    public bool IsValidAppearanceRace(FormKey raceFormKey, INpcGetter npcGetter, Language? language,
+        out string rejectionMessage, out IRaceGetter? resolvedRace, IRaceGetter? sourcePluginRace = null,
+        Func<FormKey, INpcGetter?>? resolveNpc = null, Func<FormKey, IRaceGetter?>? resolveRace = null)
+    {
+        bool isCached = false;
+        rejectionMessage = "";
+        resolvedRace = null;
+        RaceEvaluation raceEvaluation;
+
+        // --- Judge the record the engine renders, not necessarily the one we were handed. ---
+        if (resolveNpc != null && IsValidTemplatedNpc(npcGetter))
+        {
+            using (ContextualPerformanceTracer.Trace("IVAR.TerminusWalk"))
+            {
+                var chainStatus = TryResolveAppearanceTerminus(npcGetter, resolveNpc, out var terminusKey);
+                if (chainStatus != FaceGenChainStatus.Resolved)
+                {
+                    // A dangling link, a cycle, or a levelled terminus. None of these can be judged
+                    // on a race: the NPC's own race field is inert and the terminus is unavailable.
+                    // Stay permissive — a levelled terminus has its own dedicated rejection
+                    // (TemplateChainTerminatesInLeveledNpc), and rejecting on a missing template
+                    // target would make the verdict depend on which plugins happen to be in scope
+                    // rather than on the NPC itself.
+                    return true;
+                }
+
+                var terminus = terminusKey == npcGetter.FormKey ? null : resolveNpc(terminusKey);
+                if (terminus != null)
+                {
+                    raceFormKey = terminus.Race.FormKey;
+                    // The caller's cached getter describes the DONOR's race, not the terminus's, so
+                    // re-look-up rather than carrying it over.
+                    sourcePluginRace = resolveRace?.Invoke(raceFormKey);
+                }
+            }
+        }
+
+        using (ContextualPerformanceTracer.Trace("IVAR.CacheCheck1"))
+        {
+            isCached = _raceValidityCache.TryGetValue(raceFormKey, out raceEvaluation);
+            // Try Cache first
+            if (isCached && raceEvaluation == RaceEvaluation.Valid)
+            {
+                return true;
+            }
+        }
+
+        if (!isCached)
+        {
+            // new race, had not yet been cached
+            IRaceGetter? raceGetter = null;
+            string identifier = raceFormKey.ToString();
+            using (ContextualPerformanceTracer.Trace("IVAR.NewRace.Resolution"))
+            {
+                if (sourcePluginRace != null)
+                {
+                    raceGetter = sourcePluginRace;
+                    resolvedRace = raceGetter;
+                }
+                else if (raceFormKey.IsNull)
+                {
+                    raceEvaluation = RaceEvaluation.InvalidNull;
+                }
+                else if (!_environmentStateProvider.LinkCache.TryResolve<IRaceGetter>(raceFormKey,
+                             out raceGetter) || raceGetter is null)
+                {
+                    raceEvaluation = RaceEvaluation.InvalidNotInLoadOrder;
+                    resolvedRace = raceGetter;
+                }
+            }
+
+            if (raceGetter is not null)
+            {
+                using (ContextualPerformanceTracer.Trace("IVAR.NewRace.Evaluation"))
+                {
+                    identifier = GetLogString(raceGetter, language, true);
+
+                    if (raceFormKey.Equals(PlaceholderRaceFormKey))
+                    {
+                        raceEvaluation = RaceEvaluation.InvalidPlaceholderRace;
+                    }
+                    else if (!raceGetter.Flags.HasFlag(Race.Flag.FaceGenHead))
+                    {
+                        raceEvaluation = RaceEvaluation.InvalidNoFaceGenHead;
+                    }
+                    else
+                    {
+                        raceEvaluation = RaceEvaluation.Valid;
+                    }
+
+                    // now cache the newly evaluated race
+                    using (ContextualPerformanceTracer.Trace("IVAR.AddToCache"))
+                    {
+                        _raceValidityCache.TryAdd(raceFormKey, raceEvaluation);
+                        Debug.WriteLine(
+                            $"Evaluating validity for new race: {identifier} with result: {raceEvaluation}");
+                    }
+                }
+            }
+        }
+        
+        using (ContextualPerformanceTracer.Trace("IVAR.Decision"))
+        {
+            if (raceEvaluation == RaceEvaluation.Valid)
+            {
+                return true;
+            }
+
+            // Only resolved on the rejection path, so naming the race costs nothing in the common
+            // case. Rejection logs that omit it are near-useless for diagnosing a bad filter.
+            var raceForLabel = resolvedRace; // an out parameter cannot be captured by a local function
+
+            string RaceLabel()
+            {
+                if (raceForLabel != null)
+                {
+                    return GetLogString(raceForLabel, language, true);
+                }
+                if (!raceFormKey.IsNull &&
+                    _environmentStateProvider.LinkCache.TryResolve<IRaceGetter>(raceFormKey, out var rg) && rg != null)
+                {
+                    return GetLogString(rg, language, true);
+                }
+                return raceFormKey.ToString();
+            }
+
+            switch (raceEvaluation)
+            {
+                case RaceEvaluation.InvalidNull:
+                    rejectionMessage = "its race is null.";
+                    return false;
+                case RaceEvaluation.InvalidNotInLoadOrder:
+                    rejectionMessage = $"its race ({raceFormKey}) is not in the current load order.";
+                    return false;
+                case RaceEvaluation.InvalidPlaceholderRace:
+                    rejectionMessage = "its race is the DefaultRace placeholder, which has no real face.";
+                    return false;
+                // InvalidNullKeywords / InvalidNotNpc are no longer produced, but a RaceEvalCache.json
+                // written by an older build can still decode to them; treat them as the same verdict.
+                case RaceEvaluation.InvalidNoFaceGenHead:
+                case RaceEvaluation.InvalidNullKeywords:
+                case RaceEvaluation.InvalidNotNpc:
+                    rejectionMessage = $"its race ({RaceLabel()}) has no FaceGen head " +
+                                       "(the Race record lacks the FaceGen Head flag).";
+                    return false;
+            }
+        }
+
+        return true;
+    }
+    
+    public void SaveRaceCache()
+    {
+        string cachePath = Path.Combine(AppContext.BaseDirectory, _raceValidityCacheFileName);
+
+        var filteredCache = _raceValidityCache.Where(x => !x.Key.IsNull); // null formkeys don't serialize correctly
+        
+        JSONhandler<ConcurrentDictionary<FormKey, RaceEvaluation>>.SaveJSONFile(new ConcurrentDictionary<FormKey, RaceEvaluation>(filteredCache), cachePath, out bool success, out string exceptionMessage );
+        if (!success)
+        {
+            Debug.WriteLine("Exception while saving race cache." + Environment.NewLine + exceptionMessage);
+        }
+    }
+
+    /// <summary>
+    /// Drops the persisted race verdicts so they are recomputed under the current rule. Safe to
+    /// call when the file does not exist; the cache rebuilds lazily and cheaply on the next scan.
+    /// </summary>
+    public static void DeletePersistedRaceValidityCache()
+    {
+        string cachePath = Path.Combine(AppContext.BaseDirectory, RaceValidityCacheFileName);
+        try
+        {
+            if (File.Exists(cachePath))
+            {
+                File.Delete(cachePath);
+            }
+        }
+        catch (Exception e)
+        {
+            // A stale cache degrades the filter but must never block startup.
+            Debug.WriteLine($"Could not delete {RaceValidityCacheFileName}: {e.Message}");
+        }
+    }
+
+    public void LoadRaceCache()
+    {
+        string cachePath = Path.Combine(AppContext.BaseDirectory, _raceValidityCacheFileName);
+        if (File.Exists(cachePath))
+        {
+            var rawCache = JSONhandler<ConcurrentDictionary<FormKey, RaceEvaluation>>.LoadJSONFile(cachePath, out bool success, out string exceptionMessage );
+            if (!success || rawCache == null)
+            {
+                _raceValidityCache = new();
+                Debug.WriteLine("Exception while loading race cache." + Environment.NewLine + exceptionMessage);
+            }
+            else
+            {
+                var filteredCache = rawCache.Where(x => x.Value != RaceEvaluation.InvalidNotInLoadOrder); // try re-evaluating these races in case they appear in the load order
+                _raceValidityCache = new ConcurrentDictionary<FormKey, RaceEvaluation>(filteredCache);
+                _raceValidityCache.TryAdd(new FormKey(), RaceEvaluation.InvalidNull);
+            }
+        }
+    }
+
+    public List<ModKey> GetModKeysInDirectory(string modFolderPath, List<string>? warnings, bool onlyEnabled)
+    {
+        List<ModKey> foundEnabledKeysInFolder = new();
+        string modFolderName = Path.GetFileName(modFolderPath);
+        try
+        {
+            var enabledKeys = _environmentStateProvider.Status == EnvironmentStateProvider.EnvironmentStatus.Valid ? _environmentStateProvider.LoadOrder.Keys.ToHashSet() : new HashSet<ModKey>();
+
+            foreach (var filePath in Directory.EnumerateFiles(modFolderPath, "*.es*", SearchOption.TopDirectoryOnly))
+            {
+                string fileNameWithExt = Path.GetFileName(filePath);
+                if (fileNameWithExt.EndsWith(".esp", StringComparison.OrdinalIgnoreCase) || fileNameWithExt.EndsWith(".esm", StringComparison.OrdinalIgnoreCase) || fileNameWithExt.EndsWith(".esl", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        ModKey parsedKey = ModKey.FromFileName(fileNameWithExt);
+                        if (!onlyEnabled || enabledKeys.Contains(parsedKey))
+                        {
+                            foundEnabledKeysInFolder.Add(parsedKey);
+                        }
+                    }
+                    catch (Exception parseEx) { warnings.Add($"Could not parse plugin '{fileNameWithExt}' in '{modFolderName}': {parseEx.Message}"); }
+                }
+            }
+        }
+        catch (Exception fileScanEx) { warnings.Add($"Error scanning Mod folder '{modFolderName}': {fileScanEx.Message}"); }
+        
+        return foundEnabledKeysInFolder;
+    }
+    
+    /// <summary>
+    /// ModKey -> FormID prefix for a load order: two hex digits for a full master (its index
+    /// among full masters), <c>FE</c> + three for a light one (its index among light masters).
+    /// The two counters advance independently, which is the whole reason this cannot be read off
+    /// a plugin's position in the list.
+    ///
+    /// <para>Pure, and takes the listing sequence rather than reading any provider, so a caller
+    /// holding a DIFFERENT load order than the app's own — the output validator builds an
+    /// untrimmed one, including this app's output plugin — gets FormIDs for the order it is
+    /// actually reporting on. <see cref="EnvironmentStateProvider.ComputeFormIdPrefixes"/> and
+    /// that validator share it so the two cannot drift.</para>
+    /// </summary>
+    public static Dictionary<ModKey, string> BuildFormIdPrefixes(
+        IEnumerable<IModListingGetter<ISkyrimModGetter>> listedOrder)
+    {
+        var prefixes = new Dictionary<ModKey, string>();
+        int fullMasterIndex = 0;
+        int lightMasterIndex = 0;
+
+        foreach (var listing in listedOrder)
+        {
+            if (listing.Mod != null && listing.Mod.ModHeader.Flags.HasFlag(SkyrimModHeader.HeaderFlag.Small))
+            {
+                if (lightMasterIndex > 4095) continue; // past FFF: no valid FormID to give
+                prefixes[listing.ModKey] = $"FE{lightMasterIndex:X3}";
+                lightMasterIndex++;
+            }
+            else
+            {
+                if (fullMasterIndex > 253) continue; // past FD: same
+                prefixes[listing.ModKey] = fullMasterIndex.ToString("X2");
+                fullMasterIndex++;
+            }
+        }
+
+        return prefixes;
+    }
+
+    /// <summary>
+    /// The 8-character FormID for a FormKey under the supplied prefixes, or empty when its plugin
+    /// isn't in that load order. A light master's local ID is the low 12 bits, a full master's the
+    /// low 24. Pure.
+    /// </summary>
+    public static string FormatFormId(FormKey formKey, IReadOnlyDictionary<ModKey, string> prefixes)
+    {
+        if (!prefixes.TryGetValue(formKey.ModKey, out var prefix)) return string.Empty;
+
+        return prefix.StartsWith("FE", StringComparison.Ordinal)
+            ? $"{prefix}{formKey.ID & 0xFFF:X3}"
+            : prefix + formKey.IDString();
+    }
+
+    public string FormKeyToFormIDString(FormKey formKey)
+    {
+        if (FormIDCache.TryGetValue(formKey, out var cachedId))
+        {
+            return cachedId;
+        }
+        
+        if (TryFormKeyToFormIDString(formKey, out string formIDstr))
+        {
+            FormIDCache[formKey] = formIDstr;
+            return formIDstr;
+        }
+        return string.Empty;
+    }
+
+    /// <summary>
+    /// Builds the textual content of a spawn-batch file (the in-game console ".bat" / "sel.txt" used to
+    /// place the patched NPCs for inspection): optional pre-commands, then one
+    /// <c>player.placeatme &lt;FormID&gt;</c> per resolvable NPC (in the given order), then optional
+    /// post-commands. Pure - no file IO or dialog - so the group-&gt;spawn-batch flow is unit-testable;
+    /// <see cref="NPC_Plugin_Chooser_2.View_Models.VM_Run.GenerateSpawnBatFileAsync"/> wraps it with the
+    /// save dialog and disk write. FormKeys that cannot be resolved to a FormID are skipped and reported
+    /// via <paramref name="unresolved"/>.
+    /// </summary>
+    public string BuildSpawnBatchContent(IEnumerable<FormKey> npcFormKeys, string? preCommands,
+        string? postCommands, out int successCount, out List<FormKey> unresolved)
+    {
+        successCount = 0;
+        unresolved = new List<FormKey>();
+        var sb = new StringBuilder();
+
+        if (!string.IsNullOrWhiteSpace(preCommands))
+        {
+            sb.AppendLine(preCommands);
+        }
+
+        foreach (var npcFormKey in npcFormKeys)
+        {
+            string formId = FormKeyToFormIDString(npcFormKey);
+            if (!string.IsNullOrEmpty(formId))
+            {
+                sb.AppendLine($"player.placeatme {formId}");
+                successCount++;
+            }
+            else
+            {
+                unresolved.Add(npcFormKey);
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(postCommands))
+        {
+            sb.AppendLine(postCommands);
+        }
+
+        return sb.ToString();
+    }
+
+    public static bool IsFemale(INpcGetter npc)
+    {
+        return npc.Configuration.Flags.HasFlag(NpcConfiguration.Flag.Female);
+    }
+
+    /// <summary>
+    /// The race key an ArmorAddon must name to be worn by an actor of
+    /// <paramref name="raceGetter"/> — RACE's ArmorRace (RNAM), or null when it
+    /// is unset or points back at the race itself.
+    /// <para>The engine matches ArmorAddons against the actor race's ArmorRace,
+    /// not against the actor's own race. Custom-race followers depend on this:
+    /// they set ArmorRace to a vanilla race so vanilla-targeted armatures apply.
+    /// Comparing the NPC's raw race key alone drops every armature such a mod
+    /// ships — body, hands and feet — leaving a disembodied FaceGen head (the
+    /// head comes from the FaceGeom NIF path and never goes through armature
+    /// resolution). Specimen: Chaconne Vilja SSE, whose AAEMNordViljaRace has
+    /// ArmorRace=NordRace and whose three armatures all name NordRace.</para>
+    /// </summary>
+    public static FormKey? GetArmorRaceKey(IRaceGetter? raceGetter)
+    {
+        if (raceGetter == null || raceGetter.ArmorRace.IsNull) return null;
+        var armorRace = raceGetter.ArmorRace.FormKey;
+        return armorRace.Equals(raceGetter.FormKey) ? null : armorRace;
+    }
+
+    /// <summary>EditorID of the output-owned FormList that every head part this app MINTS uses as
+    /// its ValidRaces — the wig→head-part converter's parts and the wig forwarder's modeless bald
+    /// hair.</summary>
+    public const string MintedHeadPartValidRacesEditorId = "NPC2_HeadPartValidRaces";
+
+    private static readonly object _mintedValidRacesLock = new();
+
+    /// <summary>
+    /// The output plugin's own ValidRaces FormList, extended to contain <paramref name="raceKey"/>.
+    /// Created on first use and grown as more races are encountered; found by EditorID, so it is
+    /// naturally scoped to one run (the output mod is rebuilt each time).
+    ///
+    /// <para><b>Why not reuse a vanilla list.</b> Both mint sites used to point at
+    /// <c>HeadPartsAllRacesMinusBeast [FLST:0A803F]</c>, inherited by copy from High Poly NPC
+    /// Overhaul's <c>HighPoly_HairBald</c>. That list is not what its name suggests — it holds 19
+    /// entries, the ten PLAYABLE races plus their vampire variants, so it excludes every
+    /// non-playable race and not merely beast races. The converter then guarded on membership,
+    /// which made the check circular: it declined because the race was missing from a list this
+    /// app had chosen. All 25 declines in the measured run were DremoraRace, whose NPCs carry head
+    /// parts and whose wig ArmorAddon the mod author had explicitly named for them.</para>
+    ///
+    /// <para>Minted head parts are private to the output and reachable only from the NPCs this run
+    /// points at them, so scoping their ValidRaces to exactly the races converted for is both
+    /// safe and more accurate than any borrowed list.</para>
+    /// </summary>
+    public static FormKey GetOrCreateMintedHeadPartValidRaces(ISkyrimMod outputMod, FormKey? raceKey)
+    {
+        lock (_mintedValidRacesLock)
+        {
+            var list = outputMod.FormLists.FirstOrDefault(f =>
+                string.Equals(f.EditorID, MintedHeadPartValidRacesEditorId, StringComparison.OrdinalIgnoreCase));
+            if (list == null)
+            {
+                list = outputMod.FormLists.AddNew();
+                list.EditorID = MintedHeadPartValidRacesEditorId;
+                RecordProvenanceDiag.RecordGenerated(list.FormKey, list.EditorID, "FormList");
+            }
+
+            if (raceKey is { IsNull: false } race && list.Items.All(i => i.FormKey != race))
+            {
+                list.Items.Add(race.ToLink<ISkyrimMajorRecordGetter>());
+            }
+
+            return list.FormKey;
+        }
+    }
+
+    /// <summary>
+    /// Does <paramref name="arma"/> name either race key in Race/AdditionalRaces?
+    /// <paramref name="armorRaceKey"/> is the ArmorRace indirection from
+    /// <see cref="GetArmorRaceKey"/> and may be null (no indirection, or the
+    /// race record couldn't be resolved — in which case this degrades to the
+    /// old raw-key comparison rather than guessing).
+    /// <para>Shared by every ARMA race filter in the app so they can't drift
+    /// apart: they feed rendering, wig detection and wig conversion, and a
+    /// disagreement there means one subsystem converts a wig another can't see.
+    /// Callers keep their own null-race / universal-ARMA guards — those differ
+    /// deliberately between the render path and the converter path.</para>
+    /// </summary>
+    public static bool ArmaNamesRace(IArmorAddonGetter arma, FormKey? npcRaceKey, FormKey? armorRaceKey)
+    {
+        if (arma.Race != null && !arma.Race.IsNull)
+        {
+            var armaRace = arma.Race.FormKey;
+            if (npcRaceKey.HasValue && armaRace.Equals(npcRaceKey.Value)) return true;
+            if (armorRaceKey.HasValue && armaRace.Equals(armorRaceKey.Value)) return true;
+        }
+
+        if (arma.AdditionalRaces != null)
+        {
+            foreach (var addRace in arma.AdditionalRaces)
+            {
+                if (addRace == null || addRace.IsNull) continue;
+                var addKey = addRace.FormKey;
+                if (npcRaceKey.HasValue && addKey.Equals(npcRaceKey.Value)) return true;
+                if (armorRaceKey.HasValue && addKey.Equals(armorRaceKey.Value)) return true;
+            }
+        }
+
+        return false;
+    }
+
+    public static Gender GetGender(INpcGetter npc)
+    {
+        if (IsFemale(npc))
+        {
+            return Gender.Female;
+        }
+        else
+        {
+            return Gender.Male;
+        }
+    }
+
+    /// <summary>
+    /// Parses a Race filter term. A trailing '~' means "exact match" (whole-string),
+    /// e.g. "NordRace~" matches only "NordRace", not "NordRaceVampire". Returns the
+    /// bare term (terminator and surrounding whitespace stripped) plus whether exact
+    /// matching was requested.
+    /// </summary>
+    public static (string Term, bool Exact) ParseRaceSearchTerm(string? searchText)
+    {
+        var trimmed = (searchText ?? string.Empty).Trim();
+        bool exact = trimmed.EndsWith("~", StringComparison.Ordinal);
+        if (exact) trimmed = trimmed.TrimEnd('~').Trim();
+        return (trimmed, exact);
+    }
+
+    /// <summary>
+    /// Formats a race's Name + EditorID as a single "Name (EditorID)" label for the Race
+    /// filter combo — matching what <see cref="BuildRaceFilterOptions"/> lists. Falls back
+    /// to whichever part exists, and collapses "X (X)" to "X" when Name and EditorID are
+    /// the same. Returns null when both are blank.
+    /// </summary>
+    public static string? CombineRaceLabel(string? name, string? editorId)
+    {
+        name = name?.Trim();
+        editorId = editorId?.Trim();
+        bool hasName = !string.IsNullOrEmpty(name);
+        bool hasId = !string.IsNullOrEmpty(editorId);
+        if (hasName && hasId)
+            return string.Equals(name, editorId, StringComparison.OrdinalIgnoreCase) ? name : $"{name} ({editorId})";
+        if (hasId) return editorId;
+        if (hasName) return name;
+        return null;
+    }
+
+    /// <summary>
+    /// Matches a resolved race against a Race filter term. The term is tested against the
+    /// race's Name, its EditorID, and the combined "Name (EditorID)" label — so typing a
+    /// raw Name/EditorID and picking a combined dropdown entry both work. Partial
+    /// (case-insensitive Contains) unless <paramref name="exact"/>, in which case one of
+    /// those three must equal the term exactly (case-insensitive).
+    /// </summary>
+    public static bool RaceMatches(string? raceName, string? raceEditorId, string term, bool exact)
+    {
+        if (string.IsNullOrEmpty(term)) return false;
+        var combined = CombineRaceLabel(raceName, raceEditorId);
+        if (exact)
+        {
+            return string.Equals(raceEditorId, term, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(raceName, term, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(combined, term, StringComparison.OrdinalIgnoreCase);
+        }
+        return (raceEditorId?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false)
+            || (raceName?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false)
+            || (combined?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false);
+    }
+
+    /// <summary>
+    /// Builds the sorted, distinct list of "Name (EditorID)" labels that populates the
+    /// Race filter's editable combo (one entry per race). Blank pairs are dropped and
+    /// duplicates are collapsed case-insensitively.
+    /// </summary>
+    public static List<string> BuildRaceFilterOptions(IEnumerable<(string? Name, string? EditorId)> races)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, editorId) in races)
+        {
+            var label = CombineRaceLabel(name, editorId);
+            if (!string.IsNullOrWhiteSpace(label)) set.Add(label);
+        }
+        return set.OrderBy(s => s, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    /// <summary>
+    /// Sortable key over NPC-record fields that predict which renderer assets
+    /// will overlap between adjacent renders (skeleton/body/skin/head). Sorting
+    /// a list of NPCs by this key — without parsing any NIF — clusters NPCs
+    /// that share the same race/skin/worn-armor/head-parts/hair so the renderer
+    /// reuses meshes and textures across consecutive frames. Used by the
+    /// "Generate All Mugshots" batch flow.
+    /// </summary>
+    public readonly record struct NpcGroupingKey(
+        bool IsFemale,
+        string Race,
+        string WornArmor,
+        string HeadPartsHash,
+        string HairColor) : IComparable<NpcGroupingKey>
+    {
+        public int CompareTo(NpcGroupingKey other)
+        {
+            int c = IsFemale.CompareTo(other.IsFemale);
+            if (c != 0) return c;
+            c = string.CompareOrdinal(Race, other.Race);
+            if (c != 0) return c;
+            c = string.CompareOrdinal(WornArmor, other.WornArmor);
+            if (c != 0) return c;
+            c = string.CompareOrdinal(HeadPartsHash, other.HeadPartsHash);
+            if (c != 0) return c;
+            return string.CompareOrdinal(HairColor, other.HairColor);
+        }
+    }
+
+    public static NpcGroupingKey BuildNpcGroupingKey(INpcGetter npc)
+    {
+        string race = npc.Race.IsNull ? string.Empty : npc.Race.FormKey.ToString();
+        string wornArmor = npc.WornArmor.IsNull ? string.Empty : npc.WornArmor.FormKey.ToString();
+        string hairColor = npc.HairColor.IsNull ? string.Empty : npc.HairColor.FormKey.ToString();
+
+        string headPartsHash;
+        if (npc.HeadParts == null || npc.HeadParts.Count == 0)
+        {
+            headPartsHash = string.Empty;
+        }
+        else
+        {
+            // Sort so re-orderings of the same set produce the same key. Join
+            // on a separator that can't appear inside a FormKey string so the
+            // hash is collision-free over the input set.
+            var keys = new List<string>(npc.HeadParts.Count);
+            foreach (var link in npc.HeadParts)
+            {
+                if (!link.IsNull) keys.Add(link.FormKey.ToString());
+            }
+            keys.Sort(StringComparer.Ordinal);
+            headPartsHash = string.Join("|", keys);
+        }
+
+        return new NpcGroupingKey(IsFemale(npc), race, wornArmor, headPartsHash, hairColor);
+    }
+
+    public static bool HasTraitsFlag(INpcGetter npc)
+    {
+        return npc.Configuration.TemplateFlags.HasFlag(NpcConfiguration.TemplateFlag.Traits);
+    }
+
+    public static bool IsValidTemplatedNpc(INpcGetter? npc)
+    {
+        return npc != null &&
+               HasTraitsFlag(npc) &&
+               npc.Template != null &&
+               !npc.Template.IsNull;
+    }
+
+    /// <summary>
+    /// Walks an NPC's Traits template chain and returns the FormKey of the record whose
+    /// appearance is actually drawn. A Traits-templated NPC carries no FaceGen (nor head
+    /// parts / skin / hair colour) of its own — everything visible comes from the record
+    /// at the end of the chain, which is why such an NPC has no mugshot of its own to
+    /// render until you follow the chain.
+    ///
+    /// <para>Returns <paramref name="npcFormKey"/> unchanged when the NPC does not inherit
+    /// its traits, and whenever the chain cannot be followed to a concrete NPC record — a
+    /// null / dangling template link, a link that resolves to something other than an NPC
+    /// (a Leveled NPC, whose appearance isn't fixed), a cycle, or a chain longer than
+    /// <paramref name="maxDepth"/> records. Callers therefore keep their existing "no
+    /// appearance data" behaviour instead of rendering a guess (a mid-chain record's face
+    /// would be the wrong face).</para>
+    ///
+    /// <para><paramref name="resolveNpc"/> supplies the record for each hop; pass a resolver
+    /// scoped to whichever mod's records the caller cares about, since a mod may re-point an
+    /// NPC's template.</para>
+    /// </summary>
+    public static FormKey ResolveAppearanceTemplateTerminus(
+        FormKey npcFormKey,
+        Func<FormKey, INpcGetter?> resolveNpc,
+        int maxDepth = 50)
+    {
+        var current = resolveNpc(npcFormKey);
+        if (current == null) return npcFormKey;
+
+        var visited = new HashSet<FormKey> { npcFormKey };
+        var terminus = npcFormKey;
+
+        for (int depth = 0; depth < maxDepth; depth++)
+        {
+            // Own traits (or a Traits flag with no template to follow) — this is
+            // the record the appearance comes from.
+            if (!IsValidTemplatedNpc(current)) return terminus;
+
+            var next = current.Template.FormKey;
+            if (!visited.Add(next)) return npcFormKey; // cycle
+            var nextNpc = resolveNpc(next);
+            if (nextNpc == null) return npcFormKey;    // dangling link, or a Leveled NPC
+            terminus = next;
+            current = nextNpc;
+        }
+
+        return npcFormKey; // pathologically long chain
+    }
+
+    /// <summary>
+    /// How many Traits hops separate an NPC from the record its face comes from: 0 for an NPC
+    /// with its own face, 1 for one that copies a face-owning NPC, 2 for one that copies it, and
+    /// so on. Ordering work by this value processes every face's owner before anyone who
+    /// inherits it.
+    ///
+    /// <para>A chain that cannot be followed — dangling link, Leveled NPC terminus, cycle,
+    /// pathological length — counts as 0 rather than throwing: there is no in-scope record such
+    /// an NPC could be made consistent with, so it belongs in the same band as the NPCs that own
+    /// their faces. <paramref name="resolveNpc"/> is the same per-hop resolver
+    /// <see cref="ResolveAppearanceTemplateTerminus"/> takes.</para>
+    /// </summary>
+    public static int TemplateChainDepth(
+        FormKey npcFormKey,
+        Func<FormKey, INpcGetter?> resolveNpc,
+        int maxDepth = 50)
+    {
+        var current = resolveNpc(npcFormKey);
+        if (current == null) return 0;
+
+        var visited = new HashSet<FormKey> { npcFormKey };
+
+        for (int depth = 0; depth < maxDepth; depth++)
+        {
+            if (!IsValidTemplatedNpc(current)) return depth;
+
+            var next = current.Template.FormKey;
+            if (!visited.Add(next)) return 0;       // cycle
+            var nextNpc = resolveNpc(next);
+            if (nextNpc == null) return 0;          // dangling link, or a Leveled NPC
+            current = nextNpc;
+        }
+
+        return 0; // pathologically long chain
+    }
+
+    /// <summary>
+    /// <see cref="ResolveAppearanceTemplateTerminus"/> with the three outcomes kept apart.
+    ///
+    /// <para>That method deliberately returns its input unchanged both when an NPC is not
+    /// templated and when the chain cannot be followed, which is right for callers that just
+    /// want "whose face do I draw". Callers that must REFUSE to act on an unfollowable chain
+    /// need the distinction, and it is recoverable: a validly-templated NPC always advances at
+    /// least one hop on success, so an unchanged FormKey means the walk failed.</para>
+    /// </summary>
+    /// <param name="isLeveledNpc">
+    /// Recognises a Leveled NPC link. Without it, a levelled terminus is indistinguishable from a
+    /// broken chain — and it is by far the commoner of the two, so callers that act on the result
+    /// should always supply it.
+    /// </param>
+    /// <param name="trace">
+    /// Human-readable hop-by-hop record of the walk, for diagnostics. Chains fail for several
+    /// different reasons that all look identical from the outside, so the report needs to say which.
+    /// </param>
+    public static FaceGenChainStatus TryResolveAppearanceTerminus(
+        INpcGetter donor,
+        Func<FormKey, INpcGetter?> resolveNpc,
+        out FormKey terminus,
+        Func<FormKey, bool>? isLeveledNpc = null,
+        Action<string>? trace = null,
+        int maxDepth = 50)
+    {
+        terminus = donor.FormKey;
+        if (!IsValidTemplatedNpc(donor)) return FaceGenChainStatus.NotTemplated;
+
+        // Walk from the DONOR RECORD, not from its FormKey. Re-resolving the FormKey through the
+        // link cache would start the walk at the load order's WINNING override, which can disagree
+        // with the record the user actually selected about whether this NPC inherits at all — and
+        // the output carries the donor's inheritance, not the winner's. Starting from the winner
+        // made valid one-hop chains look unfollowable.
+        var current = donor;
+        var visited = new HashSet<FormKey> { donor.FormKey };
+
+        for (int depth = 0; depth < maxDepth; depth++)
+        {
+            if (!IsValidTemplatedNpc(current))
+            {
+                trace?.Invoke($"terminus {terminus}");
+                return FaceGenChainStatus.Resolved;
+            }
+
+            var next = current.Template.FormKey;
+
+            if (!visited.Add(next))
+            {
+                trace?.Invoke($"cycle at {next}");
+                terminus = donor.FormKey;
+                return FaceGenChainStatus.Unfollowable;
+            }
+
+            if (isLeveledNpc != null && isLeveledNpc(next))
+            {
+                trace?.Invoke($"levelled list {next}");
+                terminus = donor.FormKey;
+                return FaceGenChainStatus.LeveledTerminus;
+            }
+
+            var nextNpc = resolveNpc(next);
+            if (nextNpc == null)
+            {
+                trace?.Invoke($"unresolvable {next}");
+                terminus = donor.FormKey;
+                return FaceGenChainStatus.Unfollowable;
+            }
+
+            trace?.Invoke($"-> {next}");
+            terminus = next;
+            current = nextNpc;
+        }
+
+        trace?.Invoke($"exceeded {maxDepth} hops");
+        terminus = donor.FormKey;
+        return FaceGenChainStatus.Unfollowable;
+    }
+
+    /// <summary>
+    /// Copies the fields the Traits template flag governs from the chain terminus onto
+    /// <paramref name="target"/>: race, head texture, hair colour, worn armor, height, weight,
+    /// texture lighting, head parts, face morph, face parts, tint layers, and the Female flag
+    /// (sex drives which head parts and FaceGen the engine builds, so it must follow the face).
+    /// Mirrors what the engine would have resolved at load, so clearing the Traits flag
+    /// afterwards leaves the same visible result with none of the indirection.
+    ///
+    /// <para>Shared by both output modes (the SkyPatcher surrogate and the record-mode
+    /// override). Writes plain FormKey references; when dependency merge-in is active the
+    /// caller's merge walker runs afterwards and remaps any link it is responsible for. Does
+    /// NOT touch the Traits flag itself — the caller clears it as the second half of the
+    /// flatten, so the two halves stay visible at the decision site.</para>
+    /// </summary>
+    public static void CopyInheritedAppearance(Npc target, INpcGetter terminus)
+    {
+        target.Race.SetTo(terminus.Race.FormKey);
+        target.HeadTexture.SetTo(terminus.HeadTexture.FormKey);
+        target.HairColor.SetTo(terminus.HairColor.FormKey);
+        target.WornArmor.SetTo(terminus.WornArmor.FormKey);
+        target.Height = terminus.Height;
+        target.Weight = terminus.Weight;
+        target.TextureLighting = terminus.TextureLighting;
+
+        target.HeadParts.Clear();
+        foreach (var hp in terminus.HeadParts)
+        {
+            target.HeadParts.Add(hp.FormKey);
+        }
+
+        target.FaceMorph = terminus.FaceMorph?.DeepCopy();
+        target.FaceParts = terminus.FaceParts?.DeepCopy();
+
+        target.TintLayers.Clear();
+        foreach (var layer in terminus.TintLayers)
+        {
+            target.TintLayers.Add(layer.DeepCopy());
+        }
+
+        if (terminus.Configuration.Flags.HasFlag(NpcConfiguration.Flag.Female))
+        {
+            target.Configuration.Flags |= NpcConfiguration.Flag.Female;
+        }
+        else
+        {
+            target.Configuration.Flags &= ~NpcConfiguration.Flag.Female;
+        }
+    }
+
+    /// <summary>
+    /// Walks the template chain starting from the given NPC and returns true if the chain
+    /// terminates in a Leveled NPC (LVLN record). NPCs whose template chain ends in a
+    /// Leveled NPC cannot have a unique appearance selected for them.
+    /// 
+    /// Results are cached per-session so that overlapping chains (e.g. A→B→C→LVLN then
+    /// D→B→…) short-circuit as soon as they hit an already-evaluated FormKey.
+    /// 
+    /// Resolution order for each link in the chain:
+    ///   1. Search the provided mod plugins (if any).
+    ///   2. Fall back to the environment link cache.
+    /// </summary>
+    public bool TemplateChainTerminatesInLeveledNpc(
+        INpcGetter npcGetter,
+        IEnumerable<ISkyrimModGetter>? modPlugins = null,
+        int maxDepth = 50)
+    {
+        if (!IsValidTemplatedNpc(npcGetter))
+        {
+            return false; // Not templated at all — nothing to check
+        }
+
+        // Check if this exact NPC was already evaluated
+        if (_leveledNpcChainCache.TryGetValue(npcGetter.FormKey, out var cachedResult))
+        {
+            return cachedResult;
+        }
+
+        // Collect every NPC FormKey we visit so we can backfill the cache afterwards
+        var visitedNpcFormKeys = new List<FormKey> { npcGetter.FormKey };
+        var visitedSet = new HashSet<FormKey>();
+        var templateFormKey = npcGetter.Template.FormKey;
+        var pluginList = modPlugins?.ToList(); // avoid multiple enumeration
+        bool result = false; // assume valid until proven otherwise
+
+        for (int depth = 0; depth < maxDepth; depth++)
+        {
+            if (templateFormKey.IsNull || !visitedSet.Add(templateFormKey))
+            {
+                break; // null link or cycle detected
+            }
+
+            // --- Check the cache for this template FormKey ---
+            if (_leveledNpcChainCache.TryGetValue(templateFormKey, out var cached))
+            {
+                result = cached;
+                break; // propagate the cached answer to everything upstream
+            }
+
+            // --- Try to resolve as a Leveled NPC first (cheapest decisive check) ---
+            bool isLeveled = false;
+
+            // Check plugins
+            if (!isLeveled && pluginList != null)
+            {
+                foreach (var plugin in pluginList)
+                {
+                    if (plugin.LeveledNpcs.FirstOrDefault(l => l.FormKey == templateFormKey) != null)
+                    {
+                        isLeveled = true;
+                        break;
+                    }
+                }
+            }
+
+            // Check link cache
+            if (!isLeveled)
+            {
+                isLeveled = _environmentStateProvider.LinkCache
+                    .TryResolve<ILeveledNpcGetter>(templateFormKey, out _);
+            }
+
+            if (isLeveled)
+            {
+                result = true;
+                break;
+            }
+
+            // --- Not a Leveled NPC — try to resolve as a regular NPC and continue walking ---
+            INpcGetter? nextNpc = null;
+
+            // Check plugins first
+            if (pluginList != null)
+            {
+                foreach (var plugin in pluginList)
+                {
+                    nextNpc = plugin.Npcs.FirstOrDefault(n => n.FormKey == templateFormKey);
+                    if (nextNpc != null) break;
+                }
+            }
+
+            // Fall back to link cache
+            if (nextNpc == null)
+            {
+                _environmentStateProvider.LinkCache.TryResolve<INpcGetter>(templateFormKey, out nextNpc);
+            }
+
+            if (nextNpc == null)
+            {
+                break; // can't resolve further — assume valid
+            }
+
+            // Track this intermediate NPC so it gets cached too
+            visitedNpcFormKeys.Add(nextNpc.FormKey);
+
+            if (!IsValidTemplatedNpc(nextNpc))
+            {
+                break; // chain ends at a non-templated NPC — valid
+            }
+
+            templateFormKey = nextNpc.Template.FormKey;
+        }
+
+        // --- Backfill the cache for every NPC FormKey we visited in this chain ---
+        foreach (var formKey in visitedNpcFormKeys)
+        {
+            _leveledNpcChainCache.TryAdd(formKey, result);
+        }
+
+        return result;
+    }
+    
+    /// <summary>
+    /// The top-level record groups covered by <see cref="LazyEnumerateMajorRecords(ISkyrimModGetter)"/>: each
+    /// group's getter interface (the key matched against typesToSkip / <see cref="AppearanceRecordTypes"/>)
+    /// paired with its accessor on the mod.
+    /// </summary>
+    private static readonly (Type GetterType, Func<ISkyrimModGetter, IGroupGetter?> GetGroup)[] TopLevelRecordGroups =
+    {
+        (typeof(IAcousticSpaceGetter), static m => m.AcousticSpaces),
+        (typeof(IActionRecordGetter), static m => m.Actions),
+        (typeof(IActivatorGetter), static m => m.Activators),
+        (typeof(IActorValueInformationGetter), static m => m.ActorValueInformation),
+        (typeof(IAddonNodeGetter), static m => m.AddonNodes),
+        (typeof(IAlchemicalApparatusGetter), static m => m.AlchemicalApparatuses),
+        (typeof(IAmmunitionGetter), static m => m.Ammunitions),
+        (typeof(IAnimatedObjectGetter), static m => m.AnimatedObjects),
+        (typeof(IArmorAddonGetter), static m => m.ArmorAddons),
+        (typeof(IArmorGetter), static m => m.Armors),
+        (typeof(IArtObjectGetter), static m => m.ArtObjects),
+        (typeof(IAssociationTypeGetter), static m => m.AssociationTypes),
+        (typeof(IBodyPartGetter), static m => m.BodyParts),
+        (typeof(IBookGetter), static m => m.Books),
+        (typeof(ICameraPathGetter), static m => m.CameraPaths),
+        (typeof(ICameraShotGetter), static m => m.CameraShots),
+        (typeof(IClassGetter), static m => m.Classes),
+        (typeof(IClimateGetter), static m => m.Climates),
+        (typeof(ICollisionLayerGetter), static m => m.CollisionLayers),
+        (typeof(IColorRecordGetter), static m => m.Colors),
+        (typeof(ICombatStyleGetter), static m => m.CombatStyles),
+        (typeof(IConstructibleObjectGetter), static m => m.ConstructibleObjects),
+        (typeof(IContainerGetter), static m => m.Containers),
+        (typeof(IDebrisGetter), static m => m.Debris),
+        (typeof(IDefaultObjectManagerGetter), static m => m.DefaultObjectManagers),
+        (typeof(IDialogBranchGetter), static m => m.DialogBranches),
+        (typeof(IDialogTopicGetter), static m => m.DialogTopics),
+        (typeof(IDialogViewGetter), static m => m.DialogViews),
+        (typeof(IDoorGetter), static m => m.Doors),
+        (typeof(IDualCastDataGetter), static m => m.DualCastData),
+        (typeof(IEffectShaderGetter), static m => m.EffectShaders),
+        (typeof(IEncounterZoneGetter), static m => m.EncounterZones),
+        (typeof(IEquipTypeGetter), static m => m.EquipTypes),
+        (typeof(IExplosionGetter), static m => m.Explosions),
+        (typeof(IEyesGetter), static m => m.Eyes),
+        (typeof(IFactionGetter), static m => m.Factions),
+        (typeof(IFloraGetter), static m => m.Florae),
+        (typeof(IFootstepSetGetter), static m => m.FootstepSets),
+        (typeof(IFootstepGetter), static m => m.Footsteps),
+        (typeof(IFormListGetter), static m => m.FormLists),
+        (typeof(IFurnitureGetter), static m => m.Furniture),
+        (typeof(IGameSettingGetter), static m => m.GameSettings),
+        (typeof(IGlobalGetter), static m => m.Globals),
+        (typeof(IGrassGetter), static m => m.Grasses),
+        (typeof(IHairGetter), static m => m.Hairs),
+        (typeof(IHazardGetter), static m => m.Hazards),
+        (typeof(IHeadPartGetter), static m => m.HeadParts),
+        (typeof(IIdleAnimationGetter), static m => m.IdleAnimations),
+        (typeof(IIdleMarkerGetter), static m => m.IdleMarkers),
+        (typeof(IImageSpaceAdapterGetter), static m => m.ImageSpaceAdapters),
+        (typeof(IImageSpaceGetter), static m => m.ImageSpaces),
+        (typeof(IImpactDataSetGetter), static m => m.ImpactDataSets),
+        (typeof(IImpactGetter), static m => m.Impacts),
+        (typeof(IIngestibleGetter), static m => m.Ingestibles),
+        (typeof(IIngredientGetter), static m => m.Ingredients),
+        (typeof(IKeyGetter), static m => m.Keys),
+        (typeof(IKeywordGetter), static m => m.Keywords),
+        (typeof(ILandscapeTextureGetter), static m => m.LandscapeTextures),
+        (typeof(ILensFlareGetter), static m => m.LensFlares),
+        (typeof(ILeveledItemGetter), static m => m.LeveledItems),
+        (typeof(ILeveledNpcGetter), static m => m.LeveledNpcs),
+        (typeof(ILeveledSpellGetter), static m => m.LeveledSpells),
+        (typeof(ILightingTemplateGetter), static m => m.LightingTemplates),
+        (typeof(ILightGetter), static m => m.Lights),
+        (typeof(ILoadScreenGetter), static m => m.LoadScreens),
+        (typeof(ILocationReferenceTypeGetter), static m => m.LocationReferenceTypes),
+        (typeof(ILocationGetter), static m => m.Locations),
+        (typeof(IMagicEffectGetter), static m => m.MagicEffects),
+        (typeof(IMaterialObjectGetter), static m => m.MaterialObjects),
+        (typeof(IMaterialTypeGetter), static m => m.MaterialTypes),
+        (typeof(IMessageGetter), static m => m.Messages),
+        (typeof(IMiscItemGetter), static m => m.MiscItems),
+        (typeof(IMoveableStaticGetter), static m => m.MoveableStatics),
+        (typeof(IMovementTypeGetter), static m => m.MovementTypes),
+        (typeof(IMusicTrackGetter), static m => m.MusicTracks),
+        (typeof(IMusicTypeGetter), static m => m.MusicTypes),
+        (typeof(INavigationMeshInfoMapGetter), static m => m.NavigationMeshInfoMaps),
+        (typeof(INpcGetter), static m => m.Npcs),
+        (typeof(IObjectEffectGetter), static m => m.ObjectEffects),
+        (typeof(IOutfitGetter), static m => m.Outfits),
+        (typeof(IPackageGetter), static m => m.Packages),
+        (typeof(IPerkGetter), static m => m.Perks),
+        (typeof(IProjectileGetter), static m => m.Projectiles),
+        (typeof(IQuestGetter), static m => m.Quests),
+        (typeof(IRaceGetter), static m => m.Races),
+        (typeof(IRegionGetter), static m => m.Regions),
+        (typeof(IRelationshipGetter), static m => m.Relationships),
+        (typeof(IReverbParametersGetter), static m => m.ReverbParameters),
+        (typeof(ISceneGetter), static m => m.Scenes),
+        (typeof(IScrollGetter), static m => m.Scrolls),
+        (typeof(IShaderParticleGeometryGetter), static m => m.ShaderParticleGeometries),
+        (typeof(IShoutGetter), static m => m.Shouts),
+        (typeof(ISoulGemGetter), static m => m.SoulGems),
+        (typeof(ISoundCategoryGetter), static m => m.SoundCategories),
+        (typeof(ISoundDescriptorGetter), static m => m.SoundDescriptors),
+        (typeof(ISoundMarkerGetter), static m => m.SoundMarkers),
+        (typeof(ISoundOutputModelGetter), static m => m.SoundOutputModels),
+        (typeof(ISpellGetter), static m => m.Spells),
+        (typeof(IStaticGetter), static m => m.Statics),
+        (typeof(IStoryManagerBranchNodeGetter), static m => m.StoryManagerBranchNodes),
+        (typeof(IStoryManagerEventNodeGetter), static m => m.StoryManagerEventNodes),
+        (typeof(IStoryManagerQuestNodeGetter), static m => m.StoryManagerQuestNodes),
+        (typeof(ITalkingActivatorGetter), static m => m.TalkingActivators),
+        (typeof(ITextureSetGetter), static m => m.TextureSets),
+        (typeof(ITreeGetter), static m => m.Trees),
+        (typeof(IVisualEffectGetter), static m => m.VisualEffects),
+        (typeof(IVoiceTypeGetter), static m => m.VoiceTypes),
+        (typeof(IVolumetricLightingGetter), static m => m.VolumetricLightings),
+        (typeof(IWaterGetter), static m => m.Waters),
+        (typeof(IWeaponGetter), static m => m.Weapons),
+        (typeof(IWeatherGetter), static m => m.Weathers),
+        (typeof(IWordOfPowerGetter), static m => m.WordsOfPower),
+        (typeof(IWorldspaceGetter), static m => m.Worldspaces),
+    };
+
+    private static readonly HashSet<Type> NoSkippedTypes = new();
+
+    /// <summary>
+    /// Lazily enumerates the identities (FormKey + record type) of all top-level major records in a mod.
+    /// Walks each group's FormKey cache (built from the record headers alone) instead of constructing the
+    /// records themselves, so a record whose subrecord data Mutagen rejects as malformed (e.g. a FootstepSet
+    /// whose DATA counts disagree with its lists) is still enumerated instead of aborting the whole scan.
+    /// The returned links carry only record identity; callers that need record CONTENTS must resolve them
+    /// separately and handle parse failures. Processing stops as soon as the consuming loop breaks.
+    /// </summary>
+    public static IEnumerable<IFormLinkGetter> LazyEnumerateMajorRecords(ISkyrimModGetter mod)
+    {
+        return LazyEnumerateMajorRecords(mod, NoSkippedTypes);
+    }
+
+    /// <summary>
+    /// Same as <see cref="LazyEnumerateMajorRecords(ISkyrimModGetter)"/>, skipping any record groups whose
+    /// getter type is included in the provided HashSet.
+    /// </summary>
+    public static IEnumerable<IFormLinkGetter> LazyEnumerateMajorRecords(ISkyrimModGetter mod, HashSet<Type> typesToSkip)
+    {
+        foreach (var (getterType, getGroup) in TopLevelRecordGroups)
+        {
+            if (typesToSkip.Contains(getterType)) continue;
+
+            var group = getGroup(mod);
+            if (group == null) continue;
+
+            foreach (var formKey in group.FormKeys)
+            {
+                yield return new FormLinkInformation(formKey, getterType);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The appearance-related getter interface types (the NPC group plus its visual-support
+    /// groups). <see cref="MergeInClassifier"/> treats records OUTSIDE these groups as "hard"
+    /// records when classifying a mod as appearance replacer vs base mod; keep the two in sync.
+    /// </summary>
+    public static readonly HashSet<Type> AppearanceRecordTypes = new()
+    {
+        typeof(INpcGetter),
+        typeof(IArmorGetter),
+        typeof(IArmorAddonGetter),
+        typeof(ITextureSetGetter),
+        typeof(IHeadPartGetter),
+        typeof(IHairGetter),
+        typeof(IColorRecordGetter),
+        typeof(IEyesGetter)
+    };
+
+    /// <summary>
+    /// Removes or replaces characters that are invalid in file paths.
+    /// </summary>
+    /// <param name="path">The input string to sanitize.</param>
+    /// <returns>A path string that is safe for use as a file name.</returns>
+    public static string MakeStringPathSafe(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return string.Empty;
+        }
+
+        char[] invalidChars = Path.GetInvalidFileNameChars();
+        var sb = new StringBuilder(path.Length);
+        foreach (char c in path)
+        {
+            // Array.IndexOf is a simple way to check for existence
+            if (Array.IndexOf(invalidChars, c) != -1)
+            {
+                sb.Append('_'); // Replace invalid char with an underscore
+            }
+            else
+            {
+                sb.Append(c);
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Gets the relative file paths for FaceGen NIF and DDS files,
+    /// ensuring the FormID component is an 8-character, zero-padded hex string.
+    /// </summary>
+    /// <param name="npcFormKey">The FormKey of the NPC.</param>
+    /// <param name="regularized">Toggle to regularize file path relative to data folder.</param>
+    /// <returns>A tuple containing the relative mesh path and texture path (lowercase).</returns>
+    public static (string MeshPath, string TexturePath) GetFaceGenSubPathStrings(FormKey npcFormKey, bool regularized = false)
+    {
+        // Get the plugin filename string
+        string pluginFileName = npcFormKey.ModKey.FileName.String; // Use .String property
+
+        // Get the Form ID and format it as an 8-character uppercase hex string (X8)
+        string formIDHex = npcFormKey.ID.ToString("X8"); // e.g., 0001A696
+
+        // Construct the paths
+        string meshPath = $"actors\\character\\facegendata\\facegeom\\{pluginFileName}\\{formIDHex}.nif";
+        string texPath = $"actors\\character\\facegendata\\facetint\\{pluginFileName}\\{formIDHex}.dds";
+
+        if (regularized)
+        {
+            TryRegularizePath(meshPath, out var regularizedMeshPath);
+            meshPath = regularizedMeshPath;
+
+            TryRegularizePath(texPath, out var regularizedTexPath);
+            texPath = regularizedTexPath;
+        }
+
+        // Return lowercase paths for case-insensitive comparisons later
+        return (meshPath.ToLowerInvariant(), texPath.ToLowerInvariant());
+    }
+
+    /// <summary>
+    /// True when a data-relative path lies under one of the FaceGen output trees
+    /// (meshes\actors\character\facegendata\..., textures\actors\character\facegendata\...).
+    /// FaceGen files are inherently per-NPC and must be written at their vanilla-derived
+    /// paths, so base-game-overwrite protection never applies to them. Accepts either slash
+    /// style and an optional leading separator; comparison is case-insensitive.
+    /// </summary>
+    public static bool IsFaceGenPath(string? relativePath)
+    {
+        if (string.IsNullOrEmpty(relativePath)) return false;
+        string normalized = relativePath.Replace('/', '\\').TrimStart('\\');
+        return normalized.StartsWith(@"meshes\actors\character\facegendata\", StringComparison.OrdinalIgnoreCase)
+               || normalized.StartsWith(@"textures\actors\character\facegendata\", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// OPTIMIZED: This method no longer performs a slow linear search.
+    /// It now uses the pre-built dictionary for an instantaneous lookup.
+    /// </summary>
+    public bool TryFormKeyToFormIDString(FormKey formKey, out string formIDstr)
+    {
+        formIDstr = string.Empty;
+        if (_environmentStateProvider.TryGetPluginIndex(formKey.ModKey, out var prefix))
+        {
+            if (prefix.StartsWith("FE"))
+            {
+                // For ESLs, the local ID is the last 12 bits (3 hex characters).
+                formIDstr = $"{prefix}{formKey.ID & 0xFFF:X3}";
+            }
+            else
+            {
+                // For regular plugins, the local ID is the last 24 bits (6 hex characters).
+                formIDstr = prefix + formKey.IDString();
+            }
+            return true;
+        }
+        return false;
+    }
+    
+    public enum PathType
+    {
+        File,
+        Directory
+    }
+    public static dynamic CreateDirectoryIfNeeded(string path, PathType type)
+    {
+        if (type == PathType.File)
+        {
+            FileInfo file = new FileInfo(path);
+            file.Directory.Create(); // If the directory already exists, this method does nothing.
+            return file;
+        }
+        else
+        {
+            DirectoryInfo directory = new DirectoryInfo(path);
+            directory.Create();
+            return directory;
+        }
+    }
+
+    /// <summary>Canonicalises a folder path for case-insensitive root comparison:
+    /// resolves to a full path and strips trailing separators. Returns an empty
+    /// string for null/whitespace input or paths that Path.GetFullPath rejects.</summary>
+    public static string NormalizeFolderForCompare(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return string.Empty;
+        try
+        {
+            return Path.GetFullPath(path)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+        catch
+        {
+            return path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+    }
+
+    /// <summary>True when <paramref name="normalizedCandidate"/> equals
+    /// <paramref name="normalizedRoot"/> or is a descendant of it (separator-aware,
+    /// case-insensitive). Both arguments must have been produced by
+    /// <see cref="NormalizeFolderForCompare"/>.</summary>
+    public static bool IsUnderRoot(string normalizedCandidate, string normalizedRoot)
+    {
+        if (string.IsNullOrEmpty(normalizedRoot)) return false;
+        if (normalizedCandidate.Equals(normalizedRoot, StringComparison.OrdinalIgnoreCase))
+            return true;
+        return normalizedCandidate.StartsWith(
+            normalizedRoot + Path.DirectorySeparatorChar,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static string AddTopFolderByExtension(string path)
+    {
+        if (path.EndsWith(".dds", StringComparison.OrdinalIgnoreCase) &&
+            !path.StartsWith("textures", StringComparison.OrdinalIgnoreCase))
+        {
+            return Path.Combine("Textures", path);
+        }
+        
+        if ((path.EndsWith(".nif", StringComparison.OrdinalIgnoreCase) ||
+            path.EndsWith(".tri", StringComparison.OrdinalIgnoreCase)) &&
+            !path.StartsWith("meshes", StringComparison.OrdinalIgnoreCase))
+        {
+            return Path.Combine("Meshes", path);
+        }
+        
+        return path;
+    }
+    
+    /// <summary>
+    /// Attempts to regularise <paramref name="inputPath"/> so that the result is:
+    ///     textures\arbitrary\file.dds     – or –
+    ///     meshes\arbitrary\file.nif
+    /// The method accepts                             
+    ///   • absolute paths that contain “…\data\<type>\…”
+    ///   • relative paths that already start with <type>\
+    ///   • bare “arbitrary\file.ext”, inferring <type> from the extension.
+    /// </summary>
+    /// <returns>
+    /// True if the path was guaranteed to be regularized (e.g., a "data" prefix was removed
+    /// or a type folder was added). Returns false otherwise.
+    /// </returns>
+    public static bool TryRegularizePath(string? inputPath, out string regularizedPath)
+    {
+        // A path will be returned in all cases, so initialize it to a known value.
+        regularizedPath = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(inputPath))
+            return false;
+
+        // Normalise path separators.
+        var path = inputPath.Replace('/', '\\').Trim();
+
+        // Determine the expected type folder from the extension.
+        var ext = Path.GetExtension(path).ToLowerInvariant();
+        var expectedType = ext switch
+        {
+            ".dds" => "textures",
+            ".nif" => "meshes",
+            ".tri" => "meshes",
+            _      => null
+        };
+
+        // Split into components.
+        var segments = path
+            .Split(new[] { '\\' }, StringSplitOptions.RemoveEmptyEntries)
+            .ToList();
+
+        // The return value will be true if we perform an action that guarantees regularization.
+        var canGuaranteeRegularization = false;
+        
+        // Check if the path contains “…\data\…” as a prefix to be removed.
+        // This is the first regularization check.
+        var dataIdx = segments
+            .FindIndex(s => s.Equals("data", StringComparison.OrdinalIgnoreCase));
+
+        if (dataIdx >= 0 && dataIdx + 1 < segments.Count)
+        {
+            // If the path contains "...data\..." as a prefix, we can guarantee
+            // that it has been regularized by removing that prefix.
+            regularizedPath = string.Join("\\", segments.Skip(dataIdx + 1));
+            canGuaranteeRegularization = true;
+        }
+        // If we couldn't remove the "data" prefix, then we check if the file extension
+        // is a known type, which allows us to perform further regularization.
+        else if (expectedType is not null)
+        {
+            // We can guarantee regularization because we know the type and can act on it.
+            canGuaranteeRegularization = true;
+
+            // Relative path already starts with a type folder?
+            if (segments[0].Equals(expectedType, StringComparison.OrdinalIgnoreCase))
+            {
+                regularizedPath = string.Join("\\", segments);
+            }
+            else
+            {
+                // Bare “arbitrary\file.ext” – prepend inferred type.
+                regularizedPath = $"{expectedType}\\{string.Join("\\", segments)}";
+            }
+        }
+        // If the path did not contain a "data" prefix, and the file extension is
+        // not one of the supported types, we return the input path as-is.
+        // We cannot guarantee that it has been regularized.
+        else
+        {
+            regularizedPath = path;
+        }
+
+        return canGuaranteeRegularization;
+    }
+    
+    public static void OpenFolder(string folderPath)
+    {
+        if (!string.IsNullOrEmpty(folderPath) && Directory.Exists(folderPath))
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo(folderPath) { UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                ScrollableMessageBox.ShowError($"Could not open folder '{folderPath}':\n{ex.Message}", "Error");
+            }
+        }
+        else
+        {
+            ScrollableMessageBox.ShowWarning($"The folder path '{folderPath}' could not be found.", "Path Not Found");
+        }
+    }
+    
+    /// <summary>
+    /// Opens the given URL in the default web browser.
+    /// </summary>
+    /// <remarks>
+    /// Uses explorer.exe to open the URL rather than ShellExecuteEx directly.
+    /// When launched from a standalone .exe (outside an IDE), ShellExecuteEx can cause
+    /// Chromium-based browsers (Edge, Chrome) to crash immediately with STATUS_ACCESS_VIOLATION
+    /// (0xC0000005) due to problematic handle/job-object inheritance from the parent process.
+    /// Routing through explorer.exe avoids this because it launches the browser from its own
+    /// clean process context.
+    /// </remarks>
+    /// <param name="url">The URL to open.</param>
+    public static void OpenUrl(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            Debug.WriteLine("OpenUrl called with a null or empty URL.");
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "explorer.exe",
+                Arguments = $"\"{url}\"",
+                UseShellExecute = false
+            });
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Error opening URL '{url}': {ex.Message}");
+            throw;
+        }
+    }
+    
+    public static (string? gameName, string? modId) ParseMetaIni(string filePath)
+    {
+        string? gameName = null;
+        string? modId = null;
+        try
+        {
+            var lines = File.ReadAllLines(filePath);
+            foreach (var line in lines)
+            {
+                if (line.StartsWith("gameName=", StringComparison.OrdinalIgnoreCase))
+                {
+                    gameName = line.Split('=').Last().Trim();
+                    // Add special case for SkyrimSE
+                    if (gameName.Equals("SkyrimSE", StringComparison.OrdinalIgnoreCase))
+                    {
+                        gameName = "skyrimspecialedition";
+                    }
+                }
+                else if (line.StartsWith("modid=", StringComparison.OrdinalIgnoreCase))
+                {
+                    modId = line.Split('=').Last().Trim();
+                }
+                if (gameName != null && modId != null) break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"Error parsing {filePath}: {ex.Message}");
+        }
+        return (gameName, modId);
+    }
+    
+    public static string? FindExistingCachedImage(string baseFilePath)
+    {
+        // Check for the most common formats in order of likelihood.
+        var extensionsToTry = new[] { ".webp", ".png", ".jpg", ".jpeg" };
+        foreach (var ext in extensionsToTry)
+        {
+            var fullPath = baseFilePath + ext;
+            if (File.Exists(fullPath))
+            {
+                return fullPath;
+            }
+        }
+        return null;
+    }
+
+
+    public static bool TryDuplicateGenericRecordAsNew(IMajorRecordGetter recordGetter, ISkyrimMod outputMod, out dynamic? duplicateRecord, out string exceptionString)
+    {
+        if(TryGetPatchRecordGroup(recordGetter, outputMod, out var group, out exceptionString) && group != null)
+        {
+            duplicateRecord = IGroupMixIns.DuplicateInAsNewRecord(group, recordGetter);
+            return true;
+        }
+
+        duplicateRecord = null;
+        return false;
+    }
+    
+    public static bool TryGetOrAddGenericRecordAsOverride(IMajorRecordGetter recordGetter, ISkyrimMod outputMod, out MajorRecord? duplicateRecord, out string exceptionString)
+    {
+        using var _ = ContextualPerformanceTracer.Trace("Auxilliary.TryGetOrAddGenericRecordAsOverride");
+        if(TryGetPatchRecordGroup(recordGetter, outputMod, out var group, out exceptionString) && group != null)
+        {
+            duplicateRecord = GetOrAddAsOverrideMixIns.GetOrAddAsOverride(group, recordGetter);
+            return true;
+        }
+        duplicateRecord = null;
+        return false;
+    }
+
+    public static bool TryGetPatchRecordGroup(IMajorRecordGetter recordGetter, ISkyrimMod outputMod, out dynamic? group, out string exceptionString)
+    {
+        exceptionString = string.Empty;
+        var getterType = GetRecordGetterType(recordGetter);
+        try
+        {
+            group = outputMod.GetTopLevelGroup(getterType);
+            return true;
+        }
+        catch (Exception e)
+        {
+            group = null;
+            exceptionString = e.Message;
+            return false;
+        } 
+    }
+    
+    public static Type? GetRecordGetterType(IMajorRecordGetter recordGetter)
+    {
+        try
+        {
+            return LoquiRegistration.GetRegister(recordGetter.GetType()).GetterType;
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+        
+    }
+
+    public void CollectShallowAssetLinks(IEnumerable<IModContext<ISkyrimMod, ISkyrimModGetter, IMajorRecord, IMajorRecordGetter>> recordContexts, List<IAssetLinkGetter> assetLinks)
+    {
+        foreach (var context in recordContexts)
+        {
+            var recordAssetLinks = ShallowGetAssetLinks(context.Record);
+            assetLinks.AddRange(recordAssetLinks.Where(x => !assetLinks.Contains(x)));
+        }
+    }
+    
+    public void CollectShallowAssetLinks(IEnumerable<IMajorRecordGetter> recordGetters, List<IAssetLinkGetter> assetLinks)
+    {
+        using var _ = ContextualPerformanceTracer.Trace("Aux.CollectShallowAssetLinks");
+        foreach (var recordGetter in recordGetters)
+        {
+            var recordAssetLinks = ShallowGetAssetLinks(recordGetter);
+            assetLinks.AddRange(recordAssetLinks.Where(x => !assetLinks.Contains(x)));
+        }
+    }
+    public List<IAssetLinkGetter> ShallowGetAssetLinks(IMajorRecordGetter recordGetter)
+    {
+        return recordGetter.EnumerateAssetLinks(AssetLinkQuery.Listed, _assetLinkCache, null)
+            .ToList();
+    }
+    public List<IAssetLinkGetter> DeepGetAssetLinks(IMajorRecordGetter recordGetter, List<ModKey> relevantContextKeys)
+    {
+        var assetLinks = recordGetter.EnumerateAssetLinks(AssetLinkQuery.Listed, _assetLinkCache, null)
+            .ToList();
+        foreach (var formLink in recordGetter.EnumerateFormLinks())
+        {
+            CollectDeepAssetLinks(formLink, assetLinks, relevantContextKeys, _assetLinkCache);
+        }
+
+        return assetLinks;
+    }
+    
+    private void CollectDeepAssetLinks(IFormLinkGetter formLinkGetter, List<IAssetLinkGetter> assetLinkGetters, List<ModKey> relevantContextKeys, IAssetLinkCache assetLinkCache, HashSet<FormKey>? searchedFormKeys = null)
+    {
+        if (searchedFormKeys == null)
+        {
+            searchedFormKeys = new HashSet<FormKey>();
+        }
+        searchedFormKeys.Add(formLinkGetter.FormKey);
+        var contexts = _environmentStateProvider.LinkCache.ResolveAllContexts(formLinkGetter);
+        foreach (var context in contexts)
+        {
+            if (relevantContextKeys.Contains(context.ModKey))
+            {
+                assetLinkGetters.AddRange(
+                    context.Record.EnumerateAssetLinks(AssetLinkQuery.Listed, assetLinkCache, null));
+            }
+
+            var sublinks = context.Record.EnumerateFormLinks();
+            foreach (var subLink in sublinks.Where(x => !searchedFormKeys.Contains(x.FormKey)))
+            {
+                CollectDeepAssetLinks(subLink, assetLinkGetters, relevantContextKeys, assetLinkCache, searchedFormKeys);
+            }
+        }
+    }
+    
+    private const int BufferSize = 4 * 1024 * 1024;   // 4 MB blocks
+
+    /* -----------------------------------------------------------------------
+     * 1.  Pre-compute identifiers for a file
+     * -------------------------------------------------------------------- */
+    public static (int Length, string CheapHash) GetCheapFileEqualityIdentifiers(string filePath)
+    {
+        if (filePath is null) throw new ArgumentNullException(nameof(filePath));
+
+        var info = new FileInfo(filePath);
+        if (!info.Exists) throw new FileNotFoundException("File not found.", filePath);
+
+        int length = unchecked((int)info.Length);             // cast keeps original API
+        string cheapHash = ComputeXxHash128Hex(info);
+
+        return (length, cheapHash);
+    }
+
+    /* -----------------------------------------------------------------------
+     * 2.  Compare another file against the pre-computed identifiers
+     * -------------------------------------------------------------------- */
+    public static bool FastFilesAreIdentical(string candidateFilePath,
+                                            int    targetFileLength,
+                                            string targetFileCheapHash)
+    {
+        if (candidateFilePath is null)      throw new ArgumentNullException(nameof(candidateFilePath));
+        if (targetFileCheapHash is null)    throw new ArgumentNullException(nameof(targetFileCheapHash));
+
+        var info = new FileInfo(candidateFilePath);
+        if (!info.Exists) return false;
+
+        // Early-out: different size ⇒ definitely different file
+        if (unchecked((int)info.Length) != targetFileLength)
+            return false;
+
+        // Sizes match – compute the same cheap hash and compare
+        string candidateHash = ComputeXxHash128Hex(info);
+
+        return candidateHash.Equals(targetFileCheapHash, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /* -----------------------------------------------------------------------
+     * 3.  Private helper to compute XXH128 as an uppercase hex string
+     * -------------------------------------------------------------------- */
+    private static string ComputeXxHash128Hex(FileInfo info)
+    {
+        Span<byte> digest = stackalloc byte[16];   // 128 bits = 16 bytes
+        var hasher = new XxHash128();
+
+        using var stream = info.OpenRead();
+        byte[] buffer = new byte[BufferSize];
+
+        int read;
+        while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            hasher.Append(buffer.AsSpan(0, read));
+        }
+
+        hasher.GetHashAndReset(digest);
+        return Convert.ToHexString(digest);        // e.g. "A1B2C3D4E5F6..."
+    }
+}
+
+
+public enum Gender
+{
+    Female,
+    Male
+}
