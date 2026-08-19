@@ -1614,14 +1614,22 @@
                                             </StackPanel>
 
                                             <!-- UI Language -->
-                                            <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
-                                                <TextBlock Text="{l:Loc uiLanguage}"
-                                                           VerticalAlignment="Center"/>
-                                                <ComboBox ItemsSource="{Binding AvailableUiLanguages}"
-                                                          SelectedItem="{Binding SelectedUiLanguage, Mode=TwoWay}"
-                                                          MinWidth="120"
-                                                          Margin="10,0,0,0"/>
-                                            </StackPanel>
+                                                                                        <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
+                                                                                            <TextBlock Text="{l:Loc uiLanguage}"
+                                                                                                       VerticalAlignment="Center"/>
+                                                                                            <ComboBox ItemsSource="{Binding AvailableUiLanguages}"
+                                                                                                      SelectedItem="{Binding SelectedUiLanguage, Mode=TwoWay}"
+                                                                                                      MinWidth="120"
+                                                                                                      Margin="10,0,0,0"/>
+                                                                                        </StackPanel>
+
+                                                                                        <!-- Pre-translate descriptions to cache -->
+                                                                                        <Button Content="{l:Loc preCacheDescriptions}"
+                                                                                                Command="{Binding PreCacheDescriptionsCommand}"
+                                                                                                HorizontalAlignment="Left"
+                                                                                                Margin="0,8,0,0"
+                                                                                                Padding="8,3"
+                                                                                                ToolTip="{l:Loc preCacheDescriptionsTip}"/>
                     
                     <CheckBox Content="{l:Loc donTShowMe}"
                               IsChecked="{Binding SuppressPopupWarnings, Mode=TwoWay}"

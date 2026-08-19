@@ -14,6 +14,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading; // CancellationToken / SemaphoreSlim / Interlocked (pre-cache batch)
 using System.Threading.Tasks; // Added for Task
 using System.Windows;
 using System.Windows.Forms; // Added for MessageBox
@@ -1064,10 +1065,11 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
             this.WhenAnyValue(x => x.SelectedNpc, x => x.ShowNpcDescriptions, (npc, show) => npc != null && show)
         );
         LoadDescriptionCommand.ObserveOn(RxApp.MainThreadScheduler).BindTo(this, x => x.CurrentNpcDescription)
-            .DisposeWith(_disposables);
-        LoadDescriptionCommand.IsExecuting.ToPropertyEx(this, x => x.IsLoadingDescription)
-            .DisposeWith(_disposables);
-        this.WhenAnyValue(x => x.SelectedNpc, x => x.ShowNpcDescriptions)
+                    .DisposeWith(_disposables);
+                LoadDescriptionCommand.IsExecuting.ToPropertyEx(this, x => x.IsLoadingDescription)
+                    .DisposeWith(_disposables);
+
+                this.WhenAnyValue(x => x.SelectedNpc, x => x.ShowNpcDescriptions)
             .Throttle(TimeSpan.FromMilliseconds(200)).Select(_ => Unit.Default)
             .InvokeCommand(LoadDescriptionCommand).DisposeWith(_disposables);
 
@@ -1278,8 +1280,56 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
     }
 
     // --- Methods ---
-    
-    private void ShowFavoritesWindowForSharing()
+
+        // --- Pre-cache batch: fetch + translate every eligible NPC's description once,
+        // writing results into the description cache so later views are instant and
+        // issue zero network requests. Runs capped at 4 concurrent workers to avoid
+        // hammering the wiki/translation endpoints (429s). Returns progress counts;
+        // the caller (Settings > PreCacheDescriptionsCommand) displays them.
+        public async Task<(int Total, int New, int Cached, int Failed)> PreCacheDescriptionsAsync(
+            IProgress<(int Done, int Total, int New, int Cached, int Failed)>? progress,
+            CancellationToken ct)
+        {
+            var eligible = AllNpcs
+                .Where(n => _descriptionProvider.IsEligibleNpc(n.NpcFormKey))
+                .ToList();
+            int total = eligible.Count;
+            int done = 0, countNew = 0, countCached = 0, countFailed = 0;
+
+            using var concurrency = new SemaphoreSlim(4, 4);
+            var tasks = eligible.Select(async npc =>
+            {
+                await concurrency.WaitAsync(ct).ConfigureAwait(false);
+                try
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (_descriptionProvider.HasCachedZh(npc.NpcFormKey))
+                    {
+                        Interlocked.Increment(ref countCached);
+                    }
+                    else
+                    {
+                        string? desc = await _descriptionProvider
+                            .GetDescriptionAsync(npc.NpcFormKey, npc.DisplayName, npc.NpcData?.EditorID, forceTranslate: true)
+                            .ConfigureAwait(false);
+                        if (!string.IsNullOrWhiteSpace(desc)) Interlocked.Increment(ref countNew);
+                        else Interlocked.Increment(ref countFailed);
+                    }
+                }
+                finally
+                {
+                    concurrency.Release();
+                    int d = Interlocked.Increment(ref done);
+                    progress?.Report((d, total,
+                        Volatile.Read(ref countNew), Volatile.Read(ref countCached), Volatile.Read(ref countFailed)));
+                }
+            });
+
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+            return (total, countNew, countCached, countFailed);
+        }
+
+        private void ShowFavoritesWindowForSharing()
     {
         var vm = _favoriteFacesFactory(VM_FavoriteFaces.FavoriteFacesMode.Share, null);
         var window = new FavoriteFacesWindow { DataContext = vm, ViewModel = vm };

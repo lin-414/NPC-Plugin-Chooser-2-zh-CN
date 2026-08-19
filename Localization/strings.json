@@ -739,5 +739,10 @@
   "submenus": "Submenus",
   "runPatchGeneration": "Run Patch Generation",
   "cancelPatching": "Cancel Patching",
-  "showGroup": "Show"
+  "showGroup": "Show",
+  "preCacheDescriptions": "Pre-translate NPC Descriptions to Local Cache",
+  "preCacheDescriptionsTip": "Fetches UESP/Fandom descriptions for all base-game NPCs and translates them to Chinese once, storing results in the local cache so every later view is instant (zero network requests). Rerunning skips already-cached NPCs. May take a while; you can cancel at any time.",
+  "preCachePreparing": "Preparing...",
+  "preCacheProgress": "Pre-translating: {0}/{1} · new {2} · cached {3} · failed {4}",
+  "preCacheDone": "Pre-translation finished: {0} total · {1} newly translated · {2} already cached · {3} failed."
 }

@@ -123,18 +123,39 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                             }
                         }
                         catch (Exception ex)
-                        {
-                            Debug.WriteLine($"[DescProvider][Initialize] Cache load failed (non-fatal): {ex.Message}");
-                        }
-                    }
+                                    {
+                                        Debug.WriteLine($"[DescProvider][Initialize] Cache load failed (non-fatal): {ex.Message}");
+                                    }
+                                }
 
-        public async Task<string?> GetDescriptionAsync(FormKey npcFormKey, string? displayName, string? editorId)
-        {
-            // 1. Check conditions
-            string? overrideDescription = null;
-            if (!_settings.ShowNpcDescriptions || npcFormKey.IsNull || 
-                (!BaseGamePlugins.Contains(npcFormKey.ModKey.FileName) && 
-                 !_overrideDescriptions.TryGetValue(npcFormKey, out overrideDescription)))
+                                /// <summary>Whether this NPC is one the description provider will serve (base-game
+                                /// NPCs, plus mod NPCs that carry a DescriptionOverrides entry). Used by the
+                                /// pre-cache batch to skip NPCs that would just immediately return null.</summary>
+                                public bool IsEligibleNpc(FormKey npcFormKey)
+                                    => !npcFormKey.IsNull &&
+                                       (BaseGamePlugins.Contains(npcFormKey.ModKey.FileName) || _overrideDescriptions.ContainsKey(npcFormKey));
+
+                                /// <summary>Whether a zh-CN translation already exists in the cache for this NPC
+                                /// (memory + disk merged at Initialize). Lets the pre-cache batch count completed
+                                /// entries without issuing any network request.</summary>
+                                public bool HasCachedZh(FormKey npcFormKey)
+                                {
+                                    lock (_cacheLock)
+                                    {
+                                        return _cache.TryGetValue(npcFormKey.ToString(), out var entry) &&
+                                               !string.IsNullOrWhiteSpace(entry.Zh);
+                                    }
+                                }
+
+        public async Task<string?> GetDescriptionAsync(FormKey npcFormKey, string? displayName, string? editorId, bool forceTranslate = false)
+                {
+                    // 1. Check conditions. forceTranslate (used by the pre-cache batch pass)
+                    // bypasses the ShowNpcDescriptions UI toggle — the batch's whole job is to
+                    // populate the cache regardless of what the description panel shows.
+                    string? overrideDescription = null;
+                    if ((!_settings.ShowNpcDescriptions && !forceTranslate) || npcFormKey.IsNull || 
+                        (!BaseGamePlugins.Contains(npcFormKey.ModKey.FileName) && 
+                         !_overrideDescriptions.TryGetValue(npcFormKey, out overrideDescription)))
             {
                 return null;
             }
@@ -191,32 +212,44 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                         // 2.5 Cache check: a fully cached entry (English + translation when the UI is
                                     // Chinese) returns instantly with zero network requests. A cache entry with only
                                     // the English text re-runs just the translation step below (see FinalizeAsync).
+                                    // When forceTranslate is set (pre-cache batch), a zh-CN entry is a completed
+                                    // job (skip); an English-only entry re-runs only the translation step.
                                     string cacheKey = npcFormKey.ToString();
                                     string? cachedEnOnly = null;
                                     lock (_cacheLock)
                                     {
                                         if (_cache.TryGetValue(cacheKey, out var cached))
                                         {
-                                            bool uiChinese = !string.IsNullOrWhiteSpace(_settings.UiLanguage) &&
-                                                             _settings.UiLanguage.Equals("zh-CN", StringComparison.OrdinalIgnoreCase);
-                                            if (uiChinese && !string.IsNullOrEmpty(cached.Zh))
+                                            if (forceTranslate)
                                             {
-                                                Debug.WriteLine($"[DescProvider] Cache hit (zh-CN) for '{cacheKey}': returning instantly.");
-                                                return cached.Zh;
+                                                if (!string.IsNullOrEmpty(cached.Zh))
+                                                {
+                                                    Debug.WriteLine($"[DescProvider] Cache hit (force zh-CN) for '{cacheKey}': skipping.");
+                                                    return cached.Zh;
+                                                }
+                                                cachedEnOnly = cached.En;
                                             }
-                                            if (!uiChinese && !string.IsNullOrEmpty(cached.En))
+                                            else
                                             {
-                                                Debug.WriteLine($"[DescProvider] Cache hit (en) for '{cacheKey}': returning instantly.");
-                                                return cached.En;
+                                                bool uiChinese = !string.IsNullOrWhiteSpace(_settings.UiLanguage) &&
+                                                                 _settings.UiLanguage.Equals("zh-CN", StringComparison.OrdinalIgnoreCase);
+                                                if (uiChinese && !string.IsNullOrEmpty(cached.Zh))
+                                                {
+                                                    Debug.WriteLine($"[DescProvider] Cache hit (zh-CN) for '{cacheKey}': returning instantly.");
+                                                    return cached.Zh;
+                                                }
+                                                if (!uiChinese && !string.IsNullOrEmpty(cached.En))
+                                                {
+                                                    Debug.WriteLine($"[DescProvider] Cache hit (en) for '{cacheKey}': returning instantly.");
+                                                    return cached.En;
+                                                }
+                                                cachedEnOnly = cached.En;
                                             }
-                                            // zh-CN UI but only the English text is cached: remember the English
-                                            // text so the fetch below can be skipped and only translation re-run.
-                                            cachedEnOnly = cached.En;
                                         }
                                     }
                                     if (cachedEnOnly != null)
                                     {
-                                        return await FinalizeAsync(cacheKey, cachedEnOnly);
+                                        return await FinalizeAsync(cacheKey, cachedEnOnly, forceTranslate);
                                     }
 
                         Stopwatch sw = Stopwatch.StartNew();
@@ -237,7 +270,7 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                          {
                              finalDescription = rawUespDesc; // Assign if valid
                              Debug.WriteLine($"[DescProvider] Success: Valid UESP description found ({sw.ElapsedMilliseconds}ms).");
-                             return await FinalizeAsync(cacheKey, finalDescription); // *** UESP success: translate + cache ***
+                             return await FinalizeAsync(cacheKey, finalDescription, forceTranslate); // *** UESP success: translate + cache ***
                          }
                      else if(rawUespDesc != null) { // Description was fetched but failed validation
                          Debug.WriteLine($"[DescProvider] UESP description failed validation against keywords: {string.Join(", ", searchKeywords)}");
@@ -268,7 +301,7 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                            {
                                 finalDescription = rawFandomDesc; // Assign if valid
                                 Debug.WriteLine($"[DescProvider] Success: Valid Fandom description found ({sw.ElapsedMilliseconds}ms).");
-                                return await FinalizeAsync(cacheKey, finalDescription); // *** Fandom success: translate + cache ***
+                                return await FinalizeAsync(cacheKey, finalDescription, forceTranslate); // *** Fandom success: translate + cache ***
                            }
                            else if(rawFandomDesc != null) { // Description was fetched but failed validation
                                 Debug.WriteLine($"[DescProvider] Fandom description failed validation against keywords: {string.Join(", ", searchKeywords)}");
@@ -287,7 +320,7 @@ namespace NPC_Plugin_Chooser_2.BackEnd
             if (finalDescription != null) {
                 // This point should theoretically not be reached if returns are immediate, but as safety.
                                  Debug.WriteLine($"[DescProvider] Returning description for '{searchTermRaw}'. Total time: {sw.ElapsedMilliseconds}ms");
-                                return await FinalizeAsync(cacheKey, finalDescription);
+                                                 return await FinalizeAsync(cacheKey, finalDescription, forceTranslate);
             } else {
                  Debug.WriteLine($"[DescProvider] No valid description found for '{searchTermRaw}' after trying both sites.");
                 return null;
@@ -299,11 +332,11 @@ namespace NPC_Plugin_Chooser_2.BackEnd
         // UI is Chinese, then cache the English original (always) and the translation (when
         // produced) both in memory and on disk, so repeated views are instant and consume
         // no wiki/translation requests.
-        private async Task<string?> FinalizeAsync(string cacheKey, string? englishDescription)
-        {
-            if (string.IsNullOrWhiteSpace(englishDescription)) return englishDescription;
+        private async Task<string?> FinalizeAsync(string cacheKey, string? englishDescription, bool forceTranslate = false)
+                {
+                    if (string.IsNullOrWhiteSpace(englishDescription)) return englishDescription;
 
-            string? result = await TranslateIfNeededAsync(englishDescription);
+                    string? result = await TranslateIfNeededAsync(englishDescription, forceTranslate);
 
             lock (_cacheLock)
             {
@@ -353,19 +386,20 @@ namespace NPC_Plugin_Chooser_2.BackEnd
         // When the UI language is Chinese (zh-CN), translate fetched English descriptions
         // via Google's free translate endpoint, so Chinese-localized users can read them.
         // Falls back to the English original on any failure (network, parse, non-Chinese UI).
-        private async Task<string?> TranslateIfNeededAsync(string? description)
-        {
-            if (string.IsNullOrWhiteSpace(description)) return description;
+        private async Task<string?> TranslateIfNeededAsync(string? description, bool forceTranslate = false)
+                {
+                    if (string.IsNullOrWhiteSpace(description)) return description;
 
-            // Only translate when UI is Chinese and the description is still English.
-            // NOTE: do NOT use description.Any(ch => ch > 127) to detect "already Chinese";
-            // English text regularly contains Unicode punctuation (curly quotes, em dashes),
-            // which would falsely skip translation. Check for actual CJK ideographs instead.
-            bool uiIsChinese = !string.IsNullOrWhiteSpace(_settings.UiLanguage) &&
-                               _settings.UiLanguage.Equals("zh-CN", StringComparison.OrdinalIgnoreCase);
-            bool alreadyChinese = description.Any(ch => ch >= 0x4E00 && ch <= 0x9FFF);
-            if (!uiIsChinese || alreadyChinese)
-                return description; // not needed, or already Chinese
+                    // Only translate when UI is Chinese (or the pre-cache batch explicitly asks
+                    // for it) and the description is still English.
+                    // NOTE: do NOT use description.Any(ch => ch > 127) to detect "already Chinese";
+                    // English text regularly contains Unicode punctuation (curly quotes, em dashes),
+                    // which would falsely skip translation. Check for actual CJK ideographs instead.
+                    bool uiIsChinese = !string.IsNullOrWhiteSpace(_settings.UiLanguage) &&
+                                       _settings.UiLanguage.Equals("zh-CN", StringComparison.OrdinalIgnoreCase);
+                    bool alreadyChinese = description.Any(ch => ch >= 0x4E00 && ch <= 0x9FFF);
+                    if ((!uiIsChinese && !forceTranslate) || alreadyChinese)
+                        return description; // not needed, or already Chinese
 
             try
                         {

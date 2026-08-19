@@ -739,5 +739,10 @@
   "submenus": "子菜单",
   "runPatchGeneration": "运行补丁生成",
   "cancelPatching": "取消补丁",
-  "showGroup": "显示"
+  "showGroup": "显示",
+  "preCacheDescriptions": "预翻译 NPC 描述到本地缓存",
+  "preCacheDescriptionsTip": "为所有原版 NPC 抓取 UESP/Fandom 描述并一次性翻译成中文，结果存入本地缓存，之后查看秒开（无需联网）。已缓存的 NPC 会跳过，重复运行也很快。耗时较长，可随时取消。",
+  "preCachePreparing": "正在准备…",
+  "preCacheProgress": "预翻译中：{0}/{1} · 新增 {2} · 已缓存 {3} · 失败 {4}",
+  "preCacheDone": "预翻译完成：共 {0} 个 NPC · 新翻译 {1} · 已有缓存 {2} · 失败 {3}。"
 }
