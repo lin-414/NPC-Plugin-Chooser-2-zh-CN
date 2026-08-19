@@ -887,7 +887,13 @@ public class BsaHandler : OptionalUIModule
     ///
     /// <para>Callers pass the plugins that actually define the records being depicted
     /// (see <c>NpcMeshResolver</c>'s outfit walk), so the widening stays proportional to
-    /// what is on screen rather than sweeping the whole load order. The newly indexed
+    /// what is on screen rather than sweeping the whole load order. One caller
+    /// deliberately breaks that proportionality:
+    /// <c>NpcMeshResolver.WidenArchiveIndexToFullLoadOrderIfUnreachable</c> passes every
+    /// enabled, not-yet-indexed load-order plugin when an attire asset is provably
+    /// unreachable after the record-scoped pass — the escape hatch for archives owned by
+    /// a resource-only plugin no depicted record names (a dummy-loader ESP). The
+    /// per-key memo below makes that sweep a one-time cost. The newly indexed
     /// archives are reachable ONLY through the broadcast
     /// <see cref="LocateAllInBsas"/> path — they live at the Data folder under a ModKey
     /// that appears in no <c>RenderScope</c>, so folder+modkey scoped lookups

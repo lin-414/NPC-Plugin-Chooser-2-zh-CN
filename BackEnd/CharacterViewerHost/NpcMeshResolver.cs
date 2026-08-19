@@ -1491,6 +1491,12 @@ public class NpcMeshResolver
             }
         }
 
+        // Last-resort widening, AFTER every override is emitted but BEFORE the
+        // render consumes them (the same NotFound-cache deadline the donor
+        // widening above runs against): if a fallback-eligible attire asset is
+        // still unreachable, index the whole enabled load order's archives.
+        WidenArchiveIndexToFullLoadOrderIfUnreachable(result, npcName);
+
         LogVerbose("CharacterViewer: ResolveAttireMeshOverrides for " + npcName + " (" + npcFormKey
             + ") outfit=" + includeDefaultOutfit + " headgear=" + includeHeadgear
             + " -> " + result.Count + " override(s)");
@@ -1750,6 +1756,152 @@ public class NpcMeshResolver
         if (creationClubPlugins != null) keys.ExceptWith(creationClubPlugins);
         keys.Remove(ModKey.Null);
         return keys;
+    }
+
+    /// <summary>
+    /// Last-resort archive widening: if any fallback-eligible attire asset in
+    /// <paramref name="overrides"/> is reachable neither loose at the Data folder nor in
+    /// any indexed archive, index the archives of EVERY enabled load-order plugin not yet
+    /// in the index — the engine's own rule, which the record-scoped donor widening only
+    /// approximates.
+    ///
+    /// <para><b>Why donor+master selection isn't enough.</b> BSA ownership is by plugin
+    /// FILENAME (<see cref="PluginArchiveIndex"/>), and some mods ship their records in
+    /// one plugin while their assets sit in an archive named after a second,
+    /// resource-only plugin — frequently a renamed copy of the first, so it carries no
+    /// master link back to it and defines only parallel duplicate records nothing
+    /// references (TW3 Geralt Prologue Gear.esp with its meshes in TW3Resources.bsa,
+    /// loaded by a byte-identical TW3Resources.esp). No record the outfit walk can reach
+    /// ever names the carrier plugin, so <see cref="SelectDonorPluginsToIndex"/> cannot
+    /// discover it. The game renders these fine because it loads every enabled plugin's
+    /// archives globally; this fallback reproduces that rule when — and only when — the
+    /// proportional pass demonstrably missed something.</para>
+    ///
+    /// <para><b>Probe fidelity.</b> The probe mirrors where the renderer will look for a
+    /// fallback-eligible asset: loose under the Data folder (which under MO2's VFS spans
+    /// every enabled mod's loose files) and the broadcast archive index
+    /// (<see cref="BsaHandler.LocateAllInBsas"/>). A rebased (absolute) path is reachable
+    /// by construction. The one thing it can't see — a loose file in a render-scope mod
+    /// folder outside MO2 — only costs a harmless extra sweep, never a skipped one, and
+    /// per-plugin memoization inside
+    /// <see cref="BsaHandler.EnsureDataFolderArchivesIndexed"/> keeps even a persistent
+    /// miss (a genuinely absent asset) from paying the sweep twice in a session.</para>
+    /// </summary>
+    private void WidenArchiveIndexToFullLoadOrderIfUnreachable(
+        IReadOnlyList<MeshOverride> overrides, string npcName)
+    {
+        string dataFolder = _env.DataFolderPath;
+        var unreachable = CollectUnreachableFallbackAssetPaths(
+            overrides,
+            p => !string.IsNullOrWhiteSpace(dataFolder) && File.Exists(Path.Combine(dataFolder, p)),
+            p => _bsaHandler.LocateAllInBsas(p).Count > 0);
+        if (unreachable.Count == 0) return;
+
+        var loadOrder = _env.LoadOrder;
+        if (loadOrder == null) return;
+
+        var keys = SelectEnabledLoadOrderPluginsToIndex(
+                loadOrder.ListedOrder.Select(l => (l.ModKey, l.Enabled)),
+                _env.BaseGamePlugins,
+                _env.CreationClubPlugins)
+            // Keys the index has already seen (ModSetting-owned plugins, earlier
+            // widenings) are dropped: their archives are already reachable, and
+            // re-indexing them from the Data folder would open a duplicate reader
+            // on the same physical BSA through its VFS path.
+            .Where(k => !_bsaHandler.CacheContainsModKey(k))
+            .ToList();
+
+        LogVerbose("CharacterViewer: " + unreachable.Count + " attire asset(s) for " + npcName
+            + " unreachable after donor-scoped widening (" + string.Join(", ", unreachable)
+            + ") — widening archive index to the full enabled load order ("
+            + keys.Count + " plugin(s) not yet indexed).");
+        if (keys.Count == 0) return;
+
+        _bsaHandler.EnsureDataFolderArchivesIndexed(keys, _env.SkyrimVersion.ToGameRelease());
+    }
+
+    /// <summary>
+    /// The full-sweep counterpart of <see cref="SelectDonorPluginsToIndex"/>: every
+    /// enabled load-order plugin, minus base game and Creation Club (indexed at startup).
+    /// Enabled-only because the game only loads an ENABLED plugin's archives — a listed
+    /// but disabled plugin's BSA is exactly as invisible in game as it is here.
+    ///
+    /// <para>Pure and static so the selection rule is testable without a game install or
+    /// a resolved environment, matching <see cref="SelectDonorPluginsToIndex"/>.</para>
+    /// </summary>
+    public static HashSet<ModKey> SelectEnabledLoadOrderPluginsToIndex(
+        IEnumerable<(ModKey Key, bool Enabled)>? loadOrder,
+        IEnumerable<ModKey>? baseGamePlugins,
+        IEnumerable<ModKey>? creationClubPlugins)
+    {
+        var keys = new HashSet<ModKey>();
+        if (loadOrder == null) return keys;
+
+        foreach (var (key, enabled) in loadOrder)
+        {
+            if (enabled) keys.Add(key);
+        }
+
+        if (baseGamePlugins != null) keys.ExceptWith(baseGamePlugins);
+        if (creationClubPlugins != null) keys.ExceptWith(creationClubPlugins);
+        keys.Remove(ModKey.Null);
+        return keys;
+    }
+
+    /// <summary>
+    /// The game-relative asset paths of every fallback-eligible override
+    /// (<see cref="MeshOverride.AllowLoadOrderFallback"/>) that neither probe can reach.
+    /// Only fallback-stamped overrides are probed: everything else resolves through the
+    /// strict scope chain, whose mod folders these probes deliberately don't cover —
+    /// including them would false-trigger the sweep on every render. Rooted paths were
+    /// already rebased onto an on-disk mod folder and are reachable by construction.
+    /// Paths are deduplicated case-insensitively so one shared missing texture reports
+    /// (and logs) once.
+    ///
+    /// <para>Pure apart from the injected probes, so the trigger rule is testable
+    /// without disk or archive I/O.</para>
+    /// </summary>
+    public static List<string> CollectUnreachableFallbackAssetPaths(
+        IEnumerable<MeshOverride> overrides,
+        Func<string, bool> looseExistsAtDataFolder,
+        Func<string, bool> existsInAnyIndexedArchive)
+    {
+        var unreachable = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var over in overrides)
+        {
+            if (over == null || !over.AllowLoadOrderFallback) continue;
+            foreach (var path in EnumerateOverrideAssetPaths(over))
+            {
+                if (string.IsNullOrWhiteSpace(path)) continue;
+                if (!seen.Add(path)) continue;
+                if (Path.IsPathRooted(path)) continue;
+                if (looseExistsAtDataFolder(path)) continue;
+                if (existsInAnyIndexedArchive(path)) continue;
+                unreachable.Add(path);
+            }
+        }
+        return unreachable;
+    }
+
+    /// <summary>Every asset path an override hands the renderer: the mesh, the flat TXST
+    /// channel, and the AlternateTextures channel. ShapeTextures is omitted — it's the
+    /// legacy name-only channel this resolver never emits.</summary>
+    private static IEnumerable<string> EnumerateOverrideAssetPaths(MeshOverride over)
+    {
+        if (!string.IsNullOrWhiteSpace(over.MeshPath)) yield return over.MeshPath;
+        if (over.Textures != null)
+        {
+            foreach (var path in over.Textures.Values) yield return path;
+        }
+        if (over.AlternateTextures != null)
+        {
+            foreach (var spec in over.AlternateTextures)
+            {
+                if (spec?.Textures == null) continue;
+                foreach (var path in spec.Textures.Values) yield return path;
+            }
+        }
     }
 
     private void CollectOutfitItemArmors(FormKey itemFormKey, ILinkCache linkCache, NpcResolutionContext? context,

@@ -105,12 +105,15 @@ public sealed class NpcChooserBsaProviderAdapter : IBsaArchiveProvider
             // correlated against it: the user can scroll back to this block to see
             // which archives a TryLocateInBsa call scans.
             //
-            // This is the STARTUP baseline, not the final set. Two paths widen the
+            // This is the STARTUP baseline, not the final set. Three paths widen the
             // index later in the session, each logging its own additions:
-            // RefreshArchivesForMod (a folder added to a mod mid-session) and
+            // RefreshArchivesForMod (a folder added to a mod mid-session),
             // BsaHandler.EnsureDataFolderArchivesIndexed (record-scoped widening for
-            // an outfit whose donor plugin has no ModSetting). A miss logged below
-            // must be read against this block PLUS any such lines that precede it.
+            // an outfit whose donor plugin has no ModSetting), and the same method
+            // fed the whole enabled load order by NpcMeshResolver's unreachable-attire
+            // fallback (archives owned by a dummy-loader plugin no record names). A
+            // miss logged below must be read against this block PLUS any such lines
+            // that precede it.
             var bsaPaths = _bsa.GetIndexedBsaPaths();
             Trace($"Indexed BSA inventory ({bsaPaths.Count} archive(s)):");
             foreach (var bsaPath in bsaPaths)
