@@ -60,27 +60,111 @@ public class NifHandler
     /// problems must skip those, or it warns about geometry nobody can see.</para>
     /// </summary>
     public static IReadOnlyList<(string ShapeName, IReadOnlyList<string> TexturePaths, bool DrawnInGame)>
-        GetTexturesByShape(string nifPath)
-    {
-        var results = new List<(string, IReadOnlyList<string>, bool)>();
-        using NifFile nif = new NifFile();
-        if (nif.Load(nifPath) != 0) return results;
+            GetTexturesByShape(string nifPath)
+            => GetShapeTextureDetails(nifPath)
+                .Select(s => (s.ShapeName,
+                    (IReadOnlyList<string>)s.Slots.Select(t => t.Path).ToList(),
+                    s.DrawnInGame))
+                .ToList();
 
-        NiHeader header = nif.GetHeader();
-        using var shapes = nif.GetShapes();
-        foreach (var shape in shapes)
+        /// <summary>One non-empty texture slot of a shape's BSShaderTextureSet.
+        /// Slot is the BSShaderTextureSet index (0 diffuse, 1 normal, 2 glow/
+        /// subsurface, 3 detail/greyscale palette, 4 environment cubemap, 5
+        /// environment mask, 6 face tint / inner layer, 7 specular/backlight).</summary>
+        public readonly record struct NifSlotTexture(int Slot, string Path);
+
+        /// <summary>Sentinel for <see cref="NifShapeTextureInfo.ShaderType"/> when the
+        /// shape has no readable BSLightingShaderProperty — callers must treat the
+        /// shader configuration as unknown and judge slots conservatively.</summary>
+        public const uint UnknownShaderType = uint.MaxValue;
+
+        /// <summary>Texture/shader survey of one shape. ShaderType is the raw
+        /// BSLightingShaderProperty.bslspShaderType value (1 = environment map,
+        /// 4 = face tint, 16 = eye envmap, …); ShaderFlags1 the raw SLSF1 bits.
+        /// PartitionSlots are the BSDismemberSkinInstance biped partition IDs
+        /// (30 = head, 32 = body, …) — empty for shapes without dismember data —
+        /// so reports can say WHICH body slot a broken shape occupies.</summary>
+        public sealed record NifShapeTextureInfo(
+            string ShapeName,
+            bool DrawnInGame,
+            uint ShaderType,
+            uint ShaderFlags1,
+            IReadOnlyList<NifSlotTexture> Slots,
+            IReadOnlyList<int> PartitionSlots);
+
+        /// <summary>
+        /// Slot-preserving variant of <see cref="GetTexturesByShape"/>: which SLOT a
+        /// path occupies decides whether the engine ever samples it (the face-tint
+        /// slot is engine-managed, the environment slots are flag-gated), so callers
+        /// judging missing textures need the index and the shape's shader
+        /// configuration, not just the flat path list.
+        /// </summary>
+        public static IReadOnlyList<NifShapeTextureInfo> GetShapeTextureDetails(string nifPath)
         {
-            string name = shape.name?.get() ?? string.Empty;
-            var paths = new List<string>();
-            for (uint slot = 0; slot < 9; slot++)
+            var results = new List<NifShapeTextureInfo>();
+            using NifFile nif = new NifFile();
+            if (nif.Load(nifPath) != 0) return results;
+
+            NiHeader header = nif.GetHeader();
+            using var shapes = nif.GetShapes();
+            foreach (var shape in shapes)
             {
-                string tex = nif.GetTexturePathByIndex(shape, slot);
-                if (!string.IsNullOrWhiteSpace(tex)) paths.Add(tex);
+                string name = shape.name?.get() ?? string.Empty;
+                var slots = new List<NifSlotTexture>();
+                for (uint slot = 0; slot < 9; slot++)
+                {
+                    string tex = nif.GetTexturePathByIndex(shape, slot);
+                    if (!string.IsNullOrWhiteSpace(tex)) slots.Add(new NifSlotTexture((int)slot, tex));
+                }
+                var (shaderType, flags1) = ReadShaderInfo(header, shape);
+                results.Add(new NifShapeTextureInfo(name, ShapeIsDrawnInGame(header, shape),
+                    shaderType, flags1, slots, ReadPartitionSlots(header, shape)));
             }
-            results.Add((name, paths, ShapeIsDrawnInGame(header, shape)));
+            return results;
         }
-        return results;
-    }
+
+        /// <summary>BSDismemberSkinInstance partition IDs of a shape (30 head,
+        /// 32 body, 33 hands, …), empty when the shape has no dismember data.
+        /// Same recipe as CV.R's NifMeshBuilder.ReadDismemberPartitions.</summary>
+        private static IReadOnlyList<int> ReadPartitionSlots(NiHeader header, NiShape shape)
+        {
+            try
+            {
+                var skinRef = shape.SkinInstanceRef();
+                if (skinRef == null || skinRef.IsEmpty()) return Array.Empty<int>();
+                if (header.GetBlockById(skinRef.index) is not BSDismemberSkinInstance dismember)
+                    return Array.Empty<int>();
+                using var partitions = dismember.partitions;
+                if (partitions == null) return Array.Empty<int>();
+                using var items = partitions.items();
+                var ids = new List<int>(items.Count);
+                for (int pi = 0; pi < items.Count; pi++) ids.Add(items[pi].partID);
+                return ids;
+            }
+            catch
+            {
+                return Array.Empty<int>();
+            }
+        }
+
+        /// <summary>Reads (bslspShaderType, shaderFlags1) from the shape's
+        /// BSLightingShaderProperty; (<see cref="UnknownShaderType"/>, 0) when
+        /// absent or unreadable, so slot-relevance callers fail conservative.</summary>
+        private static (uint ShaderType, uint Flags1) ReadShaderInfo(NiHeader header, NiShape shape)
+        {
+            try
+            {
+                var shaderRef = shape.ShaderPropertyRef();
+                if (shaderRef == null || shaderRef.IsEmpty()) return (UnknownShaderType, 0);
+                if (header.GetBlockById(shaderRef.index) is not BSLightingShaderProperty shader)
+                    return (UnknownShaderType, 0);
+                return ((uint)shader.bslspShaderType, shader.shaderFlags1);
+            }
+            catch
+            {
+                return (UnknownShaderType, 0);
+            }
+        }
 
     /// <summary>
     /// Whether the engine can render this shape at all, judged from its material alpha

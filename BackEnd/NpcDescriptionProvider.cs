@@ -247,40 +247,84 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                 return description; // not needed, or already Chinese
 
             try
-            {
-                // Keep URL within safe length; ~900 chars covers several sentences
-                string text = description.Length > 900 ? description.Substring(0, 900) : description;
-                string encoded = Uri.EscapeDataString(text);
-                string url = $"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-CN&dt=t&q={encoded}";
+                        {
+                            // Keep URL within safe length; ~900 chars covers several sentences
+                            string text = description.Length > 900 ? description.Substring(0, 900) : description;
+                            string encoded = Uri.EscapeDataString(text);
+                            string url = $"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=zh-CN&dt=t&q={encoded}";
 
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-                using var request = new HttpRequestMessage(HttpMethod.Get, url);
-                request.Headers.Referrer = new Uri("https://translate.google.com/");
-                // Google's free endpoint is more lenient with browser-like User-Agents;
-                // the app's own UserAgent ("WikiClient") can get 429/blocked.
-                request.Headers.UserAgent.Clear();
-                request.Headers.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36");
-                using var response = await _httpClient.SendAsync(request, cts.Token);
-                response.EnsureSuccessStatusCode();
+                            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+                            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                            request.Headers.Referrer = new Uri("https://translate.google.com/");
+                            // Google's free endpoint is more lenient with browser-like User-Agents;
+                            // the app's own UserAgent ("WikiClient") can get 429/blocked.
+                            request.Headers.UserAgent.Clear();
+                            request.Headers.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36");
+                            using var response = await _httpClient.SendAsync(request, cts.Token);
+                            response.EnsureSuccessStatusCode();
 
-                string json = await response.Content.ReadAsStringAsync(cts.Token);
-                using var doc = JsonDocument.Parse(json);
-                if (doc.RootElement.ValueKind != JsonValueKind.Array || doc.RootElement.GetArrayLength() == 0)
-                    return description;
+                            string json = await response.Content.ReadAsStringAsync(cts.Token);
+                            using var doc = JsonDocument.Parse(json);
+                            if (doc.RootElement.ValueKind == JsonValueKind.Array && doc.RootElement.GetArrayLength() > 0)
+                            {
+                                // Response shape: [[["中文","English",null,...], ...], null, "en", ...]
+                                string translated = string.Concat(doc.RootElement[0].EnumerateArray()
+                                    .Where(seg => seg.ValueKind == JsonValueKind.Array && seg.GetArrayLength() > 0 && seg[0].ValueKind == JsonValueKind.String)
+                                    .Select(seg => seg[0].GetString()));
 
-                // Response shape: [[["中文","English",null,...], ...], null, "en", ...]
-                string translated = string.Concat(doc.RootElement[0].EnumerateArray()
-                    .Where(seg => seg.ValueKind == JsonValueKind.Array && seg.GetArrayLength() > 0 && seg[0].ValueKind == JsonValueKind.String)
-                    .Select(seg => seg[0].GetString()));
+                                if (!string.IsNullOrWhiteSpace(translated))
+                                {
+                                    Debug.WriteLine($"[DescProvider][Translate] Google OK: \"{translated.Substring(0, Math.Min(translated.Length, 60))}...\"");
+                                    return translated;
+                                }
+                            }
+                            // JSON did not parse as a translation (e.g. network interference page);
+                            // fall through to the fallback endpoint below instead of returning English.
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.WriteLine($"[DescProvider][Translate] Google endpoint failed: {ex.Message}. Trying fallback endpoint.");
+                        }
 
-                Debug.WriteLine($"[DescProvider][Translate] OK: \"{translated.Substring(0, Math.Min(translated.Length, 60))}...\"");
-                return string.IsNullOrWhiteSpace(translated) ? description : translated;
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine($"[DescProvider][Translate] Error: {ex.Message}. Returning English description.");
-                return description; // fall back to the English original on any failure
-            }
+                        // --- Fallback endpoint: MyMemory (free, no key, reachable from CN networks) ---
+                        // Some networks block/poison translate.googleapis.com with an HTML page,
+                        // so on any Google failure we retry via api.mymemory.translated.net.
+                        try
+                        {
+                            string text = description.Length > 1200 ? description.Substring(0, 1200) : description;
+                            string url = $"https://api.mymemory.translated.net/get?q={Uri.EscapeDataString(text)}&langpair=en|zh-CN";
+
+                            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+                            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+                            request.Headers.Referrer = new Uri("https://mymemory.translated.net/");
+                            request.Headers.UserAgent.Clear();
+                            request.Headers.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36");
+                            using var response = await _httpClient.SendAsync(request, cts.Token);
+                            response.EnsureSuccessStatusCode();
+
+                            string json = await response.Content.ReadAsStringAsync(cts.Token);
+                            using var doc = JsonDocument.Parse(json);
+                            // Response shape: {"responseData":{"translatedText":"你好世界","match":1}, ...}
+                            if (doc.RootElement.TryGetProperty("responseData", out var rd) &&
+                                rd.TryGetProperty("translatedText", out var tt) &&
+                                tt.ValueKind == JsonValueKind.String)
+                            {
+                                string translated = tt.GetString()!;
+                                // MyMemory may echo the input on failure with match==0; guard against that.
+                                bool looksReal = translated.Length > 0 && !translated.Equals(description, StringComparison.OrdinalIgnoreCase);
+                                if (looksReal)
+                                {
+                                    Debug.WriteLine($"[DescProvider][Translate] MyMemory OK: \"{translated.Substring(0, Math.Min(translated.Length, 60))}...\"");
+                                    return translated;
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.WriteLine($"[DescProvider][Translate] MyMemory endpoint failed: {ex.Message}. Returning English description.");
+                        }
+
+                        return description; // fall back to the English original on any failure
         }
 
         // --- SplitCamelCase Method ---
