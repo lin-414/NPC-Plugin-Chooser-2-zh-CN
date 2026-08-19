@@ -744,5 +744,17 @@
   "preCacheDescriptionsTip": "为所有原版 NPC 抓取 UESP/Fandom 描述并一次性翻译成中文，结果存入本地缓存，之后查看秒开（无需联网）。已缓存的 NPC 会跳过，重复运行也很快。耗时较长，可随时取消。",
   "preCachePreparing": "正在准备…",
   "preCacheProgress": "预翻译中：{0}/{1} · 新增 {2} · 已缓存 {3} · 失败 {4}",
-  "preCacheDone": "预翻译完成：共 {0} 个 NPC · 新翻译 {1} · 已有缓存 {2} · 失败 {3}。"
-}
+  "preCacheDone": "预翻译完成：共 {0} 个 NPC · 新翻译 {1} · 已有缓存 {2} · 失败 {3}。",
+    "backupSettings": "备份设置",
+    "backupSettingsTip": "将当前 Settings.json（模组列表、NPC 外观选择、路径、输出选项）保存一份带时间戳的副本到应用旁的 SettingsBackups\\ 目录。之后可一键恢复。",
+    "restoreSettings": "恢复设置…",
+    "restoreSettingsTip": "从之前的备份文件恢复 Settings.json。恢复前会自动为当前设置保存一份安全副本，随后应用会重启以按恢复的配置重建模组/NPC 列表。",
+    "backupSettingsDone": "设置已备份到：\n{0}",
+    "backupSettingsFailed": "设置备份失败：\n{0}",
+    "restoreSettingsPickTitle": "选择设置备份文件",
+    "restoreSettingsInvalid": "所选文件不是有效的设置备份。",
+    "restoreSettingsConfirm": "从以下文件恢复设置：\n{0}\n\n应用将重启以应用恢复的配置。\n恢复前会先为当前设置保存一份安全副本。\n\n是否继续？",
+    "restoreSettingsFailed": "设置恢复失败：\n{0}",
+    "restoreSettingsDone": "设置已从以下文件恢复：\n{0}\n\n应用正在重启…",
+    "restoreSettingsRestartFailed": "设置已恢复，但应用无法自动重启：\n{0}\n\n请手动关闭并重新打开应用。"
+  }

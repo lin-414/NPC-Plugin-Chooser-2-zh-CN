@@ -744,5 +744,17 @@
   "preCacheDescriptionsTip": "Fetches UESP/Fandom descriptions for all base-game NPCs and translates them to Chinese once, storing results in the local cache so every later view is instant (zero network requests). Rerunning skips already-cached NPCs. May take a while; you can cancel at any time.",
   "preCachePreparing": "Preparing...",
   "preCacheProgress": "Pre-translating: {0}/{1} · new {2} · cached {3} · failed {4}",
-  "preCacheDone": "Pre-translation finished: {0} total · {1} newly translated · {2} already cached · {3} failed."
-}
+  "preCacheDone": "Pre-translation finished: {0} total · {1} newly translated · {2} already cached · {3} failed.",
+    "backupSettings": "Back Up Settings",
+    "backupSettingsTip": "Saves a copy of your current Settings.json (mod list, NPC appearance choices, paths, output options) to a timestamped file under SettingsBackups\\ next to the app. Restoring later is one click away.",
+    "restoreSettings": "Restore Settings…",
+    "restoreSettingsTip": "Loads a previous backup of Settings.json. A safety copy of your current settings is taken first, then the app restarts to rebuild your mod/NPC lists from the restored configuration.",
+    "backupSettingsDone": "Settings backed up to:\n{0}",
+    "backupSettingsFailed": "Failed to back up settings:\n{0}",
+    "restoreSettingsPickTitle": "Select a settings backup file",
+    "restoreSettingsInvalid": "The selected file is not a valid settings backup.",
+    "restoreSettingsConfirm": "Restore settings from:\n{0}\n\nThe app will restart to apply the restored configuration.\nA safety copy of your current settings is taken first.\n\nContinue?",
+    "restoreSettingsFailed": "Failed to restore settings:\n{0}",
+    "restoreSettingsDone": "Settings restored from:\n{0}\n\nThe app is restarting…",
+    "restoreSettingsRestartFailed": "Settings restored, but the app could not restart automatically:\n{0}\n\nPlease close and reopen it manually."
+  }
