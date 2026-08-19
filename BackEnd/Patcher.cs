@@ -2184,6 +2184,7 @@ public class Patcher : OptionalUIModule
                     ReportInheritedFaceNpcs();
                     ReportFlattenedFallbackNpcs();
                     ReportInertOutfitNpcs();
+                    _headPartWigConverter.ReportMultiWigSkinSkips((msg, isError, force) => AppendLog(msg, isError, force));
 
                     // Race-drift findings were held back during processing because their remedy
                     // (which Record Override Handling Mode to recommend) depends on the whole
@@ -4177,18 +4178,12 @@ public class Patcher : OptionalUIModule
 
         string raceName = liveRace.EditorID ?? authorRace.EditorID ?? raceFk.ToString();
 
-        // Name the plugin winning the race when an override (not the defining plugin) supplies
-        // it — the LOTD-style third-party case; for a merged-away race edit the winner IS the
-        // defining master and the header's explanation carries the story instead.
-        string winnerNote = string.Empty;
-        var raceWinner = linkCache.ResolveAllContexts<IRace, IRaceGetter>(raceFk).FirstOrDefault()?.ModKey;
-        if (raceWinner != null && raceWinner.Value != raceFk.ModKey)
-        {
-            winnerNote = $" (race record winner: {raceWinner.Value.FileName})";
-        }
-
-        string detail = $"race '{raceName}' — its default head parts in your load order differ from the ones " +
-                        $"the selected mod's face was built against{winnerNote}.";
+        // Compact by user direction (2026-08-19): the group header explains the drift once, so the
+        // per-NPC line carries only the facts — race, its winning plugin, and (appended by
+        // FlushRaceDriftFindings) the mod + suggested mode the consolidated Fix footer points at.
+        var raceWinner = linkCache.ResolveAllContexts<IRace, IRaceGetter>(raceFk).FirstOrDefault()?.ModKey
+                         ?? raceFk.ModKey;
+        string detail = $"race '{raceName}' ({raceFk}), race record winner: {raceWinner.FileName}";
         string technicalDetail =
             $"race defaults drift: race='{raceName}' ({raceFk}), sex={(female ? "female" : "male")}\n" +
             $"mod-context defaults: {FormatRaceDefaultSet(authorDefaults)}\n" +
@@ -4215,20 +4210,26 @@ public class Patcher : OptionalUIModule
 
         foreach (var finding in _raceDriftFindings)
         {
+            // The run-log line stays compact (user direction 2026-08-19): mod + suggested mode
+            // only, with one consolidated Fix footer under the whole list (NpcWarningReporter's
+            // Footer for this kind). The Include-vs-IncludeAsNew rationale — which mods a plain
+            // Include would break — moves to the detailed companion log alongside the census.
             string advice;
+            string rationale = string.Empty;
             string census = string.Empty;
             if (_raceDriftUsage.TryGetValue(finding.RaceFormKey, out var byMod) &&
                 byMod.TryGetValue(finding.ModName, out var ownVersion))
             {
                 var disagreeing = ModsWithDifferentRaceVersion(byMod, finding.ModName);
                 advice = disagreeing.Count == 0
-                    ? $"Fix: in the Mods menu, set the Record Override Handling Mode of '{finding.ModName}' to " +
-                      "Include — no other selected appearance mod uses a different version of this race, so " +
-                      "carrying the race edit into the output is safe."
-                    : $"Fix: in the Mods menu, set the Record Override Handling Mode of '{finding.ModName}' to " +
-                      $"IncludeAsNew. Plain Include would break the faces of NPCs from {Summarize(disagreeing)}, " +
-                      "which use a different version of this race; IncludeAsNew gives this mod's NPCs their own " +
-                      "copy of the race instead.";
+                    ? $"set '{finding.ModName}' to Include"
+                    : $"set '{finding.ModName}' to IncludeAsNew";
+                rationale = disagreeing.Count == 0
+                    ? "Include is safe: no other selected appearance mod uses a different version of this race, " +
+                      "so carrying the race edit into the output breaks nothing."
+                    : $"IncludeAsNew rather than Include: plain Include would break the faces of NPCs from " +
+                      $"{Summarize(disagreeing)}, which use a different version of this race; IncludeAsNew " +
+                      "gives this mod's NPCs their own copy of the race instead.";
 
                 census = "race referenced by selected mods: " + string.Join(", ", byMod
                     .OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
@@ -4237,13 +4238,13 @@ public class Patcher : OptionalUIModule
             else
             {
                 // Defensive: no census entry (should not happen — the finding registered one).
-                advice = $"Fix: in the Mods menu, set the Record Override Handling Mode of '{finding.ModName}' to " +
-                         "Include or IncludeAsNew so its race edit reaches the game.";
+                advice = $"set '{finding.ModName}' to Include or IncludeAsNew";
             }
 
             NpcWarningReporter.Record(NpcWarningKind.RaceDefaultsDrift, finding.NpcIdentifier,
-                detail: finding.Detail + " " + advice,
+                detail: finding.Detail + " — " + advice,
                 technicalDetail: finding.TechnicalDetail +
+                                 (rationale.Length > 0 ? "\n" + rationale : string.Empty) +
                                  (census.Length > 0 ? "\n" + census : string.Empty));
         }
 

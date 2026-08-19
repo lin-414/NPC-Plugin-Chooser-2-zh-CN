@@ -95,6 +95,11 @@ public class HeadPartWigConverter
     private readonly HashSet<string> _usedPhysicsXmlRelPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _lock = new();
 
+    // NPCs whose WNAM conversion was declined because the skin carries more than one applicable
+    // wig ArmorAddon. Collected across the run and reported once, grouped, by
+    // ReportMultiWigSkinSkips — the per-NPC explanation used to repeat itself dozens of times.
+    private readonly System.Collections.Concurrent.ConcurrentBag<string> _multiWigSkinSkips = new();
+
     private string? _tempExtractDir;
 
     // NIF-probe seams (unit tests stub these; production uses NifHandler).
@@ -520,10 +525,12 @@ public class HeadPartWigConverter
 
         if (applicable.Count > 1)
         {
+            // Reported once, grouped, at the end of the run (ReportMultiWigSkinSkips) — a run can
+            // hit this for dozens of NPCs and repeating the full explanation per NPC buried it.
+            // The verbose in-context line stays for per-NPC log reading.
+            _multiWigSkinSkips.Add(npcIdentifier);
             appendLog($"      Wig conversion: {npcIdentifier}'s skin carries {applicable.Count} wig " +
-                      "ArmorAddons — only a single wig can become the Hair head part. Leaving the " +
-                      "skin-carried hair as-is (marking the extras as 'not a wig' in the 3D preview's " +
-                      "Set Wig Meshes selector can thin the set to one).", false, true);
+                      "ArmorAddons — leaving the skin-carried hair as-is.", false, false);
             return null;
         }
 
@@ -697,6 +704,7 @@ public class HeadPartWigConverter
             _mintedSets.Clear();
             _renamePrefixOwners.Clear();
             _usedPhysicsXmlRelPaths.Clear();
+            _multiWigSkinSkips.Clear();
             // The race probe reads the link cache per call now, and the ValidRaces list it feeds
             // lives on the output mod, which is itself rebuilt per run — nothing to reset here.
         }
@@ -710,6 +718,32 @@ public class HeadPartWigConverter
         {
             // Leftover temp files are harmless; a locked file must not fail the run.
         }
+    }
+
+    /// <summary>
+    /// End-of-run grouped report of the NPCs whose skin carried more than one applicable wig
+    /// ArmorAddon, so their WNAM wig-to-head-part conversion was declined (the skin-carried hair
+    /// stays as-is, which renders correctly — informational, not a WARNING). Wording after the
+    /// user's own (2026-08-19): header, plain NPC list, then the explanation and remedy once.
+    /// Clears the collected list; <see cref="ResetSession"/> also clears it at run start.
+    /// </summary>
+    public void ReportMultiWigSkinSkips(Action<string, bool, bool> appendLog)
+    {
+        if (_multiWigSkinSkips.IsEmpty) return;
+
+        var npcs = _multiWigSkinSkips.Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+        _multiWigSkinSkips.Clear();
+
+        appendLog("\nThe following NPCs have a skin containing multiple wig ArmorAddons:", false, true);
+        foreach (var npc in npcs)
+        {
+            appendLog($"  - {npc}", false, true);
+        }
+        appendLog("Only a single wig can become the Hair head part. Aborted wig-to-headpart " +
+                  "conversion for the NPCs listed above; their skin-carried hair was left as-is. " +
+                  "You can use the 3D preview's Set Wig Meshes selector to designate a single mesh " +
+                  "as a wig.", false, true);
     }
 
     // ─────────────────────────────────────────────────────────────────────

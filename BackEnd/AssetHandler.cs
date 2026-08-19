@@ -1185,10 +1185,21 @@ public class AssetHandler : OptionalUIModule
 
             string who = string.IsNullOrWhiteSpace(ctx.NpcIdentifier) ? "an NPC" : ctx.NpcIdentifier;
             string shape = string.IsNullOrWhiteSpace(shapeName) ? "(unnamed shape)" : shapeName;
-            NpcWarningReporter.Record(NpcWarningKind.TexturelessShapes, who,
-                $"{Path.GetFileName(nifPathToAnalyze)} '{shape}' (missing: {string.Join(", ", candidates)})",
-                technicalDetail: $"mod='{modSetting.DisplayName}' nif={nifPathToAnalyze}\n" +
-                                 $"shape '{shape}' unresolved slots: {string.Join(", ", candidates)}");
+            // One entry per (texture, shape) with a "texture|referencer" detail — the report
+            // groups by mod, then NPC, then texture, listing under each texture the shapes that
+            // need it (see NpcWarningReporter.FormatTexturelessShapes). '|' cannot occur in a
+            // Windows path. The technical detail is identical across a shape's textures; the
+            // detailed log dedupes it.
+            string referencer = $"{Path.GetFileName(nifPathToAnalyze)} '{shape}'";
+            string technical = $"mod='{modSetting.DisplayName}' nif={nifPathToAnalyze}\n" +
+                               $"shape '{shape}' unresolved slots: {string.Join(", ", candidates)}";
+            foreach (var rel in candidates)
+            {
+                NpcWarningReporter.Record(NpcWarningKind.TexturelessShapes, who,
+                    detail: $"{rel}|{referencer}",
+                    technicalDetail: technical,
+                    modName: modSetting.DisplayName);
+            }
         }
     }
 
@@ -1487,6 +1498,7 @@ public class AssetHandler : OptionalUIModule
         if (faceGenDecision.ModMeshFailedCompatCheck)
         {
             NpcWarningReporter.Record(NpcWarningKind.ModMeshCompatibility, npcIdentifier,
+                detail: $"you picked '{appearanceModSetting.DisplayName}'",
                 technicalDetail: faceGenDecision.TechnicalSummary);
         }
 

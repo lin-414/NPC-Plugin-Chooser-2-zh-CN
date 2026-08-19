@@ -18,9 +18,10 @@ namespace NPC_Plugin_Chooser_2.Tests.Unit;
 /// </summary>
 public class NpcWarningReporterTests
 {
-    private static (NpcWarningKind, string, string?, string?) Entry(
-        NpcWarningKind kind, string npc, string? detail = null, string? technical = null) =>
-        (kind, npc, detail, technical);
+    private static (NpcWarningKind, string, string?, string?, string?) Entry(
+        NpcWarningKind kind, string npc, string? detail = null, string? technical = null,
+        string? modName = null) =>
+        (kind, npc, detail, technical, modName);
 
     private static string HeaderLine(NpcWarningKind kind) =>
         "WARNING: " + NpcWarningReporter.Header(kind);
@@ -70,18 +71,70 @@ public class NpcWarningReporterTests
     [Fact]
     public void FormatReport_MergesAnNpcsDetails_IntoOneLine()
     {
-        // The textureless report records once per shape; the NPC must still get ONE line.
+        // Two mesh-compat entries for the same NPC still yield ONE line, details joined.
         var lines = NpcWarningReporter.FormatReport(
         [
-            Entry(NpcWarningKind.TexturelessShapes, "Adrianne (013BA5:Skyrim.esm)",
-                "hair.nif 'Hair' (missing: a.dds)"),
-            Entry(NpcWarningKind.TexturelessShapes, "Adrianne (013BA5:Skyrim.esm)",
-                "brows.nif 'Brows' (missing: b.dds)"),
+            Entry(NpcWarningKind.ModMeshCompatibility, "Adrianne (013BA5:Skyrim.esm)",
+                "you picked 'Mod A'"),
+            Entry(NpcWarningKind.ModMeshCompatibility, "Adrianne (013BA5:Skyrim.esm)",
+                "second detail"),
         ]).ToList();
 
         lines.Should().ContainSingle(l => l.StartsWith("  - Adrianne"));
         lines.Single(l => l.StartsWith("  - Adrianne")).Should().Be(
-            "  - Adrianne (013BA5:Skyrim.esm): hair.nif 'Hair' (missing: a.dds); brows.nif 'Brows' (missing: b.dds)");
+            "  - Adrianne (013BA5:Skyrim.esm): you picked 'Mod A'; second detail");
+    }
+
+    [Fact]
+    public void FormatReport_TexturelessShapes_GroupsByModThenNpc_IndexedByTexture()
+    {
+        // User direction 2026-08-19: mod → NPC → one texture per line, with the shapes that
+        // need it beneath — several shapes routinely reference the same missing file, so
+        // indexing by shape repeated every path.
+        var lines = NpcWarningReporter.FormatReport(
+        [
+            Entry(NpcWarningKind.TexturelessShapes, "Abelone (08774F:Skyrim.esm)",
+                @"textures\Pandorable\Hair\aviary.dds|0008774f.nif 'PAN_AbeloneHair'",
+                modName: "Pandorable's NPCs"),
+            Entry(NpcWarningKind.TexturelessShapes, "Abelone (08774F:Skyrim.esm)",
+                @"textures\Pandorable\Hair\aviary.dds|0008774f.nif 'PAN_AbeloneHairline'",
+                modName: "Pandorable's NPCs"),
+            Entry(NpcWarningKind.TexturelessShapes, "Abelone (08774F:Skyrim.esm)",
+                @"textures\Pandorable\Hair\aviary_n.dds|0008774f.nif 'PAN_AbeloneHair'",
+                modName: "Pandorable's NPCs"),
+            Entry(NpcWarningKind.TexturelessShapes, "Kaidan (002F9A:0Kaidan.esp)",
+                @"textures\0kaidan\siamese.dds|00002f9a.nif 'KaiHair'",
+                modName: "Another Mod"),
+        ]).ToList();
+
+        lines.Should().ContainInOrder(
+            "  Another Mod:",
+            "    - Kaidan (002F9A:0Kaidan.esp):",
+            @"        textures\0kaidan\siamese.dds",
+            "          needed by 00002f9a.nif 'KaiHair'",
+            "  Pandorable's NPCs:",
+            "    - Abelone (08774F:Skyrim.esm):",
+            @"        textures\Pandorable\Hair\aviary.dds",
+            "          needed by 0008774f.nif 'PAN_AbeloneHair', 0008774f.nif 'PAN_AbeloneHairline'",
+            @"        textures\Pandorable\Hair\aviary_n.dds",
+            "          needed by 0008774f.nif 'PAN_AbeloneHair'");
+    }
+
+    [Fact]
+    public void FormatReport_RaceDefaultsDrift_EndsWithOneConsolidatedFixLine()
+    {
+        // The per-NPC lines each carry "set '<mod>' to <mode>"; the actionable sentence prints
+        // once under the list instead of once per NPC (user direction 2026-08-19).
+        var lines = NpcWarningReporter.FormatReport(
+        [
+            Entry(NpcWarningKind.RaceDefaultsDrift, "Lizz (0CE5F5:Unslaad.esm)",
+                "race 'zzzCrbHalfDragonChildRace' (0AC3A2:Unslaad.esm), race record winner: Unslaad.esm — set 'Women of Unslaad Refined' to Include"),
+            Entry(NpcWarningKind.RaceDefaultsDrift, "Ulliss (0022F6:Unslaad.esm)",
+                "race 'zzzCrbHalfDragonRace' (0A11C2:Unslaad.esm), race record winner: Unslaad.esm — set 'Women of Unslaad Refined' to IncludeAsNew"),
+        ]).ToList();
+
+        lines.Last().Should().Be("  " + NpcWarningReporter.Footer(NpcWarningKind.RaceDefaultsDrift));
+        lines.Count(l => l.Contains("Fix: in the Mods menu")).Should().Be(1);
     }
 
     [Fact]
@@ -100,7 +153,7 @@ public class NpcWarningReporterTests
     public void FormatReport_SkipsKindsWithNoEntries_EntirelyIncludingTheirSpacerLine()
     {
         var lines = NpcWarningReporter.FormatReport(
-            [Entry(NpcWarningKind.TexturelessShapes, "Britte (0136B9:Skyrim.esm)", "d")]);
+            [Entry(NpcWarningKind.MissingFaceTint, "Britte (0136B9:Skyrim.esm)", "d")]);
 
         lines.Should().HaveCount(3); // spacer + header + one NPC
         lines[0].Should().BeEmpty();
@@ -138,13 +191,31 @@ public class NpcWarningReporterTests
     {
         var groups = NpcWarningReporter.BuildDetailedGroups(
         [
-            Entry(NpcWarningKind.TexturelessShapes, "Adrianne (013BA5:Skyrim.esm)",
-                detail: "hair.nif 'Hair' (missing: a.dds)",
+            Entry(NpcWarningKind.ModMeshCompatibility, "Adrianne (013BA5:Skyrim.esm)",
+                detail: "you picked 'Some Mod'",
                 technical: "mod='Some Mod' nif=C:/full/path/hair.nif"),
         ]);
 
         groups.Should().ContainSingle().Which.Npcs.Should().ContainSingle().Which.Heading
-            .Should().Be("Adrianne (013BA5:Skyrim.esm): hair.nif 'Hair' (missing: a.dds)");
+            .Should().Be("Adrianne (013BA5:Skyrim.esm): you picked 'Some Mod'");
+    }
+
+    [Fact]
+    public void BuildDetailedGroups_TexturelessHeadings_StayTheNpcAlone()
+    {
+        // TexturelessShapes details are "texture|referencer" pairs shaped for the run log's
+        // grouped rendering; splicing them into the card heading would show raw separators.
+        // The card's technical lines carry the nif/shape/slot specifics instead.
+        var groups = NpcWarningReporter.BuildDetailedGroups(
+        [
+            Entry(NpcWarningKind.TexturelessShapes, "Adrianne (013BA5:Skyrim.esm)",
+                detail: "a.dds|hair.nif 'Hair'",
+                technical: "mod='Some Mod' nif=C:/full/path/hair.nif",
+                modName: "Some Mod"),
+        ]);
+
+        groups.Should().ContainSingle().Which.Npcs.Should().ContainSingle().Which.Heading
+            .Should().Be("Adrianne (013BA5:Skyrim.esm)");
     }
 
     [Fact]

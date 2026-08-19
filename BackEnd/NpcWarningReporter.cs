@@ -73,7 +73,7 @@ public enum NpcWarningKind
 /// </summary>
 public static class NpcWarningReporter
 {
-    private static readonly ConcurrentQueue<(NpcWarningKind Kind, string Npc, string? Detail, string? TechnicalDetail)>
+    private static readonly ConcurrentQueue<(NpcWarningKind Kind, string Npc, string? Detail, string? TechnicalDetail, string? ModName)>
         _entries = new();
 
     /// <summary>The companion file holding the technical breakdown of the last run's warnings.
@@ -90,13 +90,15 @@ public static class NpcWarningReporter
 
     /// <summary>Records one warning against one NPC. <paramref name="detail"/> is appended to the
     /// NPC's line in the run-log report; several details for the same NPC and kind are joined
-    /// with "; " (how the textureless report lists each affected shape once per NPC).
-    /// <paramref name="technicalDetail"/> goes only to the detailed log file — multi-line is
-    /// fine; it is indented under the NPC's heading there.</summary>
+    /// with "; ". <paramref name="technicalDetail"/> goes only to the detailed log file —
+    /// multi-line is fine; it is indented under the NPC's heading there.
+    /// <paramref name="modName"/> is the selected appearance mod, used by kinds whose run-log
+    /// rendering groups by mod (<see cref="NpcWarningKind.TexturelessShapes"/>, whose details
+    /// are "texture|referencer" pairs rather than prose — see <see cref="FormatReport"/>).</summary>
     public static void Record(NpcWarningKind kind, string npcIdentifier, string? detail = null,
-        string? technicalDetail = null)
+        string? technicalDetail = null, string? modName = null)
     {
-        _entries.Enqueue((kind, npcIdentifier, detail, technicalDetail));
+        _entries.Enqueue((kind, npcIdentifier, detail, technicalDetail, modName));
     }
 
     /// <summary>Emits the grouped report, writes the detailed companion log when any warning
@@ -176,6 +178,18 @@ public static class NpcWarningReporter
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
     };
 
+    /// <summary>The consolidated remedy line printed once under a group's NPC list, for kinds
+    /// whose per-NPC lines each name a suggestion the reader acts on in one place (the
+    /// race-drift list used to repeat a full "Fix: ..." sentence on every line). Null for kinds
+    /// whose header already carries the remedy. Wording is the user's own (2026-08-19).</summary>
+    public static string? Footer(NpcWarningKind kind) => kind switch
+    {
+        NpcWarningKind.RaceDefaultsDrift =>
+            "Fix: in the Mods menu, for the appearance mods listed above, set the Record " +
+            "Override Handling Mode to the setting suggested above.",
+        _ => null,
+    };
+
     /// <summary>The technical framing printed under each group heading in the detailed log:
     /// what the check actually measured, and where to go for more.</summary>
     public static string TechnicalNote(NpcWarningKind kind) => kind switch
@@ -213,15 +227,26 @@ public static class NpcWarningReporter
     /// <summary>
     /// Pure formatting of the run-log report: one block per <see cref="NpcWarningKind"/> that has
     /// entries, in enum order — a blank spacer line, the "WARNING: "-prefixed <see cref="Header"/>,
-    /// then one "  - " line per NPC (alphabetical), with that NPC's details joined by "; ".
+    /// then one "  - " line per NPC (alphabetical), with that NPC's details joined by "; ", then
+    /// the kind's <see cref="Footer"/> when it has one.
+    /// <see cref="NpcWarningKind.TexturelessShapes"/> renders differently (user direction
+    /// 2026-08-19): grouped by appearance mod, then NPC, then missing texture — one path per
+    /// line with the shapes that need it beneath — because the flat per-shape "; " join was
+    /// unreadable once the same texture was named by several shapes.
     /// </summary>
     public static IReadOnlyList<string> FormatReport(
-        IReadOnlyCollection<(NpcWarningKind Kind, string Npc, string? Detail, string? TechnicalDetail)> entries)
+        IReadOnlyCollection<(NpcWarningKind Kind, string Npc, string? Detail, string? TechnicalDetail, string? ModName)> entries)
     {
         var lines = new List<string>();
 
         foreach (var kind in Enum.GetValues<NpcWarningKind>())
         {
+            if (kind == NpcWarningKind.TexturelessShapes)
+            {
+                FormatTexturelessShapes(entries, lines);
+                continue;
+            }
+
             var byNpc = GroupForKind(entries, kind);
             if (byNpc.Count == 0) continue;
 
@@ -233,9 +258,81 @@ public static class NpcWarningReporter
                 lines.Add("  - " + npc.Key +
                           (details.Count > 0 ? ": " + string.Join("; ", details) : string.Empty));
             }
+
+            if (Footer(kind) is { } footer)
+            {
+                lines.Add("  " + footer);
+            }
         }
 
         return lines;
+    }
+
+    /// <summary>
+    /// The textureless-shapes block: mod → NPC → texture, textures indexed rather than shapes
+    /// because several shapes routinely reference the same missing file. Producers record one
+    /// entry per (texture, shape) with detail "texturePath|referencer" — '|' cannot occur in a
+    /// Windows path, so the split is unambiguous. A detail without '|' (an older producer)
+    /// renders as its own line under the NPC rather than being dropped.
+    /// </summary>
+    private static void FormatTexturelessShapes(
+        IReadOnlyCollection<(NpcWarningKind Kind, string Npc, string? Detail, string? TechnicalDetail, string? ModName)> entries,
+        List<string> lines)
+    {
+        var forKind = entries.Where(e => e.Kind == NpcWarningKind.TexturelessShapes).ToList();
+        if (forKind.Count == 0) return;
+
+        lines.Add(string.Empty);
+        lines.Add("WARNING: " + Header(NpcWarningKind.TexturelessShapes));
+
+        foreach (var modGroup in forKind
+                     .GroupBy(e => string.IsNullOrWhiteSpace(e.ModName) ? "(unknown mod)" : e.ModName!,
+                         StringComparer.OrdinalIgnoreCase)
+                     .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            lines.Add($"  {modGroup.Key}:");
+            foreach (var npcGroup in modGroup
+                         .GroupBy(e => e.Npc, StringComparer.OrdinalIgnoreCase)
+                         .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                lines.Add($"    - {npcGroup.Key}:");
+
+                var referencersByTexture =
+                    new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                var unstructured = new List<string>();
+                foreach (var detail in Distinct(npcGroup.Select(e => e.Detail)))
+                {
+                    int sep = detail.IndexOf('|');
+                    if (sep <= 0)
+                    {
+                        unstructured.Add(detail);
+                        continue;
+                    }
+
+                    string texture = detail[..sep];
+                    string referencer = detail[(sep + 1)..];
+                    if (!referencersByTexture.TryGetValue(texture, out var referencers))
+                    {
+                        referencersByTexture[texture] = referencers = new List<string>();
+                    }
+                    if (!referencers.Contains(referencer, StringComparer.OrdinalIgnoreCase))
+                    {
+                        referencers.Add(referencer);
+                    }
+                }
+
+                foreach (var texture in referencersByTexture.Keys
+                             .OrderBy(t => t, StringComparer.OrdinalIgnoreCase))
+                {
+                    lines.Add($"        {texture}");
+                    lines.Add($"          needed by {string.Join(", ", referencersByTexture[texture])}");
+                }
+                foreach (var extra in unstructured)
+                {
+                    lines.Add($"        {extra}");
+                }
+            }
+        }
     }
 
     /// <summary>One NPC in a detailed warning group: the heading (identifier plus the run-log
@@ -254,7 +351,7 @@ public static class NpcWarningReporter
     /// here without coupling to markup.
     /// </summary>
     public static IReadOnlyList<DetailedWarningGroup> BuildDetailedGroups(
-        IReadOnlyCollection<(NpcWarningKind Kind, string Npc, string? Detail, string? TechnicalDetail)> entries)
+        IReadOnlyCollection<(NpcWarningKind Kind, string Npc, string? Detail, string? TechnicalDetail, string? ModName)> entries)
     {
         var groups = new List<DetailedWarningGroup>();
 
@@ -266,7 +363,12 @@ public static class NpcWarningReporter
             var npcs = new List<DetailedWarningNpc>();
             foreach (var npc in byNpc)
             {
-                var details = Distinct(npc.Select(e => e.Detail));
+                // TexturelessShapes details are machine-shaped "texture|referencer" pairs for the
+                // run-log's grouped rendering, not prose — the card's technical lines already name
+                // the nif/shape/slots, so the heading stays the NPC identifier alone.
+                var details = kind == NpcWarningKind.TexturelessShapes
+                    ? new List<string>()
+                    : Distinct(npc.Select(e => e.Detail));
                 string heading = npc.Key +
                                  (details.Count > 0 ? ": " + string.Join("; ", details) : string.Empty);
 
@@ -288,9 +390,9 @@ public static class NpcWarningReporter
         return groups;
     }
 
-    private static List<IGrouping<string, (NpcWarningKind Kind, string Npc, string? Detail, string? TechnicalDetail)>>
+    private static List<IGrouping<string, (NpcWarningKind Kind, string Npc, string? Detail, string? TechnicalDetail, string? ModName)>>
         GroupForKind(
-            IReadOnlyCollection<(NpcWarningKind Kind, string Npc, string? Detail, string? TechnicalDetail)> entries,
+            IReadOnlyCollection<(NpcWarningKind Kind, string Npc, string? Detail, string? TechnicalDetail, string? ModName)> entries,
             NpcWarningKind kind) =>
         entries
             .Where(e => e.Kind == kind)
@@ -478,7 +580,7 @@ public static class NpcWarningReporter
     /// diagnostic must never take a patch run down with it, and the caller then skips the
     /// pointer line.</summary>
     private static bool WriteDetailedLog(
-        IReadOnlyCollection<(NpcWarningKind Kind, string Npc, string? Detail, string? TechnicalDetail)> entries)
+        IReadOnlyCollection<(NpcWarningKind Kind, string Npc, string? Detail, string? TechnicalDetail, string? ModName)> entries)
     {
         try
         {
