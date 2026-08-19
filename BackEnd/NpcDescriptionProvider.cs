@@ -26,6 +26,16 @@ namespace NPC_Plugin_Chooser_2.BackEnd
         
         private readonly Dictionary<FormKey, string> _overrideDescriptions = new(); // master overrides
 
+        // --- Description cache (memory + disk) ---
+        // Reduces wiki scrapes and translation API calls: the fetched English text is
+        // always cached; the zh-CN translation is cached alongside it once produced.
+        // A hit with a translation returns instantly (no network); a hit with only the
+        // English text re-runs just the translation step, not the wiki scrape.
+        private readonly Dictionary<string, CachedNpcDescription> _cache = new(StringComparer.OrdinalIgnoreCase);
+        private readonly object _cacheLock = new();
+        private readonly SemaphoreSlim _diskWriteGate = new(1, 1);
+        private string _cacheFilePath = "";
+
         private static readonly HashSet<string> BaseGamePlugins = new(StringComparer.OrdinalIgnoreCase)
         {
             "Skyrim.esm", "Update.esm", "Dawnguard.esm", "HearthFires.esm", "Dragonborn.esm"
@@ -88,10 +98,35 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                 }
             }
             catch (Exception ex)
-            {
-                Debug.WriteLine($"[DescProvider][Initialize] Error: {ex.Message}");
-            }
-        }
+                        {
+                            Debug.WriteLine($"[DescProvider][Initialize] Error: {ex.Message}");
+                        }
+
+                        // Load persisted description cache (previous session's scrapes + translations).
+                        try
+                        {
+                            string exeDir = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location)!;
+                            string cacheDir = Path.Combine(exeDir, "DescriptionCache");
+                            Directory.CreateDirectory(cacheDir);
+                            _cacheFilePath = Path.Combine(cacheDir, "descriptions.json");
+                            var persisted = JSONhandler<Dictionary<string, CachedNpcDescription>>.LoadJSONFile(_cacheFilePath, out _, out _);
+                            if (persisted != null)
+                            {
+                                lock (_cacheLock)
+                                {
+                                    foreach (var kvp in persisted)
+                                    {
+                                        _cache[kvp.Key] = kvp.Value;
+                                    }
+                                }
+                                Debug.WriteLine($"[DescProvider][Init] Loaded {persisted.Count} cached descriptions from disk.");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Debug.WriteLine($"[DescProvider][Initialize] Cache load failed (non-fatal): {ex.Message}");
+                        }
+                    }
 
         public async Task<string?> GetDescriptionAsync(FormKey npcFormKey, string? displayName, string? editorId)
         {
@@ -149,12 +184,43 @@ namespace NPC_Plugin_Chooser_2.BackEnd
             }
 
             if (!searchKeywords.Any()) {
-                Debug.WriteLine($"[DescProvider] No significant keywords found for '{searchTermRaw}'. Cannot validate.");
-                return null; // Cannot validate if no keywords
-            }
+                            Debug.WriteLine($"[DescProvider] No significant keywords found for '{searchTermRaw}'. Cannot validate.");
+                            return null; // Cannot validate if no keywords
+                        }
 
-            Stopwatch sw = Stopwatch.StartNew();
-            string? finalDescription = null;
+                        // 2.5 Cache check: a fully cached entry (English + translation when the UI is
+                                    // Chinese) returns instantly with zero network requests. A cache entry with only
+                                    // the English text re-runs just the translation step below (see FinalizeAsync).
+                                    string cacheKey = npcFormKey.ToString();
+                                    string? cachedEnOnly = null;
+                                    lock (_cacheLock)
+                                    {
+                                        if (_cache.TryGetValue(cacheKey, out var cached))
+                                        {
+                                            bool uiChinese = !string.IsNullOrWhiteSpace(_settings.UiLanguage) &&
+                                                             _settings.UiLanguage.Equals("zh-CN", StringComparison.OrdinalIgnoreCase);
+                                            if (uiChinese && !string.IsNullOrEmpty(cached.Zh))
+                                            {
+                                                Debug.WriteLine($"[DescProvider] Cache hit (zh-CN) for '{cacheKey}': returning instantly.");
+                                                return cached.Zh;
+                                            }
+                                            if (!uiChinese && !string.IsNullOrEmpty(cached.En))
+                                            {
+                                                Debug.WriteLine($"[DescProvider] Cache hit (en) for '{cacheKey}': returning instantly.");
+                                                return cached.En;
+                                            }
+                                            // zh-CN UI but only the English text is cached: remember the English
+                                            // text so the fetch below can be skipped and only translation re-run.
+                                            cachedEnOnly = cached.En;
+                                        }
+                                    }
+                                    if (cachedEnOnly != null)
+                                    {
+                                        return await FinalizeAsync(cacheKey, cachedEnOnly);
+                                    }
+
+                        Stopwatch sw = Stopwatch.StartNew();
+                        string? finalDescription = null;
 
             // --- 3. Try UESP First ---
             string uespSearchTerm = $"Skyrim:{searchTermRaw}";
@@ -171,7 +237,7 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                          {
                              finalDescription = rawUespDesc; // Assign if valid
                              Debug.WriteLine($"[DescProvider] Success: Valid UESP description found ({sw.ElapsedMilliseconds}ms).");
-                             return await TranslateIfNeededAsync(finalDescription); // *** Return immediately on UESP success ***
+                             return await FinalizeAsync(cacheKey, finalDescription); // *** UESP success: translate + cache ***
                          }
                      else if(rawUespDesc != null) { // Description was fetched but failed validation
                          Debug.WriteLine($"[DescProvider] UESP description failed validation against keywords: {string.Join(", ", searchKeywords)}");
@@ -202,7 +268,7 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                            {
                                 finalDescription = rawFandomDesc; // Assign if valid
                                 Debug.WriteLine($"[DescProvider] Success: Valid Fandom description found ({sw.ElapsedMilliseconds}ms).");
-                                return await TranslateIfNeededAsync(finalDescription); // *** Return immediately on Fandom success ***
+                                return await FinalizeAsync(cacheKey, finalDescription); // *** Fandom success: translate + cache ***
                            }
                            else if(rawFandomDesc != null) { // Description was fetched but failed validation
                                 Debug.WriteLine($"[DescProvider] Fandom description failed validation against keywords: {string.Join(", ", searchKeywords)}");
@@ -220,11 +286,66 @@ namespace NPC_Plugin_Chooser_2.BackEnd
             sw.Stop();
             if (finalDescription != null) {
                 // This point should theoretically not be reached if returns are immediate, but as safety.
-                 Debug.WriteLine($"[DescProvider] Returning description for '{searchTermRaw}'. Total time: {sw.ElapsedMilliseconds}ms");
-                return await TranslateIfNeededAsync(finalDescription);
+                                 Debug.WriteLine($"[DescProvider] Returning description for '{searchTermRaw}'. Total time: {sw.ElapsedMilliseconds}ms");
+                                return await FinalizeAsync(cacheKey, finalDescription);
             } else {
                  Debug.WriteLine($"[DescProvider] No valid description found for '{searchTermRaw}' after trying both sites.");
                 return null;
+            }
+        }
+
+        // --- FinalizeAsync Method ---
+        // Shared exit point for every successful description fetch: translate it when the
+        // UI is Chinese, then cache the English original (always) and the translation (when
+        // produced) both in memory and on disk, so repeated views are instant and consume
+        // no wiki/translation requests.
+        private async Task<string?> FinalizeAsync(string cacheKey, string? englishDescription)
+        {
+            if (string.IsNullOrWhiteSpace(englishDescription)) return englishDescription;
+
+            string? result = await TranslateIfNeededAsync(englishDescription);
+
+            lock (_cacheLock)
+            {
+                _cache.TryGetValue(cacheKey, out var existing);
+                existing ??= new CachedNpcDescription();
+                existing.En = englishDescription;
+                // Only store the translation when it actually differs from the source,
+                // i.e. a real translation succeeded (failed translations fall back to the
+                // English text and leave Zh null, so the next view retries just translation).
+                if (result != null && !result.Equals(englishDescription, StringComparison.OrdinalIgnoreCase))
+                {
+                    existing.Zh = result;
+                }
+                _cache[cacheKey] = existing;
+            }
+            _ = PersistCacheAsync(); // fire-and-forget disk write, never blocks the UI
+            return result;
+        }
+
+        // --- PersistCacheAsync Method ---
+        // Writes the whole in-memory cache to DescriptionCache/descriptions.json, serialized
+        // through a semaphore so concurrent fire-and-forget calls cannot interleave writes.
+        private async Task PersistCacheAsync()
+        {
+            try
+            {
+                await _diskWriteGate.WaitAsync();
+                if (string.IsNullOrEmpty(_cacheFilePath)) return;
+                Dictionary<string, CachedNpcDescription> snapshot;
+                lock (_cacheLock)
+                {
+                    snapshot = new Dictionary<string, CachedNpcDescription>(_cache, StringComparer.OrdinalIgnoreCase);
+                }
+                JSONhandler<Dictionary<string, CachedNpcDescription>>.SaveJSONFile(snapshot, _cacheFilePath, out _, out _);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[DescProvider][Cache] Persist failed (non-fatal): {ex.Message}");
+            }
+            finally
+            {
+                _diskWriteGate.Release();
             }
         }
 
@@ -506,5 +627,14 @@ namespace NPC_Plugin_Chooser_2.BackEnd
         private class MediaQuery { [JsonPropertyName("searchinfo")] public SearchInfo? SearchInfo { get; set; } [JsonPropertyName("search")] public List<SearchItem>? Search { get; set; } }
         private class SearchInfo { [JsonPropertyName("totalhits")] public int TotalHits { get; set; } }
         private class SearchItem { [JsonPropertyName("ns")] public int Ns { get; set; } [JsonPropertyName("title")] public string? Title { get; set; } [JsonPropertyName("pageid")] public int PageId { get; set; } [JsonPropertyName("snippet")] public string? Snippet { get; set; } }
-    }
+            }
+
+            /// <summary>One cached NPC description entry (persisted to DescriptionCache/descriptions.json).
+            /// En is the UESP/Fandom English source; Zh is the zh-CN translation produced for Chinese UIs,
+            /// null while not yet translated (a later view will translate just the cached English text).</summary>
+            public sealed class CachedNpcDescription
+            {
+                public string? En { get; set; }
+                public string? Zh { get; set; }
+            }
 }
