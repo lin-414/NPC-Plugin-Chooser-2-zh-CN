@@ -281,17 +281,17 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                     string? finalDescription = null;
                                                                     bool lastAttemptWasNetwork = true; // default: classify total failure as network if neither site was reached cleanly
 
-                                                                    // --- 3. Try UESP First (max 2 attempts: network failures retry once after 2s) ---
-                                                                    string uespSearchTerm = $"Skyrim:{searchTermRaw}";
-                                                                    string encodedUespSearchTerm = WebUtility.UrlEncode(uespSearchTerm);
-                                                                    Debug.WriteLine($"[DescProvider] Attempting UESP for: \"{uespSearchTerm}\"");
-                                                                    for (int attempt = 0; attempt < 2 && finalDescription == null; attempt++)
-                                                                    {
-                                                                        if (attempt > 0)
-                                                                        {
-                                                                            Debug.WriteLine("[DescProvider] UESP network failure — retrying in 2s.");
-                                                                            await Task.Delay(2000).ConfigureAwait(false);
-                                                                        }
+                                                                    // --- 3. Try UESP First (max 3 attempts: network failures retry with backoff 2s then 4s) ---
+                                                                                                                                        string uespSearchTerm = $"Skyrim:{searchTermRaw}";
+                                                                                                                                        string encodedUespSearchTerm = WebUtility.UrlEncode(uespSearchTerm);
+                                                                                                                                        Debug.WriteLine($"[DescProvider] Attempting UESP for: \"{uespSearchTerm}\"");
+                                                                                                                                        for (int attempt = 0; attempt < 3 && finalDescription == null; attempt++)
+                                                                                                                                        {
+                                                                                                                                            if (attempt > 0)
+                                                                                                                                            {
+                                                                                                                                                Debug.WriteLine($"[DescProvider] UESP network failure — retrying in {attempt * 2}s (attempt {attempt + 1}/3).");
+                                                                                                                                                await Task.Delay(2000 * attempt).ConfigureAwait(false);
+                                                                                                                                            }
                                                                         bool uespBlocked = false; // no point retrying when the query failed, not the network
                                                                         try
                                                                         {
@@ -338,13 +338,13 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                         string fandomSearchTerm = searchTermRaw;
                                                                         string encodedFandomSearchTerm = WebUtility.UrlEncode(fandomSearchTerm);
                                                                         Debug.WriteLine($"[DescProvider] UESP failed, Attempting Fandom for: \"{fandomSearchTerm}\"");
-                                                                        for (int attempt = 0; attempt < 2 && finalDescription == null; attempt++)
-                                                                        {
-                                                                            if (attempt > 0)
-                                                                            {
-                                                                                Debug.WriteLine("[DescProvider] Fandom network failure — retrying in 2s.");
-                                                                                await Task.Delay(2000).ConfigureAwait(false);
-                                                                            }
+                                                                        for (int attempt = 0; attempt < 3 && finalDescription == null; attempt++)
+                                                                                                                                                {
+                                                                                                                                                    if (attempt > 0)
+                                                                                                                                                    {
+                                                                                                                                                        Debug.WriteLine($"[DescProvider] Fandom network failure — retrying in {attempt * 2}s (attempt {attempt + 1}/3).");
+                                                                                                                                                        await Task.Delay(2000 * attempt).ConfigureAwait(false);
+                                                                                                                                                    }
                                                                             bool fandomBlocked = false;
                                                                             try
                                                                             {
@@ -703,8 +703,8 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                 {
                     try
                     {
-                        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(7));
-                        using var request = new HttpRequestMessage(HttpMethod.Get, apiUrl);
+                        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+                                                using var request = new HttpRequestMessage(HttpMethod.Get, apiUrl);
                         using var response = await _httpClient.SendAsync(request, cts.Token);
                         response.EnsureSuccessStatusCode();
 
@@ -741,8 +741,8 @@ namespace NPC_Plugin_Chooser_2.BackEnd
         {
             try
             {
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
-                using var request = new HttpRequestMessage(HttpMethod.Get, pageUrl);
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                                using var request = new HttpRequestMessage(HttpMethod.Get, pageUrl);
                 using var response = await _httpClient.SendAsync(request, cts.Token);
 
                 if (response.StatusCode == HttpStatusCode.NotFound) {

@@ -758,7 +758,7 @@
     "restoreSettingsDone": "Settings restored from:\n{0}\n\nThe app is restarting…",
     "restoreSettingsRestartFailed": "Settings restored, but the app could not restart automatically:\n{0}\n\nPlease close and reopen it manually.",
       "exportDescriptions": "Export NPC Descriptions (CSV)…",
-      "exportDescriptionsTip": "Fetches (and caches) the English wiki description for every eligible NPC, then writes a CSV you can translate offline in Excel, WPS, DeepL or any editor. The Chinese column is pre-filled where a translation already exists. Translate it and click Import Translations to read your work back.",
+      "exportDescriptionsTip": "Fetches (and caches) the English wiki description for every eligible NPC, then writes a CSV you can translate offline in Excel, WPS, DeepL or any editor. The Chinese column is left blank for you to translate. Fill it in and click Import Translations to read your work back.",
       "exportPickTitle": "Save descriptions CSV as…",
       "exportProgress": "Fetching descriptions: {0}/{1} · with English {2} · failed {3}",
       "exportDone": "Descriptions exported to:\n{0}\n\n{1} NPCs total · {2} with English text · {3} failed (network — retry later) · {4} not found on the wikis.\n\nTranslate the Chinese column offline, then use Import Translations to write your translations back.",

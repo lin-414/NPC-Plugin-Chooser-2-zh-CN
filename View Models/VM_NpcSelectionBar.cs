@@ -1332,7 +1332,7 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                 // --- CSV round-trip for MANUAL translation ---
                 // Auto-translation accuracy is inherently limited; let the user do the translation
                 // themselves instead: Export writes one row per eligible NPC (FormKey, EditorID,
-                // English wiki description, pre-filled Chinese translation if one is cached) to a
+                // English wiki description, blank Chinese column for the user to fill in) to a
                 // UTF-8 (BOM) CSV the user can open in Excel/WPS, translate in their tool of
                 // choice, and save back; Import reads that CSV and writes the Chinese column into
                 // the description cache. Rows with an empty or unchanged Chinese cell are skipped.
@@ -1373,8 +1373,9 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                                     {
                                         if (!string.IsNullOrWhiteSpace(en))
                                         {
-                                            rows.Add((npc.NpcFormKey.ToString(), npc.NpcEditorId, en,
-                                                      _descriptionProvider.GetCachedZh(npc.NpcFormKey)));
+                                            // Chinese column deliberately left EMPTY: the user translates
+                                            // it offline (auto-translation quality is not worth pre-filling).
+                                            rows.Add((npc.NpcFormKey.ToString(), npc.NpcEditorId, en, null));
                                             Interlocked.Increment(ref withEnglish);
                                         }
                                         else if (networkError)
@@ -1386,6 +1387,9 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                                             Interlocked.Increment(ref notFound); // nothing on the wikis to find
                                         }
                                     }
+                                    // Gentle pacing: a short pause per NPC keeps the request rate below the
+                                    // wikis' rate-limit windows even though retries now recover most hits.
+                                    await Task.Delay(300, ct).ConfigureAwait(false);
                                 }
                                 finally
                                 {
