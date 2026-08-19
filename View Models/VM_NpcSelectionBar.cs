@@ -1673,10 +1673,23 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         bool sourceIncludesMods = appearanceSource != RandomizeAppearanceSource.FavoriteFaces;
         bool sourceIncludesFavorites = appearanceSource != RandomizeAppearanceSource.SelectedMods;
 
-        // Target set: either the full list or the current filtered view. NPCs whose
-        // defining plugin isn't in the load order are skipped (can't be resolved/validated).
+        // Target set: either the full list or the current filtered view. Only NPCs whose base
+        // record resolves in the current load order can be randomized, judged by the same live
+        // resolve the pre-patch Validator screens with ("Base NPC not found in load order") —
+        // not the menu's cached IsInLoadOrder flag, which reflects startup state. The rest are
+        // split off so the ones that would otherwise have been eligible can be reported in the
+        // completion dialog rather than dropped silently.
         IEnumerable<VM_NpcsMenuSelection> scopeList = scope == RandomizeScope.AllNpcs ? AllNpcs : FilteredNpcs;
-        var targetNpcs = scopeList.Where(n => n != null && n.IsInLoadOrder).ToList();
+        var targetNpcs = new List<VM_NpcsMenuSelection>();
+        var outOfLoadOrderNpcs = new List<VM_NpcsMenuSelection>();
+        foreach (var scopeNpc in scopeList)
+        {
+            if (scopeNpc == null) continue;
+            if (_environmentStateProvider.LinkCache.TryResolve<INpcGetter>(scopeNpc.NpcFormKey, out _))
+                targetNpcs.Add(scopeNpc);
+            else
+                outOfLoadOrderNpcs.Add(scopeNpc);
+        }
 
         // Memoized gender/weight resolution (used by the share filters).
         var npcByKey = AllNpcs.Where(n => n != null)
@@ -1744,10 +1757,10 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                 favoriteDonors.Add((fav.ModName, fav.NpcFormKey));
         }
 
-        // Build each target NPC's candidate pool of (mod, sourceNpc) appearances.
-        var eligibleByNpc = new Dictionary<FormKey, List<RandomCandidate>>();
-        int singleOptionSkipCount = 0;
-        foreach (var npc in targetNpcs)
+        // Builds one NPC's candidate pool of (mod, sourceNpc) appearances under the chosen
+        // options. Shared between the real targets and the out-of-load-order sweep below so
+        // "would otherwise have been eligible" is judged by exactly the rules the run uses.
+        List<RandomCandidate> BuildCandidatePool(VM_NpcsMenuSelection npc)
         {
             var targetKey = npc.NpcFormKey;
             var sourceModKey = targetKey.ModKey;
@@ -1810,14 +1823,34 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                     foreach (var d in favoriteDonors) TryAddShared(d.ModName, d.SourceKey);
             }
 
-            // A one-candidate pool isn't a random pick, it's a forced one. Unless the user opts
-            // in, keep those NPCs out of the run entirely (like the ones with no candidates at
-            // all) so whatever they came in with — including a curated pick — survives untouched.
-            if (pool.Count > 1 || (pool.Count == 1 && allowSingleOptionNpcs))
-                eligibleByNpc[targetKey] = pool;
+            return pool;
+        }
+
+        // A one-candidate pool isn't a random pick, it's a forced one. Unless the user opts
+        // in, keep those NPCs out of the run entirely (like the ones with no candidates at
+        // all) so whatever they came in with — including a curated pick — survives untouched.
+        bool PoolIsEligible(List<RandomCandidate> pool) =>
+            pool.Count > 1 || (pool.Count == 1 && allowSingleOptionNpcs);
+
+        var eligibleByNpc = new Dictionary<FormKey, List<RandomCandidate>>();
+        int singleOptionSkipCount = 0;
+        foreach (var npc in targetNpcs)
+        {
+            var pool = BuildCandidatePool(npc);
+            if (PoolIsEligible(pool))
+                eligibleByNpc[npc.NpcFormKey] = pool;
             else if (pool.Count == 1)
                 singleOptionSkipCount++;
         }
+
+        // The NPCs the load-order gate excluded that WOULD have been in the run under these
+        // same options. They are surfaced in the completion dialog because, unlike every NPC
+        // that actually enters the run, they keep whatever selection they arrived with — and a
+        // surviving selection on an unresolvable NPC is exactly what pre-patch validation
+        // rejects as "Base NPC not found in load order".
+        var skippedOutOfLoadOrder = outOfLoadOrderNpcs
+            .Where(n => PoolIsEligible(BuildCandidatePool(n)))
+            .ToList();
 
         var applicableNpcs = targetNpcs
             .Where(n => eligibleByNpc.ContainsKey(n.NpcFormKey))
@@ -1908,6 +1941,24 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
             .Select(x => x.ModKey).ToHashSet() ?? new HashSet<ModKey>();
         var masterCache = new Dictionary<ModKey, HashSet<ModKey>>();
 
+        // The rest of the Validator's master verdict, mirrored here too: implicitly-active
+        // masters (vanilla base masters + CC plugins load regardless of plugins.txt;
+        // BaseGamePlugins is a fresh-allocating getter, so snapshot it once), and the
+        // cross-mod merge-eligibility index — a master bundled with the mod entry only
+        // counts as available if its records are actually set to merge into the output.
+        // Snapshots come from the live VMs (as in SetResourcePlugins) so unsaved Merge-In
+        // toggles are reflected.
+        var implicitMasters = new HashSet<ModKey>(_environmentStateProvider.BaseGamePlugins);
+        implicitMasters.UnionWith(_environmentStateProvider.CreationClubPlugins);
+        var mergeSnapshots = _lazyModsVm.Value.AllModSettings
+            .Where(m => m != null)
+            .Select(m => m.ToMergeEligibilitySnapshot())
+            .ToList();
+        var npcProvidingOwnersByPlugin = MergeEligibility.BuildNpcProvidingOwnerIndex(mergeSnapshots);
+        var mergeSnapshotsByName = mergeSnapshots
+            .GroupBy(s => s.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
         // Tracks (mod, sourceNpc) faces already shared during this run so the same borrowed
         // face isn't reused when "Allow duplicate shares" is off. Seeded with the shared
         // selections of NPCs that AREN'T being re-randomized, so randomize also won't collide
@@ -1976,16 +2027,30 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                                     continue;
                                 }
 
-                                // Borrowed face: screen the guest mod's record graph like an own
-                                // face (a donor record can reference unloadable dependencies just
-                                // as easily). Mugshot-only/favorite sources without an installed
-                                // ModSetting can't be validated and pass through as before.
-                                if (modByName.TryGetValue(candidate.ModName, out var guestMod) &&
-                                    !CandidateAppearanceDependenciesAreResolvable(candidate.SourceKey, guestMod,
-                                        out var guestDependencyFailure))
+                                // Borrowed face: screen the guest mod like an own face — masters
+                                // first (cheaper), then the record graph (a donor record can
+                                // reference unloadable dependencies just as easily; the Validator
+                                // screens the source plugin's masters for guest selections too,
+                                // keyed on the donor). Mugshot-only/favorite sources without an
+                                // installed ModSetting can't be validated and pass through as
+                                // before.
+                                if (modByName.TryGetValue(candidate.ModName, out var guestMod))
                                 {
-                                    lastFailure = guestDependencyFailure;
-                                    continue;
+                                    if (!CandidateMastersAreAvailable(candidate.SourceKey, guestMod,
+                                            loadOrderKeys, implicitMasters, masterCache,
+                                            mergeSnapshotsByName, npcProvidingOwnersByPlugin,
+                                            out var guestMasterFailure))
+                                    {
+                                        lastFailure = guestMasterFailure;
+                                        continue;
+                                    }
+
+                                    if (!CandidateAppearanceDependenciesAreResolvable(candidate.SourceKey,
+                                            guestMod, out var guestDependencyFailure))
+                                    {
+                                        lastFailure = guestDependencyFailure;
+                                        continue;
+                                    }
                                 }
 
                                 // Register the guest then select it. Replace this NPC's previous
@@ -2013,7 +2078,9 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                                 // chain selections on success) we'd have to undo on a master
                                 // failure.
                                 if (!CandidateMastersAreAvailable(npcVM.NpcFormKey, ownMod,
-                                        loadOrderKeys, masterCache, out var masterFailure))
+                                        loadOrderKeys, implicitMasters, masterCache,
+                                        mergeSnapshotsByName, npcProvidingOwnersByPlugin,
+                                        out var masterFailure))
                                 {
                                     lastFailure = masterFailure;
                                     continue;
@@ -2170,7 +2237,24 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
             {
                 resultMessage.AppendLine($"• {entry}");
             }
+        }
 
+        if (skippedOutOfLoadOrder.Any())
+        {
+            resultMessage.AppendLine();
+            resultMessage.AppendLine(BuildNotInLoadOrderRandomizeNote(skippedOutOfLoadOrder.Count));
+            resultMessage.AppendLine();
+            foreach (var skipped in skippedOutOfLoadOrder)
+            {
+                var (existingMod, _) = _consistencyProvider.GetSelectedMod(skipped.NpcFormKey);
+                resultMessage.AppendLine(string.IsNullOrEmpty(existingMod)
+                    ? $"• {skipped.DisplayName} ({skipped.NpcFormKeyString})"
+                    : $"• {skipped.DisplayName} ({skipped.NpcFormKeyString}) — keeps its existing selection '{existingMod}'");
+            }
+        }
+
+        if (fullyExhausted.Any() || skippedOutOfLoadOrder.Any())
+        {
             ScrollableMessageBox.ShowWarning(resultMessage.ToString(), "Randomize Complete with Warnings");
         }
         else
@@ -3959,6 +4043,21 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         "every NPC it is given, so any it could not place is left unselected rather than keeping an " +
         "older pick that the rest of the run has moved past.";
 
+    /// <summary>
+    /// Randomize's warning for NPCs it excluded because their base NPC record does not resolve in
+    /// the current load order — the same live screen the pre-patch Validator applies (its
+    /// "Base NPC not found in load order" rejection). Only NPCs that would otherwise have been
+    /// randomized under the chosen options are counted. Unlike every NPC that actually enters the
+    /// run, these keep whatever selection they arrived with, and that surviving selection is
+    /// exactly what the Validator rejects at patch time — so the dialog names them here instead
+    /// of letting them fail silently later.
+    /// </summary>
+    internal static string BuildNotInLoadOrderRandomizeNote(int count) =>
+        $"{count} NPC(s) were skipped because their base NPC record is not in your current load " +
+        "order (its defining plugin is missing or disabled), so the patcher would have nothing to " +
+        "apply an appearance to. Any selection they already have was left unchanged and will fail " +
+        "validation when you run the patcher — enable the defining plugin, or clear the selection.";
+
     // You will also need this helper method if you don't have it already.
     private ModKey? GetPluginKeyForNpc(VM_ModSetting? modSetting, FormKey npcFormKey)
     {
@@ -4989,15 +5088,22 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
     }
 
     /// <summary>
-    /// Mirrors Validator.cs's master-availability check so randomize doesn't pick
-    /// candidates that will later fail screening. A master is available if it's in
-    /// the load order or bundled inside the candidate's own ModSetting.
+    /// Mirrors Validator.cs's master-availability check (<c>IsMasterSatisfied</c>) so randomize
+    /// doesn't pick candidates that will later fail screening. A master is available if it's in
+    /// the load order, implicitly active (vanilla/CC), or bundled inside the candidate's own
+    /// ModSetting AND merge-eligible per <see cref="MergeEligibility.IsPluginMergeEligible"/> —
+    /// a bundled plugin whose records are NOT set to merge in leaves the output referencing a
+    /// plugin the game never loads, which is exactly what the Validator rejects as
+    /// "Missing required master".
     /// </summary>
     private bool CandidateMastersAreAvailable(
         FormKey npcFormKey,
         VM_ModSetting candidate,
         HashSet<ModKey> loadOrderKeys,
+        HashSet<ModKey> implicitMasters,
         Dictionary<ModKey, HashSet<ModKey>> masterCache,
+        IReadOnlyDictionary<string, ModSetting> mergeSnapshotsByName,
+        IReadOnlyDictionary<ModKey, ModSetting> npcProvidingOwnersByPlugin,
         out string failureReason)
     {
         failureReason = string.Empty;
@@ -5033,11 +5139,31 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
 
         foreach (var master in masters)
         {
-            if (!loadOrderKeys.Contains(master) && !candidate.CorrespondingModKeys.Contains(master))
+            if (loadOrderKeys.Contains(master) || implicitMasters.Contains(master)) continue;
+
+            if (candidate.CorrespondingModKeys.Contains(master))
             {
-                failureReason = $"plugin '{sourcePlugin.Value.FileName}' is missing required master '{master.FileName}'";
+                // The Validator's judgment, not just "bundled = fine": the bundled plugin only
+                // substitutes for the master if its records are set to merge into the output.
+                if (!mergeSnapshotsByName.TryGetValue(candidate.DisplayName, out var ownerSnapshot))
+                {
+                    ownerSnapshot = candidate.ToMergeEligibilitySnapshot();
+                }
+
+                if (MergeEligibility.IsPluginMergeEligible(ownerSnapshot, master, npcProvidingOwnersByPlugin))
+                {
+                    continue;
+                }
+
+                failureReason =
+                    $"plugin '{sourcePlugin.Value.FileName}' requires master '{master.FileName}', which belongs " +
+                    "to this mod entry but is neither in the load order nor set to merge in (enable 'Merge In' " +
+                    "for it under Set Resource Plugins, or enable the plugin)";
                 return false;
             }
+
+            failureReason = $"plugin '{sourcePlugin.Value.FileName}' is missing required master '{master.FileName}'";
+            return false;
         }
 
         return true;

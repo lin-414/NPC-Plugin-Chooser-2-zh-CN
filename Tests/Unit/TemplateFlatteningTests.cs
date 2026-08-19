@@ -390,6 +390,27 @@ public class TemplateFlatteningTests
         text.Should().NotContain("Traits", "'the Traits flag' means nothing to most users");
     }
 
+    // ---- Randomize's out-of-load-order warning (VM_NpcSelectionBar.BuildNotInLoadOrderRandomizeNote)
+    //
+    // Randomize only randomizes NPCs whose base record resolves in the current load order,
+    // mirroring the Validator's "Base NPC not found in load order" screen. NPCs excluded by that
+    // gate keep whatever selection they arrived with — the one survival path a run leaves open —
+    // and that surviving selection is exactly what pre-patch validation later rejects, so the
+    // completion dialog has to warn about it rather than skip them silently.
+
+    [Fact]
+    public void NotInLoadOrderNote_ExplainsTheSkipAndTheSurvivingSelection()
+    {
+        var text = VM_NpcSelectionBar.BuildNotInLoadOrderRandomizeNote(4);
+
+        text.Should().Contain("4");
+        text.Should().Contain("load order", "the reason has to match what the Validator will later report");
+        // The note must own up to the selection that survives the run.
+        text.Should().ContainAny("left unchanged", "kept", "untouched");
+        text.Should().Contain("validation", "the user needs to know this will resurface at patch time");
+        text.Should().NotContain("Traits", "'the Traits flag' means nothing to most users");
+    }
+
     [Fact]
     public void InheritedTemplateNote_DoesNotClaimTheNpcsWereLeftUntouched()
     {
