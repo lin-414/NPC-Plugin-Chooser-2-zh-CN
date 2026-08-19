@@ -2884,19 +2884,19 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
                                 .Subscribe(_ => { try { cts.Cancel(); } catch { /* already disposed */ } });
 
                             string progressFmt = TranslationServiceProvider.GetService()?.GetString("exportProgress")
-                                ?? "Fetching descriptions: {0}/{1} · with English {2} · failed {3}";
-                            var progress = new Progress<(int Done, int Total, int WithEnglish, int Failed)>(p =>
-                            {
-                                if (p.Total > 0)
-                                {
-                                    progressVm.IsIndeterminate = false;
-                                    progressVm.ProgressMaximum = p.Total;
-                                    progressVm.ProgressValue = p.Done;
-                                }
-                                progressVm.StatusMessage = string.Format(progressFmt, p.Done, p.Total, p.WithEnglish, p.Failed);
-                            });
+                                                        ?? "Fetching descriptions: {0}/{1} · with English {2} · failed {3}";
+                                                    var progress = new Progress<(int Done, int Total, int WithEnglish, int Failed, int NotFound)>(p =>
+                                                    {
+                                                        if (p.Total > 0)
+                                                        {
+                                                            progressVm.IsIndeterminate = false;
+                                                            progressVm.ProgressMaximum = p.Total;
+                                                            progressVm.ProgressValue = p.Done;
+                                                        }
+                                                        progressVm.StatusMessage = string.Format(progressFmt, p.Done, p.Total, p.WithEnglish, p.Failed + p.NotFound);
+                                                    });
 
-                            (int Total, int WithEnglish, int Failed)? result = null;
+                                                    (int Total, int WithEnglish, int Failed, int NotFound)? result = null;
                             bool cancelled = false;
                             try
                             {
@@ -2921,9 +2921,9 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
                             if (cancelled || result == null) return;
 
                             string doneMsg = string.Format(
-                                TranslationServiceProvider.GetService()?.GetString("exportDone")
-                                ?? "Descriptions exported to:\n{0}\n\n{1} NPCs total · {2} with English text · {3} failed.\n\nTranslate the Chinese column offline, then use Import Translations to write your translations back.",
-                                dialog.FileName, result.Value.Total, result.Value.WithEnglish, result.Value.Failed);
+                                                        TranslationServiceProvider.GetService()?.GetString("exportDone")
+                                                        ?? "Descriptions exported to:\n{0}\n\n{1} NPCs total · {2} with English text · {3} failed (network — retry later) · {4} not found on the wikis.\n\nTranslate the Chinese column offline, then use Import Translations to write your translations back.",
+                                                        dialog.FileName, result.Value.Total, result.Value.WithEnglish, result.Value.Failed, result.Value.NotFound);
                             MessageBox.Show(doneMsg,
                                 TranslationServiceProvider.GetService()?.GetString("exportDescriptions") ?? "Export NPC Descriptions (CSV)",
                                 MessageBoxButton.OK, MessageBoxImage.Information);

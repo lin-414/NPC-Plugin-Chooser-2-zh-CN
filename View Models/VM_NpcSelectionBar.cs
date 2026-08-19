@@ -1339,11 +1339,12 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
 
                 /// <summary>Walks the eligible NPCs (optionally filtered by gender), fetches (caching)
                     /// each one's ENGLISH wiki description, and writes a translatable CSV. Returns counters
-                    /// for the summary dialog.</summary>
-                    public async Task<(int Total, int WithEnglish, int Failed)> ExportDescriptionsCsvAsync(
+                    /// for the summary dialog: Failed = network-level failures (worth retrying later),
+                    /// NotFound = the wikis have no matching page (retrying won't help).</summary>
+                    public async Task<(int Total, int WithEnglish, int Failed, int NotFound)> ExportDescriptionsCsvAsync(
                         string outputPath,
                         GenderFilterType genderFilter,
-                        IProgress<(int Done, int Total, int WithEnglish, int Failed)>? progress,
+                        IProgress<(int Done, int Total, int WithEnglish, int Failed, int NotFound)>? progress,
                         CancellationToken ct)
                     {
                         var eligible = AllNpcs
@@ -1352,42 +1353,48 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                                 || (genderFilter == GenderFilterType.Male && n.NpcData?.Gender == Gender.Male)
                                 || (genderFilter == GenderFilterType.Female && n.NpcData?.Gender == Gender.Female))
                             .ToList();
-                    int total = eligible.Count;
-                    int done = 0, withEnglish = 0, failed = 0;
-                    var rows = new List<(string Key, string EditorId, string En, string? Zh)>();
+                            int total = eligible.Count;
+                            int done = 0, withEnglish = 0, failed = 0, notFound = 0;
+                            var rows = new List<(string Key, string EditorId, string En, string? Zh)>();
 
-                    using var concurrency = new SemaphoreSlim(4, 4);
-                    var tasks = eligible.Select(async npc =>
-                    {
-                        await concurrency.WaitAsync(ct).ConfigureAwait(false);
-                        try
-                        {
-                            ct.ThrowIfCancellationRequested();
-                            string? en = await _descriptionProvider
-                                .GetEnglishDescriptionAsync(npc.NpcFormKey, npc.DisplayName, npc.NpcData?.EditorID)
-                                .ConfigureAwait(false);
-                            lock (rows)
+                            // 2 workers: the wikis rate-limit aggressive bursts; a lower concurrency plus the
+                            // built-in retry keeps the batch alive where 4 workers previously 429'd everything.
+                            using var concurrency = new SemaphoreSlim(2, 2);
+                            var tasks = eligible.Select(async npc =>
                             {
-                                if (!string.IsNullOrWhiteSpace(en))
+                                await concurrency.WaitAsync(ct).ConfigureAwait(false);
+                                try
                                 {
-                                    rows.Add((npc.NpcFormKey.ToString(), npc.NpcEditorId, en,
-                                              _descriptionProvider.GetCachedZh(npc.NpcFormKey)));
-                                    Interlocked.Increment(ref withEnglish);
+                                    ct.ThrowIfCancellationRequested();
+                                    var (en, networkError) = await _descriptionProvider
+                                        .GetEnglishDescriptionAsync(npc.NpcFormKey, npc.DisplayName, npc.NpcData?.EditorID)
+                                        .ConfigureAwait(false);
+                                    lock (rows)
+                                    {
+                                        if (!string.IsNullOrWhiteSpace(en))
+                                        {
+                                            rows.Add((npc.NpcFormKey.ToString(), npc.NpcEditorId, en,
+                                                      _descriptionProvider.GetCachedZh(npc.NpcFormKey)));
+                                            Interlocked.Increment(ref withEnglish);
+                                        }
+                                        else if (networkError)
+                                        {
+                                            Interlocked.Increment(ref failed); // transient — retry later
+                                        }
+                                        else
+                                        {
+                                            Interlocked.Increment(ref notFound); // nothing on the wikis to find
+                                        }
+                                    }
                                 }
-                                else
+                                finally
                                 {
-                                    Interlocked.Increment(ref failed);
+                                    concurrency.Release();
+                                    int d = Interlocked.Increment(ref done);
+                                    progress?.Report((d, total,
+                                        Volatile.Read(ref withEnglish), Volatile.Read(ref failed), Volatile.Read(ref notFound)));
                                 }
-                            }
-                        }
-                        finally
-                        {
-                            concurrency.Release();
-                            int d = Interlocked.Increment(ref done);
-                            progress?.Report((d, total,
-                                Volatile.Read(ref withEnglish), Volatile.Read(ref failed)));
-                        }
-                    });
+                            });
 
                     try
                     {
@@ -1408,8 +1415,8 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                           .Append(CsvField(zh ?? string.Empty)).AppendLine();
                     }
                     // UTF-8 with BOM so Excel/WPS open Chinese (and any CJK the user adds) correctly.
-                    await File.WriteAllTextAsync(outputPath, sb.ToString(), new UTF8Encoding(true)).ConfigureAwait(false);
-                    return (total, withEnglish, failed);
+                            await File.WriteAllTextAsync(outputPath, sb.ToString(), new UTF8Encoding(true)).ConfigureAwait(false);
+                            return (total, withEnglish, failed, notFound);
                 }
 
                 /// <summary>Parses an exported/edited CSV and pushes the Chinese column into the description

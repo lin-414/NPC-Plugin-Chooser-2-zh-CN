@@ -1,4 +1,4 @@
-// BackEnd/NpcDescriptionProvider.cs
+﻿// BackEnd/NpcDescriptionProvider.cs
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -255,168 +255,220 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                         Stopwatch sw = Stopwatch.StartNew();
 
                                                 // --- 3+4. Try UESP, then Fandom, with keyword validation (shared with the CSV export path) ---
-                                                string? rawEnglish = await FetchRawEnglishAsync(searchTermRaw, searchKeywords);
-                                                sw.Stop();
-                                                if (rawEnglish != null)
-                                                {
-                                                    Debug.WriteLine($"[DescProvider] Raw English fetched for '{searchTermRaw}' ({sw.ElapsedMilliseconds}ms). Finalizing.");
-                                                    return await FinalizeAsync(cacheKey, rawEnglish, forceTranslate);
-                                                }
+                                                                                                var rawResult = await FetchRawEnglishAsync(searchTermRaw, searchKeywords);
+                                                                                                sw.Stop();
+                                                                                                if (rawResult.Description != null)
+                                                                                                {
+                                                                                                    Debug.WriteLine($"[DescProvider] Raw English fetched for '{searchTermRaw}' ({sw.ElapsedMilliseconds}ms). Finalizing.");
+                                                                                                    return await FinalizeAsync(cacheKey, rawResult.Description, forceTranslate);
+                                                                                                }
 
                                                 Debug.WriteLine($"[DescProvider] No valid description found for '{searchTermRaw}' after trying both sites.");
                                                 return null;
                                 }
 
                                 // Shared by GetDescriptionAsync (translate on demand) and GetEnglishDescriptionAsync (CSV
-                                // export): search UESP first, then Fandom, validate the extracted first sentence against
-                                // the NPC's keywords, and return the raw ENGLISH text (or null). Does NOT translate and
-                                // does NOT touch the cache — callers cache the result themselves.
-                                private async Task<string?> FetchRawEnglishAsync(string searchTermRaw, HashSet<string> searchKeywords)
-                                {
-                                    Stopwatch sw = Stopwatch.StartNew();
-                                    string? finalDescription = null;
+                                                                // export): search UESP first, then Fandom, validate the extracted first sentence against
+                                                                // the NPC's keywords, and return the raw ENGLISH text. Returns NetworkError=true
+                                                                // when the LAST attempt failed at the transport level (timeout / rate-limit /
+                                                                // connection) — the counterpoint to "page simply not found", which the caller
+                                                                // reports differently. Both sites get one retry after a 2s pause, since the
+                                                                // wikis rate-limit bursts and a single transient failure currently marks ~all
+                                                                // NPCs in a batch as failed.
+                                                                private async Task<(string? Description, bool NetworkError)> FetchRawEnglishAsync(string searchTermRaw, HashSet<string> searchKeywords)
+                                                                {
+                                                                    Stopwatch sw = Stopwatch.StartNew();
+                                                                    string? finalDescription = null;
+                                                                    bool lastAttemptWasNetwork = true; // default: classify total failure as network if neither site was reached cleanly
 
-                                    // --- 3. Try UESP First ---
-                                    string uespSearchTerm = $"Skyrim:{searchTermRaw}";
-                                    string encodedUespSearchTerm = WebUtility.UrlEncode(uespSearchTerm);
-                                    Debug.WriteLine($"[DescProvider] Attempting UESP for: \"{uespSearchTerm}\"");
-                                    try
-                                    {
-                                         string? uespUrl = await SearchWikiAsync($"https://en.uesp.net/w/api.php?action=query&list=search&srsearch={encodedUespSearchTerm}&format=json&srlimit=1", "https://en.uesp.net/wiki/");
-                                         if (!string.IsNullOrEmpty(uespUrl))
-                                         {
-                                             Debug.WriteLine($"[DescProvider] Found UESP URL: {uespUrl}");
-                                             string? rawUespDesc = await FetchAndParseDescriptionAsync(uespUrl, WikiSite.UESP);
-                                             if (ValidateDescription(rawUespDesc, searchKeywords)) // Validate before assigning
-                                             {
-                                                    finalDescription = rawUespDesc; // Assign if valid
-                                                    Debug.WriteLine($"[DescProvider] Success: Valid UESP description found ({sw.ElapsedMilliseconds}ms).");
-                                             }
-                                             else if(rawUespDesc != null) { // Description was fetched but failed validation
-                                                 Debug.WriteLine($"[DescProvider] UESP description failed validation against keywords: {string.Join(", ", searchKeywords)}");
-                                             }
-                                             else { // Fetch/Parse failed
-                                                 Debug.WriteLine($"[DescProvider] UESP fetch/parse yielded no description.");
-                                             }
-                                         }
-                                         else { Debug.WriteLine($"[DescProvider] UESP search returned no URL for \"{uespSearchTerm}\"."); }
-                                    }
-                                    catch (Exception ex) { Debug.WriteLine($"[DescProvider] Error during UESP processing for \"{uespSearchTerm}\": {ex.Message}"); }
+                                                                    // --- 3. Try UESP First (max 2 attempts: network failures retry once after 2s) ---
+                                                                    string uespSearchTerm = $"Skyrim:{searchTermRaw}";
+                                                                    string encodedUespSearchTerm = WebUtility.UrlEncode(uespSearchTerm);
+                                                                    Debug.WriteLine($"[DescProvider] Attempting UESP for: \"{uespSearchTerm}\"");
+                                                                    for (int attempt = 0; attempt < 2 && finalDescription == null; attempt++)
+                                                                    {
+                                                                        if (attempt > 0)
+                                                                        {
+                                                                            Debug.WriteLine("[DescProvider] UESP network failure — retrying in 2s.");
+                                                                            await Task.Delay(2000).ConfigureAwait(false);
+                                                                        }
+                                                                        bool uespBlocked = false; // no point retrying when the query failed, not the network
+                                                                        try
+                                                                        {
+                                                                            var uespSearch = await SearchWikiAsync($"https://en.uesp.net/w/api.php?action=query&list=search&srsearch={encodedUespSearchTerm}&format=json&srlimit=1", "https://en.uesp.net/wiki/");
+                                                                                                                                                        if (uespSearch.NetworkError) { lastAttemptWasNetwork = true; continue; } // transient — retry
+                                                                                                                                                        lastAttemptWasNetwork = false;
+                                                                                                                                                        string? uespUrl = uespSearch.Url;
+                                                                                                                                                        if (!string.IsNullOrEmpty(uespUrl))
+                                                                                                                                                        {
+                                                                                                                                                            Debug.WriteLine($"[DescProvider] Found UESP URL: {uespUrl}");
+                                                                                                                                                            var uespFetch = await FetchAndParseDescriptionAsync(uespUrl, WikiSite.UESP);
+                                                                                                                                                            if (uespFetch.NetworkError) { lastAttemptWasNetwork = true; continue; } // transient — retry
+                                                                                                                                                            string? rawUespDesc = uespFetch.Description;
+                                                                                if (ValidateDescription(rawUespDesc, searchKeywords)) // Validate before assigning
+                                                                                {
+                                                                                    finalDescription = rawUespDesc; // Assign if valid
+                                                                                    Debug.WriteLine($"[DescProvider] Success: Valid UESP description found ({sw.ElapsedMilliseconds}ms).");
+                                                                                }
+                                                                                else if (rawUespDesc != null)
+                                                                                {
+                                                                                    Debug.WriteLine($"[DescProvider] UESP description failed validation against keywords: {string.Join(", ", searchKeywords)}");
+                                                                                    uespBlocked = true; // page exists but text doesn't fit — Fandom next
+                                                                                }
+                                                                                else
+                                                                                {
+                                                                                    Debug.WriteLine($"[DescProvider] UESP fetch/parse yielded no description.");
+                                                                                    uespBlocked = true;
+                                                                                }
+                                                                            }
+                                                                            else
+                                                                            {
+                                                                                Debug.WriteLine($"[DescProvider] UESP search returned no URL for \"{uespSearchTerm}\".");
+                                                                                uespBlocked = true;
+                                                                            }
+                                                                        }
+                                                                        catch (Exception ex) { lastAttemptWasNetwork = true; Debug.WriteLine($"[DescProvider] Error during UESP processing for \"{uespSearchTerm}\": {ex.Message}"); }
+                                                                        if (uespBlocked) break;
+                                                                    }
 
-                                    // --- 4. Try Fandom ONLY if UESP failed ---
-                                    if (finalDescription == null) // Check if UESP attempt was unsuccessful
-                                    {
-                                         sw.Restart(); // Restart timer for Fandom attempt
-                                         string fandomSearchTerm = searchTermRaw;
-                                         string encodedFandomSearchTerm = WebUtility.UrlEncode(fandomSearchTerm);
-                                         Debug.WriteLine($"[DescProvider] UESP failed, Attempting Fandom for: \"{fandomSearchTerm}\"");
-                                         try
-                                         {
-                                              string? fandomUrl = await SearchWikiAsync($"https://elderscrolls.fandom.com/api.php?action=query&list=search&srsearch={encodedFandomSearchTerm}&format=json&srlimit=1", "https://elderscrolls.fandom.com/wiki/");
-                                              if (!string.IsNullOrEmpty(fandomUrl))
-                                              {
-                                                   Debug.WriteLine($"[DescProvider] Found Fandom URL: {fandomUrl}");
-                                                   string? rawFandomDesc = await FetchAndParseDescriptionAsync(fandomUrl, WikiSite.Fandom);
-                                                   if (ValidateDescription(rawFandomDesc, searchKeywords)) // Validate before assigning
-                                                   {
-                                                        finalDescription = rawFandomDesc; // Assign if valid
-                                                        Debug.WriteLine($"[DescProvider] Success: Valid Fandom description found ({sw.ElapsedMilliseconds}ms).");
-                                                   }
-                                                   else if(rawFandomDesc != null) { // Description was fetched but failed validation
-                                                        Debug.WriteLine($"[DescProvider] Fandom description failed validation against keywords: {string.Join(", ", searchKeywords)}");
-                                                   }
-                                                    else { // Fetch/Parse failed
-                                                        Debug.WriteLine($"[DescProvider] Fandom fetch/parse yielded no description.");
-                                                    }
-                                              }
-                                               else { Debug.WriteLine($"[DescProvider] Fandom search returned no URL for \"{fandomSearchTerm}\"."); }
-                                         }
-                                         catch (Exception ex) { Debug.WriteLine($"[DescProvider] Error during Fandom processing for \"{fandomSearchTerm}\": {ex.Message}"); }
-                                    }
+                                                                    // --- 4. Try Fandom ONLY if UESP failed (same retry policy) ---
+                                                                    if (finalDescription == null)
+                                                                    {
+                                                                        sw.Restart();
+                                                                        string fandomSearchTerm = searchTermRaw;
+                                                                        string encodedFandomSearchTerm = WebUtility.UrlEncode(fandomSearchTerm);
+                                                                        Debug.WriteLine($"[DescProvider] UESP failed, Attempting Fandom for: \"{fandomSearchTerm}\"");
+                                                                        for (int attempt = 0; attempt < 2 && finalDescription == null; attempt++)
+                                                                        {
+                                                                            if (attempt > 0)
+                                                                            {
+                                                                                Debug.WriteLine("[DescProvider] Fandom network failure — retrying in 2s.");
+                                                                                await Task.Delay(2000).ConfigureAwait(false);
+                                                                            }
+                                                                            bool fandomBlocked = false;
+                                                                            try
+                                                                            {
+                                                                                var fandomSearch = await SearchWikiAsync($"https://elderscrolls.fandom.com/api.php?action=query&list=search&srsearch={encodedFandomSearchTerm}&format=json&srlimit=1", "https://elderscrolls.fandom.com/wiki/");
+                                                                                                                                                                if (fandomSearch.NetworkError) { lastAttemptWasNetwork = true; continue; }
+                                                                                                                                                                lastAttemptWasNetwork = false;
+                                                                                                                                                                string? fandomUrl = fandomSearch.Url;
+                                                                                                                                                                if (!string.IsNullOrEmpty(fandomUrl))
+                                                                                                                                                                {
+                                                                                                                                                                    Debug.WriteLine($"[DescProvider] Found Fandom URL: {fandomUrl}");
+                                                                                                                                                                    var fandomFetch = await FetchAndParseDescriptionAsync(fandomUrl, WikiSite.Fandom);
+                                                                                                                                                                    if (fandomFetch.NetworkError) { lastAttemptWasNetwork = true; continue; }
+                                                                                                                                                                    string? rawFandomDesc = fandomFetch.Description;
+                                                                                    if (ValidateDescription(rawFandomDesc, searchKeywords))
+                                                                                    {
+                                                                                        finalDescription = rawFandomDesc;
+                                                                                        Debug.WriteLine($"[DescProvider] Success: Valid Fandom description found ({sw.ElapsedMilliseconds}ms).");
+                                                                                    }
+                                                                                    else if (rawFandomDesc != null)
+                                                                                    {
+                                                                                        Debug.WriteLine($"[DescProvider] Fandom description failed validation against keywords: {string.Join(", ", searchKeywords)}");
+                                                                                        fandomBlocked = true;
+                                                                                    }
+                                                                                    else
+                                                                                    {
+                                                                                        Debug.WriteLine($"[DescProvider] Fandom fetch/parse yielded no description.");
+                                                                                        fandomBlocked = true;
+                                                                                    }
+                                                                                }
+                                                                                else
+                                                                                {
+                                                                                    Debug.WriteLine($"[DescProvider] Fandom search returned no URL for \"{fandomSearchTerm}\".");
+                                                                                    fandomBlocked = true;
+                                                                                }
+                                                                            }
+                                                                            catch (Exception ex) { lastAttemptWasNetwork = true; Debug.WriteLine($"[DescProvider] Error during Fandom processing for \"{fandomSearchTerm}\": {ex.Message}"); }
+                                                                            if (fandomBlocked) break;
+                                                                        }
+                                                                    }
 
-                                    // --- 5. Return Result ---
-                                    sw.Stop();
-                                    if (finalDescription == null)
-                                    {
-                                         Debug.WriteLine($"[DescProvider] No valid description found for '{searchTermRaw}' after trying both sites.");
-                                    }
-                                    return finalDescription;
-                                }
+                                                                    // --- 5. Return Result ---
+                                                                    sw.Stop();
+                                                                    if (finalDescription == null)
+                                                                    {
+                                                                        Debug.WriteLine($"[DescProvider] No valid description found for '{searchTermRaw}' after trying both sites.");
+                                                                    }
+                                                                    return (finalDescription, lastAttemptWasNetwork);
+                                                                }
 
                                 /// <summary>Fetches the ENGLISH description for an NPC without translating it and without
-                                /// being gated by the ShowNpcDescriptions UI toggle; used by the CSV export flow. Serves
-                                /// from the cache when the English text is already known, otherwise scrapes UESP/Fandom
-                                /// and caches the English text for later (the translation, if any, is left untouched).</summary>
-                                public async Task<string?> GetEnglishDescriptionAsync(FormKey npcFormKey, string? displayName, string? editorId)
-                                {
-                                    if (npcFormKey.IsNull) return null;
+                                                                /// being gated by the ShowNpcDescriptions UI toggle; used by the CSV export flow. Serves
+                                                                /// from the cache when the English text is already known, otherwise scrapes UESP/Fandom
+                                                                /// and caches the English text for later (the translation, if any, is left untouched).
+                                                                /// NetworkError distinguishes \"transient failure, retry later\" from \"no such page\".</summary>
+                                                                public async Task<(string? Description, bool NetworkError)> GetEnglishDescriptionAsync(FormKey npcFormKey, string? displayName, string? editorId)
+                                                                {
+                                                                    if (npcFormKey.IsNull) return (null, false);
 
-                                    string? overrideDescription = null;
-                                    if (!BaseGamePlugins.Contains(npcFormKey.ModKey.FileName) &&
-                                        !_overrideDescriptions.TryGetValue(npcFormKey, out overrideDescription))
-                                    {
-                                        return null; // not an eligible NPC
-                                    }
-                                    if (overrideDescription is not null)
-                                    {
-                                        return overrideDescription; // master override — no wiki look-up
-                                    }
+                                                                    string? overrideDescription = null;
+                                                                    if (!BaseGamePlugins.Contains(npcFormKey.ModKey.FileName) &&
+                                                                        !_overrideDescriptions.TryGetValue(npcFormKey, out overrideDescription))
+                                                                    {
+                                                                        return (null, false); // not an eligible NPC
+                                                                    }
+                                                                    if (overrideDescription is not null)
+                                                                    {
+                                                                        return (overrideDescription, false); // master override — no wiki look-up
+                                                                    }
 
-                                    string cacheKey = npcFormKey.ToString();
-                                    lock (_cacheLock)
-                                    {
-                                        if (_cache.TryGetValue(cacheKey, out var cached) && !string.IsNullOrWhiteSpace(cached.En))
-                                        {
-                                            return cached.En; // English already cached (from a prior view or pre-translate run)
-                                        }
-                                    }
+                                                                    string cacheKey = npcFormKey.ToString();
+                                                                    lock (_cacheLock)
+                                                                    {
+                                                                        if (_cache.TryGetValue(cacheKey, out var cached) && !string.IsNullOrWhiteSpace(cached.En))
+                                                                        {
+                                                                            return (cached.En, false); // English already cached (from a prior view or pre-translate run)
+                                                                        }
+                                                                    }
 
-                                    // Build search term + validation keywords exactly like GetDescriptionAsync does.
-                                    string? displaySearchTerm = !string.IsNullOrWhiteSpace(displayName) ? displayName.Split('[')[0].Trim() : null;
-                                    string? editorSearchTerm = !string.IsNullOrWhiteSpace(editorId) ? editorId.Split('[')[0].Trim() : null;
-                                    bool displayNameIsAscii = displaySearchTerm != null && displaySearchTerm.All(ch => ch <= 127);
-                                    string? searchTermRaw = displayNameIsAscii ? displaySearchTerm
-                                        : editorSearchTerm != null ? SplitCamelCase(editorSearchTerm)
-                                        : displaySearchTerm;
-                                    if (string.IsNullOrWhiteSpace(searchTermRaw)) return null;
+                                                                    // Build search term + validation keywords exactly like GetDescriptionAsync does.
+                                                                    string? displaySearchTerm = !string.IsNullOrWhiteSpace(displayName) ? displayName.Split('[')[0].Trim() : null;
+                                                                    string? editorSearchTerm = !string.IsNullOrWhiteSpace(editorId) ? editorId.Split('[')[0].Trim() : null;
+                                                                    bool displayNameIsAscii = displaySearchTerm != null && displaySearchTerm.All(ch => ch <= 127);
+                                                                    string? searchTermRaw = displayNameIsAscii ? displaySearchTerm
+                                                                        : editorSearchTerm != null ? SplitCamelCase(editorSearchTerm)
+                                                                        : displaySearchTerm;
+                                                                    if (string.IsNullOrWhiteSpace(searchTermRaw)) return (null, false);
 
-                                    var searchKeywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                                    if (editorSearchTerm != null)
-                                    {
-                                        foreach (string word in SplitCamelCase(editorSearchTerm)
-                                            .Split(new[] { ' ', '-' }, StringSplitOptions.RemoveEmptyEntries)
-                                            .Where(w => !IgnoredWords.Contains(w)))
-                                        {
-                                            searchKeywords.Add(word);
-                                        }
-                                    }
-                                    if (displayNameIsAscii && displaySearchTerm != null)
-                                    {
-                                        foreach (string word in displaySearchTerm
-                                            .Split(new[] { ' ', '-' }, StringSplitOptions.RemoveEmptyEntries)
-                                            .Where(w => !IgnoredWords.Contains(w)))
-                                        {
-                                            searchKeywords.Add(word);
-                                        }
-                                    }
-                                    if (!searchKeywords.Any()) return null;
+                                                                    var searchKeywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                                                                    if (editorSearchTerm != null)
+                                                                    {
+                                                                        foreach (string word in SplitCamelCase(editorSearchTerm)
+                                                                            .Split(new[] { ' ', '-' }, StringSplitOptions.RemoveEmptyEntries)
+                                                                            .Where(w => !IgnoredWords.Contains(w)))
+                                                                        {
+                                                                            searchKeywords.Add(word);
+                                                                        }
+                                                                    }
+                                                                    if (displayNameIsAscii && displaySearchTerm != null)
+                                                                    {
+                                                                        foreach (string word in displaySearchTerm
+                                                                            .Split(new[] { ' ', '-' }, StringSplitOptions.RemoveEmptyEntries)
+                                                                            .Where(w => !IgnoredWords.Contains(w)))
+                                                                        {
+                                                                            searchKeywords.Add(word);
+                                                                        }
+                                                                    }
+                                                                    if (!searchKeywords.Any()) return (null, false);
 
-                                    string? english = await FetchRawEnglishAsync(searchTermRaw, searchKeywords);
+                                                                    var rawResult = await FetchRawEnglishAsync(searchTermRaw, searchKeywords);
 
-                                    if (!string.IsNullOrWhiteSpace(english))
-                                    {
-                                        // Cache the English text (never overwrite an existing translation).
-                                        lock (_cacheLock)
-                                        {
-                                            _cache.TryGetValue(cacheKey, out var existing);
-                                            existing ??= new CachedNpcDescription();
-                                            existing.En = english;
-                                            _cache[cacheKey] = existing;
-                                        }
-                                        _ = PersistCacheAsync();
-                                    }
-                                    return english;
-                                }
+                                                                    if (!string.IsNullOrWhiteSpace(rawResult.Description))
+                                                                    {
+                                                                        // Cache the English text (never overwrite an existing translation).
+                                                                        lock (_cacheLock)
+                                                                        {
+                                                                            _cache.TryGetValue(cacheKey, out var existing);
+                                                                            existing ??= new CachedNpcDescription();
+                                                                            existing.En = rawResult.Description;
+                                                                            _cache[cacheKey] = existing;
+                                                                        }
+                                                                        _ = PersistCacheAsync();
+                                                                    }
+                                                                    return rawResult;
+                                                                }
 
                                 /// <summary>zh-CN translation from the cache, or null when none exists yet.</summary>
                                 public string? GetCachedZh(FormKey npcFormKey)
@@ -644,46 +696,50 @@ namespace NPC_Plugin_Chooser_2.BackEnd
         }
 
 
-        // --- SearchWikiAsync remains the same ---
-        private async Task<string?> SearchWikiAsync(string apiUrl, string baseWikiUrl)
-        {
-            try
-            {
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(7));
-                using var request = new HttpRequestMessage(HttpMethod.Get, apiUrl);
-                using var response = await _httpClient.SendAsync(request, cts.Token);
-                response.EnsureSuccessStatusCode();
+        // --- SearchWikiAsync: MediaWiki search; NetworkError is set when the request itself
+                // failed (timeout / 5xx / transport), so callers can distinguish "transient network
+                // problem worth retrying" from "query simply found no page".
+                private async Task<(string? Url, bool NetworkError)> SearchWikiAsync(string apiUrl, string baseWikiUrl)
+                {
+                    try
+                    {
+                        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(7));
+                        using var request = new HttpRequestMessage(HttpMethod.Get, apiUrl);
+                        using var response = await _httpClient.SendAsync(request, cts.Token);
+                        response.EnsureSuccessStatusCode();
 
-                string jsonResponse = await response.Content.ReadAsStringAsync(cts.Token);
-                 if (string.IsNullOrWhiteSpace(jsonResponse) || !jsonResponse.Contains("\"search\":", StringComparison.OrdinalIgnoreCase)) {
-                     Debug.WriteLine($"[DescProvider][Search] Response from {apiUrl} invalid or no 'search' field.");
-                     return null;
-                 }
+                        string jsonResponse = await response.Content.ReadAsStringAsync(cts.Token);
+                         if (string.IsNullOrWhiteSpace(jsonResponse) || !jsonResponse.Contains("\"search\":", StringComparison.OrdinalIgnoreCase)) {
+                             Debug.WriteLine($"[DescProvider][Search] Response from {apiUrl} invalid or no 'search' field.");
+                             return (null, false);
+                         }
 
-                var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-                var searchResult = JsonSerializer.Deserialize<MediaWikiQueryResult>(jsonResponse, options);
-                if (searchResult?.Query?.Search == null || !searchResult.Query.Search.Any()) {
-                     Debug.WriteLine($"[DescProvider][Search] JSON parsed but 'search' array is null or empty from {apiUrl}");
-                     return null;
+                        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+                        var searchResult = JsonSerializer.Deserialize<MediaWikiQueryResult>(jsonResponse, options);
+                        if (searchResult?.Query?.Search == null || !searchResult.Query.Search.Any()) {
+                             Debug.WriteLine($"[DescProvider][Search] JSON parsed but 'search' array is null or empty from {apiUrl}");
+                             return (null, false);
+                        }
+
+                        var firstHit = searchResult.Query.Search.FirstOrDefault();
+                        if (firstHit != null && !string.IsNullOrWhiteSpace(firstHit.Title)) {
+                            // MediaWiki titles often need spaces replaced with underscores for URLs
+                            return (baseWikiUrl + firstHit.Title.Replace(' ', '_'), false);
+                        } else { Debug.WriteLine($"[DescProvider][Search] No valid title found in first search result from {apiUrl}"); }
+                    }
+                    catch (HttpRequestException ex) { Debug.WriteLine($"[DescProvider][Search] HTTP Error: {apiUrl} - {ex.StatusCode} {ex.Message}"); return (null, true); }
+                    catch (TaskCanceledException ex) { Debug.WriteLine($"[DescProvider][Search] Timeout: {apiUrl} - {ex.Message}"); return (null, true); }
+                    catch (JsonException ex) { Debug.WriteLine($"[DescProvider][Search] JSON Error: {apiUrl} - {ex.Message}"); }
+                    catch (Exception ex) { Debug.WriteLine($"[DescProvider][Search] Unexpected Error: {apiUrl} - {ex.Message}"); return (null, true); }
+                    return (null, false);
                 }
 
-                var firstHit = searchResult.Query.Search.FirstOrDefault();
-                if (firstHit != null && !string.IsNullOrWhiteSpace(firstHit.Title)) {
-                    // MediaWiki titles often need spaces replaced with underscores for URLs
-                    return baseWikiUrl + firstHit.Title.Replace(' ', '_');
-                } else { Debug.WriteLine($"[DescProvider][Search] No valid title found in first search result from {apiUrl}"); }
-            }
-            catch (HttpRequestException ex) { Debug.WriteLine($"[DescProvider][Search] HTTP Error: {apiUrl} - {ex.StatusCode} {ex.Message}"); }
-            catch (TaskCanceledException ex) { Debug.WriteLine($"[DescProvider][Search] Timeout: {apiUrl} - {ex.Message}"); }
-            catch (JsonException ex) { Debug.WriteLine($"[DescProvider][Search] JSON Error: {apiUrl} - {ex.Message}"); }
-            catch (Exception ex) { Debug.WriteLine($"[DescProvider][Search] Unexpected Error: {apiUrl} - {ex.Message}"); }
-            return null;
-        }
-
-        // --- FetchAndParseDescriptionAsync remains the same (extracts first sentence) ---
-        private async Task<string?> FetchAndParseDescriptionAsync(string pageUrl, WikiSite site)
+        // --- FetchAndParseDescriptionAsync (extracts first sentence); NetworkError marks
+        // transport-level failures (timeout / 5xx / connection) so the caller can retry,
+        // distinct from "page found but nothing usable extracted".
+        private async Task<(string? Description, bool NetworkError)> FetchAndParseDescriptionAsync(string pageUrl, WikiSite site)
         {
-             try
+            try
             {
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
                 using var request = new HttpRequestMessage(HttpMethod.Get, pageUrl);
@@ -691,14 +747,14 @@ namespace NPC_Plugin_Chooser_2.BackEnd
 
                 if (response.StatusCode == HttpStatusCode.NotFound) {
                     Debug.WriteLine($"[DescProvider][Parse] Page not found (404): {pageUrl}");
-                    return null;
+                    return (null, false);
                 }
                 response.EnsureSuccessStatusCode();
 
                 string htmlContent = await response.Content.ReadAsStringAsync(cts.Token);
                 if (string.IsNullOrWhiteSpace(htmlContent)) {
-                     Debug.WriteLine($"[DescProvider][Parse] Empty HTML content received from {pageUrl}");
-                     return null;
+                    Debug.WriteLine($"[DescProvider][Parse] Empty HTML content received from {pageUrl}");
+                    return (null, false);
                 }
 
                 var htmlDoc = new HtmlDocument();
@@ -714,30 +770,30 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                         rawDescription = metaNode.GetAttributeValue("content", null);
                         if (!string.IsNullOrWhiteSpace(rawDescription))
                         {
-                             Debug.WriteLine($"[DescProvider][Parse] Fandom: Found meta description.");
-                             var match = Regex.Match(rawDescription, @"^\s*Not to be confused with .*?\.\s*(.*)", RegexOptions.IgnoreCase | RegexOptions.Singleline);
-                             rawDescription = match.Success ? match.Groups[1].Value : rawDescription;
+                            Debug.WriteLine($"[DescProvider][Parse] Fandom: Found meta description.");
+                            var match = Regex.Match(rawDescription, @"^\s*Not to be confused with .*?\.\s*(.*)", RegexOptions.IgnoreCase | RegexOptions.Singleline);
+                            rawDescription = match.Success ? match.Groups[1].Value : rawDescription;
                         }
                     }
                     if (string.IsNullOrWhiteSpace(rawDescription)) // Fallback
                     {
-                         Debug.WriteLine($"[DescProvider][Parse] Fandom: Meta description failed, trying main content p.");
-                         var pNode = htmlDoc.DocumentNode.SelectSingleNode("//div[contains(@class,'mw-parser-output')]/p[normalize-space() and not(@class='caption')]");
-                         if (pNode != null) { rawDescription = pNode.InnerText; }
+                        Debug.WriteLine($"[DescProvider][Parse] Fandom: Meta description failed, trying main content p.");
+                        var pNode = htmlDoc.DocumentNode.SelectSingleNode("//div[contains(@class,'mw-parser-output')]/p[normalize-space() and not(@class='caption')]");
+                        if (pNode != null) { rawDescription = pNode.InnerText; }
                     }
                 }
                 else // UESP
                 {
-                     var pNode = htmlDoc.DocumentNode.SelectSingleNode("//div[@id='mw-content-text']//p[normalize-space()]");
-                     if (pNode != null && pNode.FirstChild?.Name == "i") {
-                         var nextPNode = pNode.SelectSingleNode("following-sibling::p[normalize-space()]");
-                         if (nextPNode != null) {
-                              Debug.WriteLine("[DescProvider][Parse] UESP: First paragraph was italic/disambig, using next.");
-                              rawDescription = nextPNode.InnerText;
-                         } else { Debug.WriteLine("[DescProvider][Parse] UESP: First paragraph was italic/disambig, but no next paragraph found."); }
-                     } else if (pNode != null) {
-                         rawDescription = pNode.InnerText;
-                     }
+                    var pNode = htmlDoc.DocumentNode.SelectSingleNode("//div[@id='mw-content-text']//p[normalize-space()]");
+                    if (pNode != null && pNode.FirstChild?.Name == "i") {
+                        var nextPNode = pNode.SelectSingleNode("following-sibling::p[normalize-space()]");
+                        if (nextPNode != null) {
+                            Debug.WriteLine("[DescProvider][Parse] UESP: First paragraph was italic/disambig, using next.");
+                            rawDescription = nextPNode.InnerText;
+                        } else { Debug.WriteLine("[DescProvider][Parse] UESP: First paragraph was italic/disambig, but no next paragraph found."); }
+                    } else if (pNode != null) {
+                        rawDescription = pNode.InnerText;
+                    }
                 }
                 // --- End Extraction Logic ---
 
@@ -757,8 +813,8 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                     }
                     else
                     {
-                         Debug.WriteLine($"[DescProvider][Parse] Could not extract first sentence from '{cleaned.Substring(0, Math.Min(cleaned.Length, 50))}...'. Using cleaned paragraph.");
-                         finalSentenceOrCleanedParagraph = cleaned.Length > 300 ? cleaned.Substring(0, 300) + "..." : cleaned; // Use cleaned paragraph as fallback
+                        Debug.WriteLine($"[DescProvider][Parse] Could not extract first sentence from '{cleaned.Substring(0, Math.Min(cleaned.Length, 50))}...'. Using cleaned paragraph.");
+                        finalSentenceOrCleanedParagraph = cleaned.Length > 300 ? cleaned.Substring(0, 300) + "..." : cleaned; // Use cleaned paragraph as fallback
                     }
 
                     // *** NEW: Word Count Validation ***
@@ -766,22 +822,22 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                     if (words.Length < 5)
                     {
                         Debug.WriteLine($"[DescProvider][Validation] Description rejected due to low word count ({words.Length}): '{finalSentenceOrCleanedParagraph}'");
-                        return null; // Return null if word count is too low
+                        return (null, false); // Return null if word count is too low
                     }
                     // *** END NEW ***
 
                     Debug.WriteLine($"[DescProvider][Parse] Successfully processed description for {pageUrl}. Word count: {words.Length}.");
-                    return finalSentenceOrCleanedParagraph; // Return the validated description
+                    return (finalSentenceOrCleanedParagraph, false); // Return the validated description
                 }
                 else
                 {
                     Debug.WriteLine($"[DescProvider][Parse] Could not extract description content from {pageUrl} (Site: {site}).");
                 }
             }
-            catch (HttpRequestException ex) { Debug.WriteLine($"[DescProvider][Parse] HTTP Error: {pageUrl} - {ex.StatusCode} {ex.Message}"); }
-            catch (TaskCanceledException ex) { Debug.WriteLine($"[DescProvider][Parse] Timeout: {pageUrl} - {ex.Message}"); }
-            catch (Exception ex) { Debug.WriteLine($"[DescProvider][Parse] Unexpected Error: {pageUrl} - {ex.Message}"); }
-            return null;
+            catch (HttpRequestException ex) { Debug.WriteLine($"[DescProvider][Parse] HTTP Error: {pageUrl} - {ex.StatusCode} {ex.Message}"); return (null, true); }
+            catch (TaskCanceledException ex) { Debug.WriteLine($"[DescProvider][Parse] Timeout: {pageUrl} - {ex.Message}"); return (null, true); }
+            catch (Exception ex) { Debug.WriteLine($"[DescProvider][Parse] Unexpected Error: {pageUrl} - {ex.Message}"); return (null, true); }
+            return (null, false);
         }
 
         // --- Helper classes for MediaWiki API JSON Deserialization ---

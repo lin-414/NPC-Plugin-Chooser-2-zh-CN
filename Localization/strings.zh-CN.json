@@ -761,7 +761,7 @@
       "exportDescriptionsTip": "为所有符合条件的 NPC 抓取（并缓存）英文 wiki 描述，生成一个 CSV 文件，你可以用 Excel、WPS、DeepL 或任意编辑器离线翻译。已有翻译的条目会预填中文列。翻译后点「导入翻译」即可把成果写回本地缓存。",
       "exportPickTitle": "描述 CSV 保存为…",
       "exportProgress": "获取描述中：{0}/{1} · 有英文 {2} · 失败 {3}",
-      "exportDone": "描述已导出到：\n{0}\n\n共 {1} 个 NPC · 取得英文 {2} 个 · 失败 {3} 个。\n\n离线翻译「中文翻译」列后，用「导入翻译」将结果写回。",
+      "exportDone": "描述已导出到：\n{0}\n\n共 {1} 个 NPC · 取得英文 {2} 个 · 网络失败 {3} 个（稍后重跑即可）· 未找到 {4} 个。\n\n离线翻译「中文翻译」列后，用「导入翻译」将结果写回。",
       "importTranslations": "导入翻译（CSV）…",
       "importTranslationsTip": "读取由「导出 NPC 描述」生成的 CSV，并把其中文列写入本地描述缓存。中文列为空或未修改的行会自动跳过，因此翻译一半的表格也可以导入。文件必须是 UTF-8 编码（Excel：CSV UTF-8；WPS：UTF-8 CSV）。",
       "importPickTitle": "选择翻译 CSV 文件",
