@@ -1,0 +1,73 @@
+<Window x:Class="NPC_Plugin_Chooser_2.Views.PluginSwitchSuggestionWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="clr-namespace:NPC_Plugin_Chooser_2.View_Models"
+        xmlns:themes="clr-namespace:NPC_Plugin_Chooser_2.Themes"
+        xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
+        mc:Ignorable="d"
+        d:DataContext="{d:DesignInstance Type=vm:VM_PluginSwitchSuggestions}"
+        Title="Mod Issues — Switchable Dark Faces"
+        Height="520" Width="760"
+        WindowStartupLocation="CenterOwner"
+        MinHeight="360" MinWidth="540"
+        Style="{StaticResource ThemedWindowStyle}">
+
+    <i:Interaction.Behaviors>
+        <themes:TitleBarThemingBehavior />
+    </i:Interaction.Behaviors>
+
+    <Grid Margin="14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="{Binding SummaryText}" TextWrapping="Wrap" Margin="0,0,0,10"/>
+
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,6">
+            <Button Content="Check All" Click="CheckAll_Click" Padding="8,2"/>
+            <Button Content="Uncheck All" Click="UncheckAll_Click" Padding="8,2" Margin="6,0,0,0"/>
+        </StackPanel>
+
+        <Border Grid.Row="2" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <ItemsControl ItemsSource="{Binding Groups}">
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate DataType="{x:Type vm:VM_PluginSwitchModGroup}">
+                            <Expander IsExpanded="True" Margin="4,2">
+                                <Expander.Header>
+                                    <TextBlock Text="{Binding HeaderText}" FontWeight="SemiBold"/>
+                                </Expander.Header>
+                                <ItemsControl ItemsSource="{Binding Items}" Margin="18,2,0,4">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate DataType="{x:Type vm:VM_PluginSwitchProposalItem}">
+                                            <CheckBox IsChecked="{Binding IsChecked, Mode=TwoWay}" Margin="2">
+                                                <CheckBox.Content>
+                                                    <TextBlock TextWrapping="Wrap">
+                                                        <Run Text="{Binding NpcDisplayName, Mode=OneWay}" FontWeight="SemiBold"/>
+                                                        <Run Text="{Binding NpcFormKeyText, Mode=OneWay}" BaselineAlignment="Center"/>
+                                                        <Run Text="   "/>
+                                                        <Run Text="{Binding SwitchText, Mode=OneWay}"/>
+                                                    </TextBlock>
+                                                </CheckBox.Content>
+                                            </CheckBox>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </Expander>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </ScrollViewer>
+        </Border>
+
+        <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="Apply Selected" Click="Apply_Click" Width="120" Height="30" IsDefault="True"/>
+            <Button Content="Close" Click="Close_Click" Width="100" Height="30" Margin="10,0,0,0" IsCancel="True"/>
+        </StackPanel>
+    </Grid>
+</Window>

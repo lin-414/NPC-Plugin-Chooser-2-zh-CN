@@ -59,16 +59,24 @@
                             ToolTip="Export all detected issues to a CSV file."/>
                 </StackPanel>
 
-                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="10,0">
-                    <ProgressBar Width="180" Height="16" VerticalAlignment="Center"
+                <!-- DockPanel, not a horizontal StackPanel: a StackPanel measures
+                     children with infinite width, so the status text would need a
+                     hard MaxWidth to ellipsize — which then truncated messages the
+                     toolbar had room for. Docked, the text fills the actual
+                     remaining width and only trims when the window is narrow
+                     (tooltip carries the full message for that case). -->
+                <DockPanel Grid.Column="1" VerticalAlignment="Center" Margin="10,0">
+                    <ProgressBar DockPanel.Dock="Left" Width="180" Height="16" VerticalAlignment="Center"
                                  Minimum="0"
                                  Maximum="{Binding ScanProgressMaximum}"
                                  Value="{Binding ScanProgressValue, Mode=OneWay}"
                                  Visibility="{Binding IsScanning, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                    <TextBlock DockPanel.Dock="Right" Text="{Binding ScanEtaText}" VerticalAlignment="Center"
+                               Margin="8,0,0,0" FontStyle="Italic"/>
                     <TextBlock Text="{Binding ScanStatusMessage}" VerticalAlignment="Center" Margin="8,0,0,0"
-                               TextTrimming="CharacterEllipsis" MaxWidth="400"/>
-                    <TextBlock Text="{Binding ScanEtaText}" VerticalAlignment="Center" Margin="8,0,0,0" FontStyle="Italic"/>
-                </StackPanel>
+                               TextTrimming="CharacterEllipsis"
+                               ToolTip="{Binding ScanStatusMessage}"/>
+                </DockPanel>
 
                 <TextBlock Grid.Column="2" Text="{Binding LastScanText}" VerticalAlignment="Center"
                            Foreground="Gray" Margin="10,0,0,0"/>
@@ -561,7 +569,7 @@
                                  cell caps its height and scrolls internally instead of growing the
                                  row past the viewport. ClipboardContentBinding keeps Ctrl+C intact. -->
                             <DataGridTemplateColumn Header="Details" Width="2*"
-                                                    ClipboardContentBinding="{Binding Detail}"
+                                                    ClipboardContentBinding="{Binding DetailWithRemedy}"
                                                     SortMemberPath="Detail">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
@@ -570,7 +578,11 @@
                                                       HorizontalScrollBarVisibility="Disabled"
                                                       Focusable="False"
                                                       PreviewMouseWheel="DetailsCell_PreviewMouseWheel">
-                                            <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" Padding="0,0,4,0"/>
+                                            <!-- IssueDetailFormatter splices the green repin-remedy
+                                                 line directly under the verdict's headline. -->
+                                            <TextBlock local:IssueDetailFormatter.DetailText="{Binding Detail}"
+                                                       local:IssueDetailFormatter.RemedyText="{Binding RepinRemedy}"
+                                                       TextWrapping="Wrap" Padding="0,0,4,0"/>
                                         </ScrollViewer>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>

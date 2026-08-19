@@ -50,7 +50,7 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
     private CancellationTokenSource? _mugshotLoadingCts;
     private VM_ModIssueEntry? _lastLoadedEntry;
     private IssueTypeFilterOption? _lastLoadedTypeFilter;
-    private bool _lastLoadedIncludeOutfitOnly = true;
+    private bool _lastLoadedIncludeOutfitOnly;
     private IDisposable? _tileLoadRepackSubscription;
 
     /// <summary>The most recent full result set (cache load or scan), kept so
@@ -114,8 +114,10 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
 
     /// <summary>Display toggle (deliberately NOT reset by Ctrl+Shift+C): when
     /// off, mods and NPC tiles whose only problems are outfit/headgear-related
-    /// are hidden, leaving just face/body defects.</summary>
-    [Reactive] public bool IncludeOutfitOnlyIssues { get; set; } = true;
+    /// are hidden, leaving just face/body defects. Off by default — outfit
+    /// findings usually belong to the outfit mod, not the scanned appearance
+    /// mod, so the headline view stays focused on the mod's own defects.</summary>
+    [Reactive] public bool IncludeOutfitOnlyIssues { get; set; }
 
     /// <summary>Show Note-severity findings — real but subtle in game
     /// (secondary texture slots that even vanilla meshes reference without
@@ -163,8 +165,13 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
     /// otherwise).</summary>
     public sealed record IssueRow(string NpcDisplayName, string NpcFormKey, string Category,
         string TypeDisplay, string Plugin, string AffectedPath, string Location, string Referencer,
-        string ProvidedBy, string Detail, int NpcCount, bool IsNote, bool IsIgnored,
-        IReadOnlyList<ModIssue> Issues);
+        string ProvidedBy, string Detail, string RepinRemedy, int NpcCount, bool IsNote, bool IsIgnored,
+        IReadOnlyList<ModIssue> Issues)
+    {
+        /// <summary>What Ctrl+C copies from the Details cell: the detail text plus the
+        /// repin remedy the cell renders as its green second line.</summary>
+        public string DetailWithRemedy => RepinRemedy.Length == 0 ? Detail : Detail + "\n" + RepinRemedy;
+    }
 
     public ObservableCollection<IssueRow> IssueTableRows { get; } = new();
     [Reactive] public string IssueTableHeaderText { get; set; } = string.Empty;
@@ -518,6 +525,135 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
             .ToList();
     }
 
+    // --- Post-scan plugin-switch suggestions ---
+
+    /// <summary>One auto-switch proposal: an NPC whose CURRENT source-plugin pin is
+    /// among a dark-face row's broken carriers while a sibling plugin of the same
+    /// mod grades clean.</summary>
+    public sealed record PluginSwitchProposal(string ModDisplayName, FormKey NpcFormKey,
+        string NpcDisplayName, string CurrentPluginFileName, string TargetPluginFileName);
+
+    /// <summary>Collects switch proposals from one scan run's results. Only
+    /// Issue-severity dark-face rows count (traits/ghost-demoted Notes don't nag),
+    /// only when the NPC's current pin is among the row's broken carriers (an NPC
+    /// already pointed at a clean plugin must not be nagged), and the target is the
+    /// first clean sibling in the mod's plugin order. A null pin from
+    /// <paramref name="getCurrentPin"/> skips the NPC — defaults are materialized as
+    /// pins during mod analysis, so a missing pin means guessing would misfire.</summary>
+    internal static List<PluginSwitchProposal> BuildPluginSwitchProposals(
+        IEnumerable<KeyValuePair<string, ModIssueScanResult>> scannedResults,
+        Func<string, FormKey, ModKey?> getCurrentPin)
+    {
+        var proposals = new List<PluginSwitchProposal>();
+        var seen = new HashSet<(string Mod, FormKey Npc)>();
+        foreach (var (modName, result) in scannedResults)
+        {
+            foreach (var issue in result.Issues)
+            {
+                if (issue.Type != ModIssueType.DarkFaceMismatch) continue;
+                if (issue.Severity != ModIssueSeverity.Issue) continue;
+                if (issue.NpcFormKey.IsNull) continue;
+                if (issue.RecordPlugins is not { Count: > 0 }) continue;
+                if (issue.CleanSiblingPlugins is not { Count: > 0 }) continue;
+
+                var pin = getCurrentPin(modName, issue.NpcFormKey);
+                if (pin == null) continue;
+                string pinName = pin.Value.FileName.String;
+                if (!issue.RecordPlugins.Contains(pinName, StringComparer.OrdinalIgnoreCase)) continue;
+                if (!seen.Add((modName, issue.NpcFormKey))) continue;
+
+                proposals.Add(new PluginSwitchProposal(modName, issue.NpcFormKey,
+                    issue.NpcDisplayName ?? issue.NpcFormKey.ToString(),
+                    pinName, issue.CleanSiblingPlugins[0]));
+            }
+        }
+        return proposals;
+    }
+
+    /// <summary>After a completed scan: if any scanned NPC's current source-plugin
+    /// pin grades dark-face while a sibling plugin grades clean, offer to switch the
+    /// pins (collapsible per-mod dialog; applying goes through the same
+    /// <see cref="VM_ModSetting.SetSingleNpcSourcePlugin"/> path as the mugshot
+    /// right-click). Returns the applied switch count and the switched NPCs per mod
+    /// so the caller can re-scan exactly those NPCs — the dark-face rows themselves
+    /// are per-plugin and stay valid, but the pin-dependent checks (head-part
+    /// resolution scope, outfit/skin walks) were graded under the OLD pins. Null
+    /// when nothing was applied.</summary>
+    private (int Switched, Dictionary<string, HashSet<FormKey>> ModNpcs)? OfferPluginSwitches(
+        IReadOnlyDictionary<string, ModIssueScanResult> results)
+    {
+        try
+        {
+            var proposals = BuildPluginSwitchProposals(results, (modName, npcKey) =>
+            {
+                var vm = _modsViewModel.AllModSettings.FirstOrDefault(m =>
+                    m.DisplayName.Equals(modName, StringComparison.OrdinalIgnoreCase));
+                return vm != null && vm.NpcPluginDisambiguation.TryGetValue(npcKey, out var pin)
+                    ? pin
+                    : (ModKey?)null;
+            });
+            if (proposals.Count == 0) return null;
+
+            // Announced in the status line BEFORE the dialog opens, so a declined
+            // dialog still leaves a visible trace — and a dialog that fails to open
+            // is distinguishable from "no candidates" without a debugger.
+            ScanStatusMessage =
+                $"Scan complete — {proposals.Count} NPC{(proposals.Count == 1 ? "" : "s")} could switch to a clean source plugin.";
+
+            var dialogVm = new VM_PluginSwitchSuggestions(proposals);
+            var window = new PluginSwitchSuggestionWindow { DataContext = dialogVm };
+            // House pattern (VM_ModSetting etc.): own to the ACTIVE window, never
+            // Application.MainWindow — this app's MainWindow is null at runtime
+            // (the startup splash claimed WPF's auto-assignment and closed), so
+            // MainWindow resolves to the just-constructed dialog itself and
+            // Owner-to-self throws. Null owner (app unfocused) is fine: the
+            // dialog just opens unowned.
+            var owner = Application.Current?.Windows.OfType<Window>()
+                .FirstOrDefault(w => w.IsActive && !ReferenceEquals(w, window));
+            if (owner != null) window.Owner = owner;
+            if (window.ShowDialog() != true) return null;
+
+            int switched = 0, failed = 0;
+            var switchedNpcsByMod = new Dictionary<string, HashSet<FormKey>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var proposal in dialogVm.CheckedProposals())
+            {
+                var vm = _modsViewModel.AllModSettings.FirstOrDefault(m =>
+                    m.DisplayName.Equals(proposal.ModDisplayName, StringComparison.OrdinalIgnoreCase));
+                if (vm != null &&
+                    ModKey.TryFromNameAndExtension(proposal.TargetPluginFileName, out var targetKey) &&
+                    vm.SetSingleNpcSourcePlugin(proposal.NpcFormKey, targetKey))
+                {
+                    switched++;
+                    if (!switchedNpcsByMod.TryGetValue(proposal.ModDisplayName, out var npcSet))
+                    {
+                        npcSet = new HashSet<FormKey>();
+                        switchedNpcsByMod[proposal.ModDisplayName] = npcSet;
+                    }
+                    npcSet.Add(proposal.NpcFormKey);
+                }
+                else
+                {
+                    failed++;
+                }
+            }
+            if (switched > 0) _modsViewModel.SaveModSettingsToModel();
+            ScanStatusMessage = failed == 0
+                ? $"Scan complete — switched {switched} NPC(s) to a clean source plugin."
+                : $"Scan complete — switched {switched} NPC(s); {failed} could not be switched (see debug log).";
+            return switched > 0 ? (switched, switchedNpcsByMod) : null;
+        }
+        catch (Exception ex)
+        {
+            // A user-facing feature must not fail into a debug-only log (that
+            // exact silence cost a diagnosis round on 2026-08-18).
+            Debug.WriteLine($"VM_ModIssues.OfferPluginSwitches failed: {ExceptionLogger.GetExceptionStack(ex)}");
+            ScrollableMessageBox.ShowWarning(
+                $"The post-scan plugin-switch dialog failed:\n{ExceptionLogger.GetExceptionStack(ex)}",
+                "Switch Suggestions Error");
+            return null;
+        }
+    }
+
     /// <summary>Toolbar Scan / Rescan All entry point: applies the scan-target
     /// box before delegating to <see cref="ScanAsync"/>.</summary>
     private async Task ScanFromToolbarAsync(bool ignoreCache)
@@ -532,11 +668,18 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         await ScanAsync(ignoreCache, onlyMods);
     }
 
-    private async Task ScanAsync(bool ignoreCache, IReadOnlyCollection<string>? onlyMods = null)
+    /// <param name="onlyNpcsByMod">Per-mod NPC filter for a PARTIAL rescan (the
+    /// post-switch follow-up): each named mod re-scans only those NPCs and the
+    /// scanner splices the fresh rows into its previous result. Mods without an
+    /// entry scan fully.</param>
+    private async Task ScanAsync(bool ignoreCache, IReadOnlyCollection<string>? onlyMods = null,
+        bool offerSwitches = true,
+        IReadOnlyDictionary<string, HashSet<FormKey>>? onlyNpcsByMod = null)
     {
         _scanCts?.Dispose();
         _scanCts = new CancellationTokenSource();
         var ct = _scanCts.Token;
+        (int Switched, Dictionary<string, HashSet<FormKey>> ModNpcs)? appliedSwitches = null;
 
         IsScanning = true;
         ScanStatusMessage = "Preparing scan…";
@@ -562,7 +705,11 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
                     ct.ThrowIfCancellationRequested();
                     var vm = _modsViewModel.AllModSettings.FirstOrDefault(m =>
                         m.DisplayName.Equals(model.DisplayName, StringComparison.OrdinalIgnoreCase));
-                    list.Add(new ModIssueScanner.ModScanTarget(model, vm?.GenerateSnapshot()));
+                    IReadOnlySet<FormKey>? onlyNpcs =
+                        onlyNpcsByMod != null && onlyNpcsByMod.TryGetValue(model.DisplayName, out var npcSet)
+                            ? npcSet
+                            : null;
+                    list.Add(new ModIssueScanner.ModScanTarget(model, vm?.GenerateSnapshot(), onlyNpcs));
                 }
                 return list;
             }, ct);
@@ -606,6 +753,11 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
             // every other mod's row.
             RebuildEntries(_cache.GetAllRaw());
             ScanStatusMessage = "Scan complete.";
+
+            // Scoped to this run's mods (results includes cache hits, so unfixed
+            // candidates resurface each scan until switched, ignored, or declined
+            // by closing the dialog for this session's run).
+            if (offerSwitches) appliedSwitches = OfferPluginSwitches(results);
         }
         catch (OperationCanceledException)
         {
@@ -624,6 +776,23 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         {
             IsScanning = false;
             ScanEtaText = string.Empty;
+        }
+
+        // Applied switches leave the switched NPCs' rows graded under the OLD
+        // pins for the pin-dependent checks (head-part resolution scope, outfit/
+        // skin walks), so re-scan exactly those NPCs immediately — the scanner
+        // splices their fresh rows into each mod's otherwise-unchanged result,
+        // instead of paying for the whole mod again. ignoreCache because the
+        // files didn't change (the snapshot can't see pin edits); offerSwitches:
+        // false so candidates the user just declined don't re-nag on the
+        // follow-up pass.
+        if (appliedSwitches is { } applied && applied.ModNpcs.Count > 0)
+        {
+            await ScanAsync(ignoreCache: true, onlyMods: applied.ModNpcs.Keys.ToList(),
+                offerSwitches: false, onlyNpcsByMod: applied.ModNpcs);
+            ScanStatusMessage =
+                $"Scan complete — switched {applied.Switched} NPC{(applied.Switched == 1 ? "" : "s")} " +
+                $"to a clean source plugin and re-scanned {(applied.Switched == 1 ? "it" : "them")}.";
         }
     }
 
@@ -1280,6 +1449,40 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
                 detail = issue.Detail ?? string.Empty;
             }
 
+            // Grouped rows only carry the remedy when every member agrees on the clean
+            // sibling set — records can differ per NPC, and a remedy that only applies
+            // to SOME of the grouped NPCs would misdirect (flat/tile-filtered views
+            // still show each NPC's own).
+            var remedyPlugins = issue.CleanSiblingPlugins;
+            if (remedyPlugins != null && groupIssues.Count > 1 &&
+                groupIssues.Any(i => i.CleanSiblingPlugins == null ||
+                                     !i.CleanSiblingPlugins.SequenceEqual(remedyPlugins, StringComparer.OrdinalIgnoreCase)))
+            {
+                remedyPlugins = null;
+            }
+
+            // Live pins, read at DISPLAY time (never scan-time — the post-scan switch
+            // dialog changes pins without a rescan), so the remedy line always
+            // reflects the user's current selections. An unambiguous NPC has no pin
+            // by design — its sole available plugin IS its source, so it stands in
+            // as the effective pin (the Auri resource-only case: the only source was
+            // the clean sibling, and the row must reassure, not advise a switch).
+            string repinRemedy = string.Empty;
+            if (remedyPlugins != null)
+            {
+                var currentPins = groupIssues
+                    .Select(i => i.NpcFormKey)
+                    .Where(fk => !fk.IsNull)
+                    .Distinct()
+                    .Select(fk => VM_ModIssueEntry.GetEffectiveSourcePluginFileName(
+                        entry.SourceVm.NpcPluginDisambiguation, entry.SourceVm.AvailablePluginsForNpcs, fk))
+                    .Where(p => p != null)
+                    .Select(p => p!)
+                    .ToList();
+                repinRemedy = VM_ModIssueEntry.BuildPinAwareRepinRemedyText(
+                    remedyPlugins, issue.RecordPlugins, currentPins);
+            }
+
             return new IssueRow(
                 npcDisplay,
                 npcCount > 1 || issue.NpcFormKey.IsNull ? string.Empty : issue.NpcFormKey.ToString(),
@@ -1293,6 +1496,7 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
                 issue.ReferencingRecord ?? string.Empty,
                 issue.SourceModName ?? string.Empty,
                 detail,
+                repinRemedy,
                 npcCount,
                 issue.Severity == ModIssueSeverity.Note,
                 ignored,
@@ -1385,7 +1589,7 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
             using var writer = new StreamWriter(dialog.FileName, append: false);
             // New columns appended at the END so existing spreadsheets/pivots
             // built on the original schema keep working.
-            writer.WriteLine("Mod,Category,IssueType,NpcFormKey,NpcName,AffectedPath,Shape,Nif,Referencer,Detail,Severity,ProvidedBy,Ignored,RecordPlugin");
+            writer.WriteLine("Mod,Category,IssueType,NpcFormKey,NpcName,AffectedPath,Shape,Nif,Referencer,Detail,Severity,ProvidedBy,Ignored,RecordPlugin,CleanSiblingPlugins");
             foreach (var (modName, result) in _lastResults.OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase))
             {
                 foreach (var issue in result.Issues)
@@ -1409,6 +1613,9 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
                         Csv(issue.SourceModName ?? ""),
                         ignored ? "yes" : "",
                         Csv(issue.RecordPluginName ?? ""),
+                        Csv(issue.CleanSiblingPlugins is { Count: > 0 }
+                            ? string.Join("; ", issue.CleanSiblingPlugins)
+                            : ""),
                     }));
                 }
             }

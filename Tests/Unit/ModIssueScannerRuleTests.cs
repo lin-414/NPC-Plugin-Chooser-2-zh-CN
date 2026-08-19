@@ -454,6 +454,9 @@ public class ModIssueScannerRuleTests
         Assert.Single(collapsed);
         Assert.Equal("A.esp, B.esp", collapsed[0].Label);
         Assert.Same(sameA, collapsed[0].Record); // first carrier's record represents the group
+        // Individual filenames travel alongside the display join (filenames can
+        // legally contain commas, so consumers must never split the label).
+        Assert.Equal(new[] { "A.esp", "B.esp" }, collapsed[0].Plugins);
 
         // Differing records -> per-plugin entries, plugin order preserved.
         var diffB = AddParts(TestSupport.MutagenFixtures.NewNpc(modB, race: race), hp1, hp2);
@@ -465,6 +468,228 @@ public class ModIssueScannerRuleTests
         Assert.Equal(2, split.Count);
         Assert.Equal("A.esp", split[0].Label);
         Assert.Equal("B.esp", split[1].Label);
+    }
+
+    // --- Repin remedy + post-scan switch proposals (cache v12) ---
+
+    [Fact]
+    public void RepinRemedyText_ComposedFromCleanSiblings()
+    {
+        Assert.Equal(string.Empty, VM_ModIssueEntry.BuildRepinRemedyText(null));
+        Assert.Equal(string.Empty, VM_ModIssueEntry.BuildRepinRemedyText(new List<string>()));
+
+        var text = VM_ModIssueEntry.BuildRepinRemedyText(new[] { "A.esp", "B.esp" });
+        Assert.Contains("'A.esp', 'B.esp'", text);
+        Assert.Contains("does not have this problem", text);
+    }
+
+    [Fact]
+    public void PinAwareRemedy_BrokenPin_KeepsActionableSentence()
+    {
+        var text = VM_ModIssueEntry.BuildPinAwareRepinRemedyText(
+            new[] { "Good.esp" }, new[] { "Bad.esp" }, new[] { "Bad.esp" });
+        Assert.Contains("selecting it as the NPC's source plugin", text);
+        Assert.DoesNotContain("Not affecting", text);
+    }
+
+    [Fact]
+    public void PinAwareRemedy_PinAlreadyClean_BecomesReassurance()
+    {
+        // The Hert confusion (2026-08-18): her row kept advising the switch she had
+        // already made. With the pin on a clean sibling the line must reassure, not advise.
+        var text = VM_ModIssueEntry.BuildPinAwareRepinRemedyText(
+            new[] { "Good.esp" }, new[] { "Bad.esp" }, new[] { "Good.esp" });
+        Assert.Contains("Not affecting your current setup", text);
+        Assert.Contains("Good.esp", text);
+        Assert.DoesNotContain("selecting it as the NPC's source plugin", text);
+    }
+
+    [Fact]
+    public void PinAwareRemedy_UnknownOrForeignPins_FallBackToBaseSentence()
+    {
+        var clean = new[] { "Good.esp" };
+        var broken = new[] { "Bad.esp" };
+        Assert.DoesNotContain("Not affecting",
+            VM_ModIssueEntry.BuildPinAwareRepinRemedyText(clean, broken, System.Array.Empty<string>()));
+        // A pin on a third plugin that is neither broken nor clean stays pin-blind.
+        Assert.DoesNotContain("Not affecting",
+            VM_ModIssueEntry.BuildPinAwareRepinRemedyText(clean, broken, new[] { "Third.esp" }));
+    }
+
+    [Fact]
+    public void PinAwareRemedy_GroupedRows_CountTailAndAllCleanReassurance()
+    {
+        var clean = new[] { "Good.esp" };
+        var broken = new[] { "Bad.esp" };
+        var mixed = VM_ModIssueEntry.BuildPinAwareRepinRemedyText(clean, broken,
+            new[] { "Bad.esp", "Good.esp", "Bad.esp" });
+        Assert.Contains("2 of the 3 NPCs", mixed);
+        var allClean = VM_ModIssueEntry.BuildPinAwareRepinRemedyText(clean, broken,
+            new[] { "Good.esp", "Good.esp" });
+        Assert.Contains("every NPC on this row", allClean);
+    }
+
+    private static ModIssue SwitchableIssue(string npc = "000AAA:Test.esp",
+        ModIssueSeverity severity = ModIssueSeverity.Issue,
+        string[]? broken = null, string[]? clean = null)
+        => new()
+        {
+            Type = ModIssueType.DarkFaceMismatch,
+            Severity = severity,
+            NpcFormKey = FormKey.Factory(npc),
+            NpcDisplayName = "Test NPC",
+            AffectedPath = @"meshes\actors\character\facegendata\facegeom\test.esp\000aaa.nif",
+            RecordPluginName = broken == null ? null : string.Join(", ", broken),
+            RecordPlugins = broken?.ToList(),
+            CleanSiblingPlugins = clean?.ToList(),
+        };
+
+    [Fact]
+    public void SwitchProposals_PinAmongBrokenCarriers_ProposesFirstClean()
+    {
+        var result = new ModIssueScanResult
+        {
+            ScanCompleted = true,
+            Issues = new List<ModIssue>
+            {
+                SwitchableIssue(broken: new[] { "Bad.esp" }, clean: new[] { "Good.esp", "AlsoGood.esp" }),
+            },
+        };
+
+        var proposals = VM_ModIssues.BuildPluginSwitchProposals(
+            new Dictionary<string, ModIssueScanResult> { ["Mod"] = result },
+            (_, _) => TestSupport.MutagenFixtures.Mk("Bad.esp"));
+
+        var p = Assert.Single(proposals);
+        Assert.Equal("Bad.esp", p.CurrentPluginFileName);
+        Assert.Equal("Good.esp", p.TargetPluginFileName); // first clean in the mod's plugin order
+        Assert.Equal("Mod", p.ModDisplayName);
+    }
+
+    [Fact]
+    public void SwitchProposals_SkipConditions()
+    {
+        // Demoted Notes (traits/ghost) don't nag; nothing-clean and pin-not-broken don't fire.
+        var result = new ModIssueScanResult
+        {
+            ScanCompleted = true,
+            Issues = new List<ModIssue>
+            {
+                SwitchableIssue(severity: ModIssueSeverity.Note,
+                    broken: new[] { "Bad.esp" }, clean: new[] { "Good.esp" }),
+                SwitchableIssue(npc: "000BBB:Test.esp", broken: new[] { "Bad.esp" }, clean: null),
+                SwitchableIssue(npc: "000CCC:Test.esp", broken: new[] { "Other.esp" }, clean: new[] { "Good.esp" }),
+            },
+        };
+
+        Assert.Empty(VM_ModIssues.BuildPluginSwitchProposals(
+            new Dictionary<string, ModIssueScanResult> { ["Mod"] = result },
+            (_, _) => TestSupport.MutagenFixtures.Mk("Bad.esp")));
+
+        // Unknown pin (mod not analyzed yet) skips rather than guessing a default.
+        var happy = new ModIssueScanResult
+        {
+            ScanCompleted = true,
+            Issues = new List<ModIssue>
+                { SwitchableIssue(broken: new[] { "Bad.esp" }, clean: new[] { "Good.esp" }) },
+        };
+        Assert.Empty(VM_ModIssues.BuildPluginSwitchProposals(
+            new Dictionary<string, ModIssueScanResult> { ["Mod"] = happy }, (_, _) => null));
+    }
+
+    [Fact]
+    public void MergePartialResult_ReplacesOnlyRescannedNpcsRows()
+    {
+        var npcA = FormKey.Factory("000AAA:Test.esp");
+        var npcB = FormKey.Factory("000BBB:Test.esp");
+        var previous = new ModIssueScanResult
+        {
+            ScanCompleted = true,
+            ScanTimeUtc = new System.DateTime(2026, 1, 1, 0, 0, 0, System.DateTimeKind.Utc),
+            ScannedNpcCount = 10,
+            FailedNpcCount = 1,
+            Issues = new List<ModIssue>
+            {
+                new() { Type = ModIssueType.DarkFaceMismatch, NpcFormKey = npcA, NpcDisplayName = "A", AffectedPath = "a.nif" },
+                new() { Type = ModIssueType.MissingNifTexture, NpcFormKey = npcB, NpcDisplayName = "B", AffectedPath = "b.dds" },
+                new() { Type = ModIssueType.ModNotInstalled, AffectedPath = "folder" }, // mod-level row: null NpcFormKey
+            },
+        };
+        var partial = new ModIssueScanResult
+        {
+            ScanCompleted = true,
+            ScanTimeUtc = new System.DateTime(2026, 2, 2, 0, 0, 0, System.DateTimeKind.Utc),
+            ScannedNpcCount = 1,
+            FailedNpcCount = 0,
+            Issues = new List<ModIssue>
+            {
+                new() { Type = ModIssueType.MissingFaceGenTint, NpcFormKey = npcA, NpcDisplayName = "A", AffectedPath = "a.dds" },
+            },
+        };
+
+        var merged = ModIssueScanner.MergePartialResult(previous, partial, new HashSet<FormKey> { npcA });
+
+        Assert.True(merged.ScanCompleted);
+        Assert.Equal(partial.ScanTimeUtc, merged.ScanTimeUtc);
+        Assert.Equal(10, merged.ScannedNpcCount); // counters keep describing the whole mod
+        Assert.Equal(1, merged.FailedNpcCount);
+        Assert.Equal(3, merged.Issues.Count);
+        Assert.DoesNotContain(merged.Issues, i => i.Type == ModIssueType.DarkFaceMismatch); // npcA's old row replaced...
+        Assert.Contains(merged.Issues, i => i.Type == ModIssueType.MissingFaceGenTint);     // ...by its fresh row
+        Assert.Contains(merged.Issues, i => i.NpcFormKey.Equals(npcB));                     // other NPCs' rows kept
+        Assert.Contains(merged.Issues, i => i.NpcFormKey.IsNull);                           // mod-level rows kept
+    }
+
+    // --- Resource-only carriers + effective source pin (cache v13) ---
+
+    [Fact]
+    public void ResourceOnlyPluginFileNames_CaseInsensitive_AndNullTolerant()
+    {
+        var mod = new ModSetting
+        {
+            ResourceOnlyModKeys = new HashSet<ModKey> { TestSupport.MutagenFixtures.Mk("Replacer.esp") },
+        };
+        var names = ModIssueScanner.ResourceOnlyPluginFileNames(mod);
+        Assert.Contains("REPLACER.ESP", names); // filename comparisons are case-insensitive
+        Assert.DoesNotContain("Patch.esp", names);
+
+        // Settings deserialized from older files can null the collection.
+        Assert.Empty(ModIssueScanner.ResourceOnlyPluginFileNames(
+            new ModSetting { ResourceOnlyModKeys = null! }));
+    }
+
+    [Fact]
+    public void EffectiveSourcePlugin_PinWins_SoleSourceStandsIn_NeverGuesses()
+    {
+        var soleSource = FormKey.Factory("000D63:018Auri.esp");
+        var pinned = FormKey.Factory("000BBB:Test.esp");
+        var pins = new Dictionary<FormKey, ModKey>
+        {
+            [pinned] = TestSupport.MutagenFixtures.Mk("Pinned.esp"),
+        };
+        var available = new Dictionary<FormKey, List<ModKey>>
+        {
+            // The Auri resource-only case (2026-08-18): one available source and no
+            // pin — pins are only materialized for multi-source NPCs, so the sole
+            // source IS the NPC's plugin and must stand in as the effective pin.
+            [soleSource] = new() { TestSupport.MutagenFixtures.Mk("Patch.esp") },
+            [pinned] = new()
+            {
+                TestSupport.MutagenFixtures.Mk("Pinned.esp"),
+                TestSupport.MutagenFixtures.Mk("B.esp"),
+            },
+        };
+
+        Assert.Equal("Patch.esp",
+            VM_ModIssueEntry.GetEffectiveSourcePluginFileName(pins, available, soleSource));
+        Assert.Equal("Pinned.esp",
+            VM_ModIssueEntry.GetEffectiveSourcePluginFileName(pins, available, pinned));
+
+        // Ambiguous without a pin, or unknown to the mod entirely -> null (never guess).
+        Assert.Null(VM_ModIssueEntry.GetEffectiveSourcePluginFileName(
+            new Dictionary<FormKey, ModKey>(), available, pinned));
+        Assert.Null(VM_ModIssueEntry.GetEffectiveSourcePluginFileName(
+            pins, available, FormKey.Factory("000CCC:None.esp")));
     }
 
     // --- DFIR-derived exclusions (cache v11) ---

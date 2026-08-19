@@ -84,11 +84,20 @@ public sealed class ModIssueScanner
 
     /// <summary>A mod's contribution to the progress total. Never zero so even a
     /// degenerate entry still ticks the bar when it completes.</summary>
-    private static int Weight(ModSetting mod) => Math.Max(1, mod.NpcFormKeys?.Count ?? 0);
+    private static int Weight(ModScanTarget target) =>
+        Math.Max(1, target.OnlyNpcs?.Count ?? target.Model.NpcFormKeys?.Count ?? 0);
 
     /// <summary>One mod queued for scanning. The snapshot is produced by the
-    /// caller (the VM owns snapshot generation) so the scanner stays VM-free.</summary>
-    public sealed record ModScanTarget(ModSetting Model, ModStateSnapshot? Snapshot);
+    /// caller (the VM owns snapshot generation) so the scanner stays VM-free.
+    /// <para><paramref name="OnlyNpcs"/> non-null requests a PARTIAL rescan: only
+    /// those NPCs are scanned and their fresh rows are spliced into the mod's
+    /// previous result (see <see cref="MergePartialResult"/>) — the post-switch
+    /// flow, where re-pinned NPCs must regrade but the mod's files didn't change.
+    /// Requires a still-valid cached baseline; without one the scan quietly widens
+    /// to the whole mod, since a partial result stored alone would erase every
+    /// other NPC's rows.</para></summary>
+    public sealed record ModScanTarget(ModSetting Model, ModStateSnapshot? Snapshot,
+        IReadOnlySet<FormKey>? OnlyNpcs = null);
 
     /// <summary>Mods eligible for scanning: installed appearance mods that
     /// provide NPCs. Mugshot-only entries and the synthetic Base Game /
@@ -174,7 +183,7 @@ public sealed class ModIssueScanner
             return map;
         }, ct).ConfigureAwait(false);
 
-        int totalNpcs = mods.Sum(t => Weight(t.Model));
+        int totalNpcs = mods.Sum(Weight);
         int completedNpcs = 0;
 
         bool anyStored = false;
@@ -193,11 +202,26 @@ public sealed class ModIssueScanner
                     () => ModIssuesCache.BuildLooseAssetTrees(mod.CorrespondingFolderPaths), ct)
                     .ConfigureAwait(false);
 
-                if (!ignoreCache &&
+                // Partial (per-NPC) rescans splice fresh rows into the mod's
+                // previous result, so they need a baseline that still matches the
+                // on-disk state (the post-switch flow: pins changed, files did
+                // not). Without one, widen to a full scan — a partial result
+                // stored alone would erase every other NPC's rows.
+                var onlyNpcs = target.OnlyNpcs;
+                ModIssueScanResult? baseline = null;
+                if (onlyNpcs != null)
+                {
+                    if (_cache.TryGetValid(mod.DisplayName, target.Snapshot, trees, out var b))
+                        baseline = b;
+                    else
+                        onlyNpcs = null;
+                }
+
+                if (!ignoreCache && onlyNpcs == null &&
                     _cache.TryGetValid(mod.DisplayName, target.Snapshot, trees, out var cached))
                 {
                     results[mod.DisplayName] = cached;
-                    completedNpcs = baseNpcs + Weight(mod);
+                    completedNpcs = baseNpcs + Weight(target);
                     progress.Report(new ProgressInfo(completedNpcs, totalNpcs,
                         $"{mod.DisplayName} (unchanged — cached)"));
                     onModCompleted?.Invoke(mod.DisplayName, cached);
@@ -207,13 +231,17 @@ public sealed class ModIssueScanner
                 var result = await Task.Run(
                     () => ScanModAsync(mod, target.Snapshot, trees, nifParseCache,
                         (j, n) => progress.Report(new ProgressInfo(baseNpcs + j, totalNpcs,
-                            $"{mod.DisplayName} ({j}/{n} NPCs)")), ct), ct)
+                            $"{mod.DisplayName} ({j}/{n} NPCs)")), ct, onlyNpcs), ct)
                     .ConfigureAwait(false);
+                if (onlyNpcs != null && baseline != null)
+                {
+                    result = MergePartialResult(baseline, result, onlyNpcs);
+                }
 
                 results[mod.DisplayName] = result;
                 _cache.Store(mod.DisplayName, result);
                 anyStored = true;
-                completedNpcs = baseNpcs + Weight(mod);
+                completedNpcs = baseNpcs + Weight(target);
                 progress.Report(new ProgressInfo(completedNpcs, totalNpcs, mod.DisplayName));
                 onModCompleted?.Invoke(mod.DisplayName, result);
                 // Throttle: persist after each mod so a crash/cancel keeps progress.
@@ -243,13 +271,41 @@ public sealed class ModIssueScanner
         return results;
     }
 
+    /// <summary>Splices a partial (per-NPC) rescan into the mod's previous full
+    /// result: rows for the rescanned NPCs are replaced, every other row — other
+    /// NPCs' and mod-level — is kept, and the mod-wide counters keep describing
+    /// the full mod. Used after the post-scan switch dialog re-pins NPCs: the
+    /// pin-dependent checks must regrade for exactly those NPCs, while the mod's
+    /// files (and therefore everyone else's rows) are unchanged.</summary>
+    internal static ModIssueScanResult MergePartialResult(ModIssueScanResult previous,
+        ModIssueScanResult partial, IReadOnlySet<FormKey> rescannedNpcs)
+        => new()
+        {
+            ScanTimeUtc = partial.ScanTimeUtc,
+            Snapshot = partial.Snapshot,
+            LooseAssetTrees = partial.LooseAssetTrees,
+            ScanCompleted = true,
+            ScannedNpcCount = previous.ScannedNpcCount,
+            // Which NPCs failed isn't recorded, so the previous count carries
+            // over unchanged; fresh failures among the rescanned NPCs add on top.
+            FailedNpcCount = previous.FailedNpcCount + partial.FailedNpcCount,
+            Issues = previous.Issues
+                .Where(i => i.NpcFormKey.IsNull || !rescannedNpcs.Contains(i.NpcFormKey))
+                .Concat(partial.Issues)
+                .OrderBy(i => i.NpcDisplayName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(i => i.Type)
+                .ThenBy(i => i.AffectedPath, StringComparer.OrdinalIgnoreCase)
+                .ToList(),
+        };
+
     private async Task<ModIssueScanResult> ScanModAsync(
         ModSetting mod,
         ModStateSnapshot? snapshot,
         List<LooseAssetTreeSnapshot> trees,
         ConcurrentDictionary<string, Lazy<IReadOnlyList<NifHandler.NifShapeTextureInfo>>> nifParseCache,
         Action<int, int> reportNpcProgress,
-        CancellationToken ct)
+        CancellationToken ct,
+        IReadOnlySet<FormKey>? onlyNpcs = null)
     {
         var result = new ModIssueScanResult
         {
@@ -277,7 +333,10 @@ public sealed class ModIssueScanner
             return result;
         }
 
-        var npcKeys = mod.NpcFormKeys.OrderBy(fk => fk.ToString(), StringComparer.OrdinalIgnoreCase).ToList();
+        var npcKeys = mod.NpcFormKeys
+            .Where(fk => onlyNpcs == null || onlyNpcs.Contains(fk))
+            .OrderBy(fk => fk.ToString(), StringComparer.OrdinalIgnoreCase)
+            .ToList();
         var issues = new ConcurrentBag<ModIssue>();
 
         // NPCs run in parallel: the resolver stack is exercised concurrently by
@@ -335,7 +394,8 @@ public sealed class ModIssueScanner
         void AddIssue(ModIssueType type, string affectedPath, string? nifPath = null,
             string? shapeName = null, string? referencer = null, string? detail = null,
             bool isOutfit = false, ModIssueSeverity severity = ModIssueSeverity.Issue,
-            string? sourceMod = null, string? recordPlugin = null)
+            string? sourceMod = null, string? recordPlugin = null,
+            IReadOnlyList<string>? recordPlugins = null, IReadOnlyList<string>? cleanSiblingPlugins = null)
         {
             // recordPlugin joins the dedupe key: per-plugin dark-face verdicts share
             // one AffectedPath (the FaceGen NIF), and the second variant's row must
@@ -355,6 +415,8 @@ public sealed class ModIssueScanner
                 Severity = severity,
                 SourceModName = sourceMod,
                 RecordPluginName = recordPlugin,
+                RecordPlugins = recordPlugins?.ToList(),
+                CleanSiblingPlugins = cleanSiblingPlugins?.ToList(),
             });
         }
 
@@ -622,12 +684,19 @@ public sealed class ModIssueScanner
                                     "this NPC dark-faces (runtime face regeneration).");
                     }
 
-                    var cleanLabels = graded
+                    // Individual clean carrier filenames, in the mod's plugin order —
+                    // structured (never a joined label) so the green remedy line and
+                    // the post-scan switch dialog can consume them without parsing.
+                    // Resource-only carriers are excluded: RefreshNpcLists never
+                    // offers them as an NPC's source plugin, so "switch to it" would
+                    // be advice the Mods tab cannot follow.
+                    var resourceOnlyPlugins = ResourceOnlyPluginFileNames(mod);
+                    var cleanSiblingPlugins = graded
                         .Where(g => g.Analysis.MissingBakedShapes.Count == 0 &&
                                     g.Analysis.NullHeadPartLinks == 0 &&
                                     g.Analysis.UnresolvedHeadParts.Count == 0)
-                        .Select(g => g.Variant.Label)
-                        .Where(l => !string.IsNullOrEmpty(l))
+                        .SelectMany(g => g.Variant.Plugins ?? Enumerable.Empty<string>())
+                        .Where(p => !resourceOnlyPlugins.Contains(p))
                         .ToList();
 
                     foreach (var (variant, analysis) in graded)
@@ -641,6 +710,7 @@ public sealed class ModIssueScanner
                             AddIssue(ModIssueType.MissingHeadPartPlugin, group.Key.FileName.String,
                                 nifPath: paths.HeadMeshPath,
                                 recordPlugin: variant.Label,
+                                recordPlugins: variant.Plugins,
                                 detail: "This NPC's record uses head part(s) " +
                                         string.Join(", ", group.Select(fk => fk.ToString())) +
                                         " from a plugin that is not in this mod's folders and could not be resolved. " +
@@ -660,19 +730,36 @@ public sealed class ModIssueScanner
                             // another strips it.
                             bool traitsInert = appearanceKey.Equals(npcKey) && variant.KeepsTraitsTemplate;
 
-                            string repinRemedy = variant.Label != null && cleanLabels.Count > 0
-                                ? $"\nPlugin '{string.Join("', '", cleanLabels)}' in this same mod does not have " +
-                                  "this problem for this NPC — selecting it as the NPC's source plugin (right-click " +
-                                  "the NPC's mugshot in the Mods tab) avoids the bug."
-                                : string.Empty;
+                            // Carried only by resource-only plugins (the Auri No
+                            // Antlers case): such a record can never be an NPC's
+                            // source-plugin selection, so this mod cannot forward the
+                            // mismatch into a patch — the NPC's actual source is one
+                            // of the remaining plugins. Note, not Issue: the row
+                            // documents the mod's own data, not a selection the user
+                            // could be bitten by.
+                            bool resourceOnlyCarriers = variant.Plugins is { Count: > 0 } &&
+                                variant.Plugins.All(resourceOnlyPlugins.Contains);
 
+                            // The repin remedy travels as STRUCTURED fields (below) —
+                            // the UI composes and colors the sentence under the row's
+                            // headline, and the post-scan switch dialog reads them.
                             AddIssue(ModIssueType.DarkFaceMismatch, faceGenMeshRel,
                                 nifPath: paths.HeadMeshPath,
                                 recordPlugin: variant.Label,
-                                severity: traitsInert || ghostMasked
+                                recordPlugins: variant.Plugins,
+                                cleanSiblingPlugins: variant.Label != null && cleanSiblingPlugins.Count > 0
+                                    ? cleanSiblingPlugins
+                                    : null,
+                                severity: traitsInert || ghostMasked || resourceOnlyCarriers
                                     ? ModIssueSeverity.Note
                                     : ModIssueSeverity.Issue,
-                                detail: (traitsInert
+                                detail: (resourceOnlyCarriers
+                                            ? "This record only comes from plugin(s) marked resource-only in this mod " +
+                                              "entry, which are never offered as an NPC's source plugin — this mod " +
+                                              "cannot forward the mismatched record into a patch, so the problem below " +
+                                              "is reported as a note about the mod's own data.\n"
+                                            : string.Empty) +
+                                        (traitsInert
                                             ? "In the mod's own context this NPC keeps the Traits template flag, so the " +
                                               "unpatched engine renders its template's face and never loads this file — " +
                                               "the mismatch below cannot show in game unless a patch or another plugin " +
@@ -681,8 +768,7 @@ public sealed class ModIssueScanner
                                         (ghostMasked ? GhostNotePrefix : string.Empty) +
                                         analysis.BuildReason(
                                             scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod,
-                                            subjectSuppliesRecord: variant.SubjectSuppliesRecord) +
-                                        repinRemedy);
+                                            subjectSuppliesRecord: variant.SubjectSuppliesRecord));
                         }
                     }
                 }
@@ -716,14 +802,16 @@ public sealed class ModIssueScanner
 
     private delegate void AddIssueDelegate(ModIssueType type, string affectedPath, string? nifPath = null,
         string? shapeName = null, string? referencer = null, string? detail = null, bool isOutfit = false,
-        ModIssueSeverity severity = ModIssueSeverity.Issue, string? sourceMod = null, string? recordPlugin = null);
+        ModIssueSeverity severity = ModIssueSeverity.Issue, string? sourceMod = null, string? recordPlugin = null,
+        IReadOnlyList<string>? recordPlugins = null, IReadOnlyList<string>? cleanSiblingPlugins = null);
 
     /// <summary>One dark-face grading target: a record and the plugin(s) within the
     /// scanned mod that carry it. Label is null for the single-variant case (a
     /// single-plugin mod, or no mod plugin carries the record and the pinned/origin
     /// resolution stands in) — those rows stay untagged, the pre-v9 presentation.</summary>
     private sealed record RecordVariant(INpcGetter Record, string? Label,
-        bool SubjectSuppliesRecord, bool KeepsTraitsTemplate);
+        bool SubjectSuppliesRecord, bool KeepsTraitsTemplate,
+        IReadOnlyList<string>? Plugins = null);
 
     private static readonly FormKey PlayerNpcFormKey =
         Mutagen.Bethesda.FormKeys.SkyrimSE.Skyrim.Npc.Player.FormKey;
@@ -753,6 +841,17 @@ public sealed class ModIssueScanner
     internal static bool HasGhostKeyword(INpcGetter npc)
         => npc.Keywords?.Any(k => k.FormKey.Equals(ActorTypeGhostKeyword)) == true;
 
+    /// <summary>Filenames of the mod entry's resource-only plugins (case-insensitive).
+    /// A resource-only plugin is excluded from NPC sourcing entirely
+    /// (VM_ModSetting.RefreshNpcLists skips it), so a record variant carried only by
+    /// such plugins can never be an NPC's source-plugin selection: its dark-face rows
+    /// demote to Note, and resource-only carriers never appear as switch targets in
+    /// CleanSiblingPlugins (the Auri No Antlers case, 2026-08-18).</summary>
+    internal static HashSet<string> ResourceOnlyPluginFileNames(ModSetting mod) =>
+        (mod.ResourceOnlyModKeys ?? new HashSet<ModKey>())
+        .Select(k => k.FileName.String)
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Prefix for tint-symptom rows (dark-face class, missing tint,
     /// unreadable FaceGen) demoted because of <see cref="HasGhostKeyword"/>.</summary>
     private const string GhostNotePrefix =
@@ -778,7 +877,7 @@ public sealed class ModIssueScanner
             {
                 return GroupPluginRecordsBySignature(perPlugin)
                     .Select(g => new RecordVariant(g.Record, g.Label,
-                        SubjectSuppliesRecord: true, KeepsTraitsTemplate(g.Record)))
+                        SubjectSuppliesRecord: true, KeepsTraitsTemplate(g.Record), g.Plugins))
                     .ToList();
             }
         }
@@ -791,9 +890,11 @@ public sealed class ModIssueScanner
 
     /// <summary>Collapses per-plugin records to one entry per distinct dark-face
     /// signature, preserving plugin order; the label joins every carrier's filename
-    /// ("A.esp, B.esp") so identical records produce one row instead of N.</summary>
-    internal static List<(INpcGetter Record, string Label)> GroupPluginRecordsBySignature(
-        IReadOnlyList<(ModKey Plugin, INpcGetter Record)> perPlugin)
+    /// ("A.esp, B.esp") so identical records produce one row instead of N. Plugins
+    /// carries the INDIVIDUAL filenames — consumers must never split the label
+    /// (filenames can legally contain commas).</summary>
+    internal static List<(INpcGetter Record, string Label, IReadOnlyList<string> Plugins)>
+        GroupPluginRecordsBySignature(IReadOnlyList<(ModKey Plugin, INpcGetter Record)> perPlugin)
     {
         var order = new List<string>();
         var groups = new Dictionary<string, (INpcGetter Record, List<string> Plugins)>(StringComparer.Ordinal);
@@ -811,7 +912,8 @@ public sealed class ModIssueScanner
             }
         }
         return order
-            .Select(sig => (groups[sig].Record, string.Join(", ", groups[sig].Plugins)))
+            .Select(sig => (groups[sig].Record, string.Join(", ", groups[sig].Plugins),
+                (IReadOnlyList<string>)groups[sig].Plugins))
             .ToList();
     }
 

@@ -123,6 +123,21 @@ namespace NPC_Plugin_Chooser_2.Models
         /// pre-v9 presentation. Distinct from <see cref="SourceModName"/>, which
         /// attributes a foreign INSTALLED mod ("Provided by").</summary>
         public string? RecordPluginName { get; set; }
+
+        /// <summary>The INDIVIDUAL plugin filenames behind
+        /// <see cref="RecordPluginName"/> (which is a display join — filenames can
+        /// legally contain commas, so consumers must never split the label). The
+        /// post-scan switch-suggestion dialog matches the NPC's current source-plugin
+        /// pin against this list.</summary>
+        public List<string>? RecordPlugins { get; set; }
+
+        /// <summary>For dark-face rows in multi-plugin mods: the mod's OWN plugin
+        /// filenames whose records grade CLEAN for this NPC (individual names, in the
+        /// mod's plugin order). Fuels the green repin-remedy line under the row's
+        /// headline and the post-scan switch-suggestion dialog; the sentence itself is
+        /// composed in one place (VM_ModIssueEntry.BuildRepinRemedyText). Null/empty
+        /// when no sibling grades clean or the mod is single-plugin.</summary>
+        public List<string>? CleanSiblingPlugins { get; set; }
     }
 
     /// <summary>
@@ -281,7 +296,19 @@ namespace NPC_Plugin_Chooser_2.Models
         //      rows (dark-face, missing tint, broken NIF) to Note — the
         //      ghost effect usually hides them (user-observed), but mods
         //      can alter the effect, so Note rather than DFIR's skip.
-        public const int CurrentVersion = 11;
+        // v12: the repin remedy became STRUCTURED data — dark-face rows
+        //      carry RecordPlugins + CleanSiblingPlugins (individual
+        //      filenames) instead of a remedy sentence embedded in Detail.
+        //      The UI composes and colors the sentence under the headline,
+        //      and the post-scan switch-suggestion dialog reads the fields.
+        //      Verdict content unchanged.
+        // v13: resource-only plugins can never be an NPC's source plugin,
+        //      so dark-face variants carried ONLY by resource-only plugins
+        //      demote to Note (the mod cannot forward that record), and
+        //      resource-only carriers are excluded from CleanSiblingPlugins
+        //      (a switch target the Mods tab cannot honor). The Auri
+        //      No Antlers Patch case, 2026-08-18.
+        public const int CurrentVersion = 13;
 
         public int Version { get; set; } = CurrentVersion;
 
