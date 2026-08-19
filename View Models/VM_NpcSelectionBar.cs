@@ -1326,10 +1326,212 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
             });
 
             await Task.WhenAll(tasks).ConfigureAwait(false);
-            return (total, countNew, countCached, countFailed);
-        }
+                    return (total, countNew, countCached, countFailed);
+                }
 
-        private void ShowFavoritesWindowForSharing()
+                // --- CSV round-trip for MANUAL translation ---
+                // Auto-translation accuracy is inherently limited; let the user do the translation
+                // themselves instead: Export writes one row per eligible NPC (FormKey, EditorID,
+                // English wiki description, pre-filled Chinese translation if one is cached) to a
+                // UTF-8 (BOM) CSV the user can open in Excel/WPS, translate in their tool of
+                // choice, and save back; Import reads that CSV and writes the Chinese column into
+                // the description cache. Rows with an empty or unchanged Chinese cell are skipped.
+
+                /// <summary>Walks every eligible NPC, fetches (caching) its ENGLISH wiki description,
+                /// and writes a translatable CSV. Returns counters for the summary dialog.</summary>
+                public async Task<(int Total, int WithEnglish, int Failed)> ExportDescriptionsCsvAsync(
+                    string outputPath,
+                    IProgress<(int Done, int Total, int WithEnglish, int Failed)>? progress,
+                    CancellationToken ct)
+                {
+                    var eligible = AllNpcs.Where(n => _descriptionProvider.IsEligibleNpc(n.NpcFormKey)).ToList();
+                    int total = eligible.Count;
+                    int done = 0, withEnglish = 0, failed = 0;
+                    var rows = new List<(string Key, string EditorId, string En, string? Zh)>();
+
+                    using var concurrency = new SemaphoreSlim(4, 4);
+                    var tasks = eligible.Select(async npc =>
+                    {
+                        await concurrency.WaitAsync(ct).ConfigureAwait(false);
+                        try
+                        {
+                            ct.ThrowIfCancellationRequested();
+                            string? en = await _descriptionProvider
+                                .GetEnglishDescriptionAsync(npc.NpcFormKey, npc.DisplayName, npc.NpcData?.EditorID)
+                                .ConfigureAwait(false);
+                            lock (rows)
+                            {
+                                if (!string.IsNullOrWhiteSpace(en))
+                                {
+                                    rows.Add((npc.NpcFormKey.ToString(), npc.NpcEditorId, en,
+                                              _descriptionProvider.GetCachedZh(npc.NpcFormKey)));
+                                    Interlocked.Increment(ref withEnglish);
+                                }
+                                else
+                                {
+                                    Interlocked.Increment(ref failed);
+                                }
+                            }
+                        }
+                        finally
+                        {
+                            concurrency.Release();
+                            int d = Interlocked.Increment(ref done);
+                            progress?.Report((d, total,
+                                Volatile.Read(ref withEnglish), Volatile.Read(ref failed)));
+                        }
+                    });
+
+                    try
+                    {
+                        await Task.WhenAll(tasks).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw; // caller closes the progress window; nothing has been written yet
+                    }
+
+                    var sb = new StringBuilder();
+                    sb.AppendLine("FormKey,EditorID,EnglishDescription,ChineseTranslation");
+                    foreach (var (key, editorId, en, zh) in rows)
+                    {
+                        sb.Append(CsvField(key)).Append(',')
+                          .Append(CsvField(editorId)).Append(',')
+                          .Append(CsvField(en)).Append(',')
+                          .Append(CsvField(zh ?? string.Empty)).AppendLine();
+                    }
+                    // UTF-8 with BOM so Excel/WPS open Chinese (and any CJK the user adds) correctly.
+                    await File.WriteAllTextAsync(outputPath, sb.ToString(), new UTF8Encoding(true)).ConfigureAwait(false);
+                    return (total, withEnglish, failed);
+                }
+
+                /// <summary>Parses an exported/edited CSV and pushes the Chinese column into the description
+                /// cache. Synchronous (local parse + cache write, no network). Returns import counters.</summary>
+                public (int Imported, int Skipped) ImportTranslationsCsv(string inputPath)
+                {
+                    string text;
+                    try
+                    {
+                        // .NET defaults to UTF-8 (BOM honored): the file written by Export always reads back
+                        // correctly, and Excel's "CSV UTF-8" does too. GBK/ANSI files will show replacement
+                        // characters — the row then fails the unchanged/empty check and is skipped harmlessly.
+                        text = File.ReadAllText(inputPath);
+                    }
+                    catch (Exception ex)
+                    {
+                        throw new InvalidOperationException("Could not read the CSV file: " + ex.Message, ex);
+                    }
+
+                    var rows = ParseCsvRows(text);
+                    if (rows.Count < 2) return (0, 0); // header only (or empty)
+
+                    // Locate columns by header names; fall back to the export order when headers are missing.
+                    string[] header = rows[0];
+                    int keyIdx = 0, enIdx = 2, zhIdx = 3;
+                    for (int i = 0; i < header.Length; i++)
+                    {
+                        string h = header[i].Trim().ToLowerInvariant();
+                        if (h == "formkey") keyIdx = i;
+                        else if (h.Contains("english")) enIdx = i;
+                        else if (h.Contains("chinese") || h.Contains("translation") || h.Contains("中文")) zhIdx = i;
+                    }
+
+                    var entries = new List<(string CacheKey, string? English, string Chinese)>();
+                    int skipped = 0;
+                    for (int r = 1; r < rows.Count; r++)
+                    {
+                        string[] cols = rows[r];
+                        if (cols.Length == 0 || (cols.Length == 1 && string.IsNullOrWhiteSpace(cols[0])))
+                        {
+                            skipped++; // blank line
+                            continue;
+                        }
+                        if (keyIdx >= cols.Length || zhIdx >= cols.Length)
+                        {
+                            skipped++; // short row
+                            continue;
+                        }
+
+                        string keyRaw = (cols[keyIdx] ?? string.Empty).Trim();
+                        string zh = (cols[zhIdx] ?? string.Empty).Trim();
+                        if (string.IsNullOrWhiteSpace(keyRaw) || string.IsNullOrWhiteSpace(zh))
+                        {
+                            skipped++; // no key or no translation yet
+                            continue;
+                        }
+
+                        string key;
+                        try
+                        {
+                            key = FormKey.Factory(keyRaw).ToString(); // normalize (throws on garbage)
+                        }
+                        catch
+                        {
+                            skipped++;
+                            continue;
+                        }
+
+                        string? en = enIdx >= 0 && enIdx < cols.Length ? (cols[enIdx] ?? string.Empty).Trim() : null;
+                        if (!string.IsNullOrEmpty(en) && en.Equals(zh, StringComparison.OrdinalIgnoreCase))
+                        {
+                            skipped++; // translation cell still the English original — user hasn't done this one
+                            continue;
+                        }
+
+                        entries.Add((key, string.IsNullOrWhiteSpace(en) ? null : en, zh));
+                    }
+
+                    int imported = _descriptionProvider.ImportTranslations(entries);
+                    return (imported, skipped);
+                }
+
+                private static string CsvField(string? value)
+                {
+                    if (string.IsNullOrEmpty(value)) return string.Empty;
+                    if (value.IndexOfAny(new[] { ',', '"', '\r', '\n' }) >= 0)
+                    {
+                        return "\"" + value.Replace("\"", "\"\"") + "\"";
+                    }
+                    return value.ToString();
+                }
+
+                private static List<string[]> ParseCsvRows(string text)
+                {
+                    var rows = new List<string[]>();
+                    var row = new List<string>();
+                    var field = new StringBuilder();
+                    bool inQuotes = false;
+                    for (int i = 0; i < text.Length; i++)
+                    {
+                        char c = text[i];
+                        if (inQuotes)
+                        {
+                            if (c == '"')
+                            {
+                                if (i + 1 < text.Length && text[i + 1] == '"') { field.Append('"'); i++; } // escaped quote
+                                else inQuotes = false;
+                            }
+                            else field.Append(c);
+                        }
+                        else if (c == '"') inQuotes = true;
+                        else if (c == ',') { row.Add(field.ToString()); field.Clear(); }
+                        else if (c == '\r') { /* skip */ }
+                        else if (c == '\n')
+                        {
+                            row.Add(field.ToString()); field.Clear();
+                            rows.Add(row.ToArray()); row = new List<string>();
+                        }
+                        else field.Append(c);
+                    }
+                    if (field.Length > 0 || row.Count > 0)
+                    {
+                        row.Add(field.ToString());
+                        rows.Add(row.ToArray()); // trailing row without newline
+                    }
+                    return rows;
+                }
+
+                private void ShowFavoritesWindowForSharing()
     {
         var vm = _favoriteFacesFactory(VM_FavoriteFaces.FavoriteFacesMode.Share, null);
         var window = new FavoriteFacesWindow { DataContext = vm, ViewModel = vm };

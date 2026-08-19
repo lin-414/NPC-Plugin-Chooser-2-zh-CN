@@ -569,8 +569,10 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
     public ReactiveCommand<Unit, Unit> GenerateAllMugshotsCommand { get; }
     public ReactiveCommand<Unit, Unit> PreCacheDescriptionsCommand { get; }
         public ReactiveCommand<Unit, Unit> BackupSettingsCommand { get; }
-        public ReactiveCommand<Unit, Unit> RestoreSettingsCommand { get; }
-        public ReactiveCommand<Unit, Unit> BatchDownloadFaceFinderMugshotsCommand { get; }
+            public ReactiveCommand<Unit, Unit> RestoreSettingsCommand { get; }
+            public ReactiveCommand<Unit, Unit> ExportDescriptionsCsvCommand { get; }
+            public ReactiveCommand<Unit, Unit> ImportTranslationsCsvCommand { get; }
+            public ReactiveCommand<Unit, Unit> BatchDownloadFaceFinderMugshotsCommand { get; }
     public ReactiveCommand<Unit, Unit> ShowFullEnvironmentErrorCommand { get; }
     public ReactiveCommand<Unit, Unit> AddIgnoredModCommand { get; }
     public ReactiveCommand<string, Unit> RemoveIgnoredModCommand { get; }
@@ -1033,7 +1035,15 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
         GenerateAllMugshotsCommand = ReactiveCommand.CreateFromTask(GenerateAllMugshotsAsync).DisposeWith(_disposables);
         PreCacheDescriptionsCommand = ReactiveCommand.CreateFromTask(PreCacheDescriptionsAsync).DisposeWith(_disposables);
         BackupSettingsCommand = ReactiveCommand.CreateFromTask(BackupSettingsAsync).DisposeWith(_disposables);
-        RestoreSettingsCommand = ReactiveCommand.CreateFromTask(RestoreSettingsAsync).DisposeWith(_disposables);
+                RestoreSettingsCommand = ReactiveCommand.CreateFromTask(RestoreSettingsAsync).DisposeWith(_disposables);
+                ExportDescriptionsCsvCommand = ReactiveCommand.CreateFromTask(ExportDescriptionsCsvAsync).DisposeWith(_disposables);
+                ImportTranslationsCsvCommand = ReactiveCommand.CreateFromTask(ImportTranslationsCsvAsync).DisposeWith(_disposables);
+                ExportDescriptionsCsvCommand.ThrownExceptions
+                    .Subscribe(ex => ScrollableMessageBox.ShowError($"Error exporting descriptions CSV: {ExceptionLogger.GetExceptionStack(ex)}"))
+                    .DisposeWith(_disposables);
+                ImportTranslationsCsvCommand.ThrownExceptions
+                    .Subscribe(ex => ScrollableMessageBox.ShowError($"Error importing translations CSV: {ExceptionLogger.GetExceptionStack(ex)}"))
+                    .DisposeWith(_disposables);
         BackupSettingsCommand.ThrownExceptions
             .Subscribe(ex => ScrollableMessageBox.ShowError($"Error backing up settings: {ExceptionLogger.GetExceptionStack(ex)}"))
             .DisposeWith(_disposables);
@@ -2815,9 +2825,136 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
                             MessageBoxButton.OK, MessageBoxImage.Warning);
                     }
                     Application.Current.Shutdown();
-                }
+                                    }
 
-                // Copies every writable property of a deserialized Settings into the live singleton.
+                        // --- CSV round-trip (manual translation of NPC descriptions) ---
+                        // Auto-translation quality is limited; this flow lets the user translate the wiki
+                        // English descriptions themselves: Export writes all eligible NPCs to a CSV
+                        // (FormKey, EditorID, English, pre-filled Chinese), the user translates the Chinese
+                        // column offline in Excel/WPS/any tool, Import reads the CSV back and pushes those
+                        // translations into the description cache. Rows with an empty or unchanged Chinese
+                        // column are skipped, so a partially-translated sheet is fine.
+
+                        private async Task ExportDescriptionsCsvAsync()
+                        {
+                            var npcBar = _lazyNpcSelectionBar.Value;
+                            if (npcBar == null)
+                            {
+                                ScrollableMessageBox.ShowWarning(
+                                    "The NPC list has not been initialized yet. Open the main window first, then retry.",
+                                    TranslationServiceProvider.GetService()?.GetString("exportDescriptions") ?? "Export NPC Descriptions (CSV)");
+                                return;
+                            }
+
+                            var dialog = new SaveFileDialog
+                            {
+                                Title = TranslationServiceProvider.GetService()?.GetString("exportPickTitle") ?? "Save descriptions CSV as…",
+                                Filter = "CSV files (*.csv)|*.csv",
+                                FileName = $"NpcDescriptions-{DateTime.Now:yyyy-MM-dd}.csv",
+                                InitialDirectory = System.Environment.GetFolderPath(System.Environment.SpecialFolder.Desktop)
+                            };
+                            if (dialog.ShowDialog() != true) return;
+
+                            var progressVm = new VM_ProgressWindow
+                            {
+                                Title = TranslationServiceProvider.GetService()?.GetString("exportDescriptions") ?? "Export NPC Descriptions (CSV)",
+                                StatusMessage = TranslationServiceProvider.GetService()?.GetString("preCachePreparing") ?? "Preparing...",
+                                IsIndeterminate = true,
+                                ProgressMaximum = 1
+                            };
+                            var progressWindow = new ProgressWindow { ViewModel = progressVm };
+                            TrySetOwner(progressWindow);
+                            progressWindow.Show();
+
+                            using var cts = new CancellationTokenSource();
+                            using var cancelSub = progressVm.WhenAnyValue(x => x.IsCancellationRequested)
+                                .Where(requested => requested)
+                                .Subscribe(_ => { try { cts.Cancel(); } catch { /* already disposed */ } });
+
+                            string progressFmt = TranslationServiceProvider.GetService()?.GetString("exportProgress")
+                                ?? "Fetching descriptions: {0}/{1} · with English {2} · failed {3}";
+                            var progress = new Progress<(int Done, int Total, int WithEnglish, int Failed)>(p =>
+                            {
+                                if (p.Total > 0)
+                                {
+                                    progressVm.IsIndeterminate = false;
+                                    progressVm.ProgressMaximum = p.Total;
+                                    progressVm.ProgressValue = p.Done;
+                                }
+                                progressVm.StatusMessage = string.Format(progressFmt, p.Done, p.Total, p.WithEnglish, p.Failed);
+                            });
+
+                            (int Total, int WithEnglish, int Failed)? result = null;
+                            bool cancelled = false;
+                            try
+                            {
+                                result = await npcBar.ExportDescriptionsCsvAsync(dialog.FileName, progress, cts.Token).ConfigureAwait(true);
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                cancelled = true; // nothing written yet — the method only writes after all rows are fetched
+                            }
+                            catch (Exception ex)
+                            {
+                                progressWindow.Close();
+                                progressVm.Dispose();
+                                ScrollableMessageBox.ShowError(
+                                    "Export failed: " + ExceptionLogger.GetExceptionStack(ex),
+                                    TranslationServiceProvider.GetService()?.GetString("exportDescriptions") ?? "Export NPC Descriptions (CSV)");
+                                return;
+                            }
+
+                            progressWindow.Close();
+                            progressVm.Dispose();
+                            if (cancelled || result == null) return;
+
+                            string doneMsg = string.Format(
+                                TranslationServiceProvider.GetService()?.GetString("exportDone")
+                                ?? "Descriptions exported to:\n{0}\n\n{1} NPCs total · {2} with English text · {3} failed.\n\nTranslate the Chinese column offline, then use Import Translations to write your translations back.",
+                                dialog.FileName, result.Value.Total, result.Value.WithEnglish, result.Value.Failed);
+                            MessageBox.Show(doneMsg,
+                                TranslationServiceProvider.GetService()?.GetString("exportDescriptions") ?? "Export NPC Descriptions (CSV)",
+                                MessageBoxButton.OK, MessageBoxImage.Information);
+                        }
+
+                        private async Task ImportTranslationsCsvAsync()
+                        {
+                            var npcBar = _lazyNpcSelectionBar.Value;
+                            if (npcBar == null)
+                            {
+                                ScrollableMessageBox.ShowWarning(
+                                    "The NPC list has not been initialized yet. Open the main window first, then retry.",
+                                    TranslationServiceProvider.GetService()?.GetString("importTranslations") ?? "Import Translations (CSV)");
+                                return;
+                            }
+
+                            var dialog = new OpenFileDialog
+                            {
+                                Title = TranslationServiceProvider.GetService()?.GetString("importPickTitle") ?? "Select a translations CSV",
+                                Filter = "CSV files (*.csv)|*.csv|All files (*.*)|*.*"
+                            };
+                            if (dialog.ShowDialog() != true) return;
+
+                            try
+                            {
+                                var (imported, skipped) = await Task.Run(() => npcBar.ImportTranslationsCsv(dialog.FileName)).ConfigureAwait(true);
+                                string doneMsg = string.Format(
+                                    TranslationServiceProvider.GetService()?.GetString("importDone")
+                                    ?? "Imported {0} translations from:\n{1}\n\n({2} rows skipped: empty or unchanged Chinese cell)",
+                                    imported, dialog.FileName, skipped);
+                                MessageBox.Show(doneMsg,
+                                    TranslationServiceProvider.GetService()?.GetString("importTranslations") ?? "Import Translations (CSV)",
+                                    MessageBoxButton.OK, MessageBoxImage.Information);
+                            }
+                            catch (Exception ex)
+                            {
+                                ScrollableMessageBox.ShowError(
+                                    "Import failed: " + ExceptionLogger.GetExceptionStack(ex),
+                                    TranslationServiceProvider.GetService()?.GetString("importTranslations") ?? "Import Translations (CSV)");
+                            }
+                        }
+
+                                    // Copies every writable property of a deserialized Settings into the live singleton.
                 private static void CopySettingsProperties(Settings target, Settings source)
                 {
                     foreach (var prop in typeof(Settings).GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance))

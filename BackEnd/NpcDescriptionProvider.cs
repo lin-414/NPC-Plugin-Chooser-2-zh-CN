@@ -253,79 +253,207 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                     }
 
                         Stopwatch sw = Stopwatch.StartNew();
-                        string? finalDescription = null;
 
-            // --- 3. Try UESP First ---
-            string uespSearchTerm = $"Skyrim:{searchTermRaw}";
-            string encodedUespSearchTerm = WebUtility.UrlEncode(uespSearchTerm);
-            Debug.WriteLine($"[DescProvider] Attempting UESP for: \"{uespSearchTerm}\"");
-            try
-            {
-                 string? uespUrl = await SearchWikiAsync($"https://en.uesp.net/w/api.php?action=query&list=search&srsearch={encodedUespSearchTerm}&format=json&srlimit=1", "https://en.uesp.net/wiki/");
-                 if (!string.IsNullOrEmpty(uespUrl))
-                 {
-                     Debug.WriteLine($"[DescProvider] Found UESP URL: {uespUrl}");
-                     string? rawUespDesc = await FetchAndParseDescriptionAsync(uespUrl, WikiSite.UESP);
-                     if (ValidateDescription(rawUespDesc, searchKeywords)) // Validate before assigning
-                         {
-                             finalDescription = rawUespDesc; // Assign if valid
-                             Debug.WriteLine($"[DescProvider] Success: Valid UESP description found ({sw.ElapsedMilliseconds}ms).");
-                             return await FinalizeAsync(cacheKey, finalDescription, forceTranslate); // *** UESP success: translate + cache ***
-                         }
-                     else if(rawUespDesc != null) { // Description was fetched but failed validation
-                         Debug.WriteLine($"[DescProvider] UESP description failed validation against keywords: {string.Join(", ", searchKeywords)}");
-                     }
-                     else { // Fetch/Parse failed
-                         Debug.WriteLine($"[DescProvider] UESP fetch/parse yielded no description.");
-                     }
-                 }
-                 else { Debug.WriteLine($"[DescProvider] UESP search returned no URL for \"{uespSearchTerm}\"."); }
-            }
-            catch (Exception ex) { Debug.WriteLine($"[DescProvider] Error during UESP processing for \"{uespSearchTerm}\": {ex.Message}"); }
+                                                // --- 3+4. Try UESP, then Fandom, with keyword validation (shared with the CSV export path) ---
+                                                string? rawEnglish = await FetchRawEnglishAsync(searchTermRaw, searchKeywords);
+                                                sw.Stop();
+                                                if (rawEnglish != null)
+                                                {
+                                                    Debug.WriteLine($"[DescProvider] Raw English fetched for '{searchTermRaw}' ({sw.ElapsedMilliseconds}ms). Finalizing.");
+                                                    return await FinalizeAsync(cacheKey, rawEnglish, forceTranslate);
+                                                }
 
-            // --- 4. Try Fandom ONLY if UESP failed ---
-            if (finalDescription == null) // Check if UESP attempt was unsuccessful
-            {
-                 sw.Restart(); // Restart timer for Fandom attempt
-                 string fandomSearchTerm = searchTermRaw;
-                 string encodedFandomSearchTerm = WebUtility.UrlEncode(fandomSearchTerm);
-                 Debug.WriteLine($"[DescProvider] UESP failed, Attempting Fandom for: \"{fandomSearchTerm}\"");
-                 try
-                 {
-                      string? fandomUrl = await SearchWikiAsync($"https://elderscrolls.fandom.com/api.php?action=query&list=search&srsearch={encodedFandomSearchTerm}&format=json&srlimit=1", "https://elderscrolls.fandom.com/wiki/");
-                      if (!string.IsNullOrEmpty(fandomUrl))
-                      {
-                           Debug.WriteLine($"[DescProvider] Found Fandom URL: {fandomUrl}");
-                           string? rawFandomDesc = await FetchAndParseDescriptionAsync(fandomUrl, WikiSite.Fandom);
-                           if (ValidateDescription(rawFandomDesc, searchKeywords)) // Validate before assigning
-                           {
-                                finalDescription = rawFandomDesc; // Assign if valid
-                                Debug.WriteLine($"[DescProvider] Success: Valid Fandom description found ({sw.ElapsedMilliseconds}ms).");
-                                return await FinalizeAsync(cacheKey, finalDescription, forceTranslate); // *** Fandom success: translate + cache ***
-                           }
-                           else if(rawFandomDesc != null) { // Description was fetched but failed validation
-                                Debug.WriteLine($"[DescProvider] Fandom description failed validation against keywords: {string.Join(", ", searchKeywords)}");
-                           }
-                            else { // Fetch/Parse failed
-                                Debug.WriteLine($"[DescProvider] Fandom fetch/parse yielded no description.");
-                            }
-                      }
-                       else { Debug.WriteLine($"[DescProvider] Fandom search returned no URL for \"{fandomSearchTerm}\"."); }
-                 }
-                 catch (Exception ex) { Debug.WriteLine($"[DescProvider] Error during Fandom processing for \"{fandomSearchTerm}\": {ex.Message}"); }
-            }
+                                                Debug.WriteLine($"[DescProvider] No valid description found for '{searchTermRaw}' after trying both sites.");
+                                                return null;
+                                }
 
-            // --- 5. Return Result ---
-            sw.Stop();
-            if (finalDescription != null) {
-                // This point should theoretically not be reached if returns are immediate, but as safety.
-                                 Debug.WriteLine($"[DescProvider] Returning description for '{searchTermRaw}'. Total time: {sw.ElapsedMilliseconds}ms");
-                                                 return await FinalizeAsync(cacheKey, finalDescription, forceTranslate);
-            } else {
-                 Debug.WriteLine($"[DescProvider] No valid description found for '{searchTermRaw}' after trying both sites.");
-                return null;
-            }
-        }
+                                // Shared by GetDescriptionAsync (translate on demand) and GetEnglishDescriptionAsync (CSV
+                                // export): search UESP first, then Fandom, validate the extracted first sentence against
+                                // the NPC's keywords, and return the raw ENGLISH text (or null). Does NOT translate and
+                                // does NOT touch the cache — callers cache the result themselves.
+                                private async Task<string?> FetchRawEnglishAsync(string searchTermRaw, HashSet<string> searchKeywords)
+                                {
+                                    Stopwatch sw = Stopwatch.StartNew();
+                                    string? finalDescription = null;
+
+                                    // --- 3. Try UESP First ---
+                                    string uespSearchTerm = $"Skyrim:{searchTermRaw}";
+                                    string encodedUespSearchTerm = WebUtility.UrlEncode(uespSearchTerm);
+                                    Debug.WriteLine($"[DescProvider] Attempting UESP for: \"{uespSearchTerm}\"");
+                                    try
+                                    {
+                                         string? uespUrl = await SearchWikiAsync($"https://en.uesp.net/w/api.php?action=query&list=search&srsearch={encodedUespSearchTerm}&format=json&srlimit=1", "https://en.uesp.net/wiki/");
+                                         if (!string.IsNullOrEmpty(uespUrl))
+                                         {
+                                             Debug.WriteLine($"[DescProvider] Found UESP URL: {uespUrl}");
+                                             string? rawUespDesc = await FetchAndParseDescriptionAsync(uespUrl, WikiSite.UESP);
+                                             if (ValidateDescription(rawUespDesc, searchKeywords)) // Validate before assigning
+                                             {
+                                                    finalDescription = rawUespDesc; // Assign if valid
+                                                    Debug.WriteLine($"[DescProvider] Success: Valid UESP description found ({sw.ElapsedMilliseconds}ms).");
+                                             }
+                                             else if(rawUespDesc != null) { // Description was fetched but failed validation
+                                                 Debug.WriteLine($"[DescProvider] UESP description failed validation against keywords: {string.Join(", ", searchKeywords)}");
+                                             }
+                                             else { // Fetch/Parse failed
+                                                 Debug.WriteLine($"[DescProvider] UESP fetch/parse yielded no description.");
+                                             }
+                                         }
+                                         else { Debug.WriteLine($"[DescProvider] UESP search returned no URL for \"{uespSearchTerm}\"."); }
+                                    }
+                                    catch (Exception ex) { Debug.WriteLine($"[DescProvider] Error during UESP processing for \"{uespSearchTerm}\": {ex.Message}"); }
+
+                                    // --- 4. Try Fandom ONLY if UESP failed ---
+                                    if (finalDescription == null) // Check if UESP attempt was unsuccessful
+                                    {
+                                         sw.Restart(); // Restart timer for Fandom attempt
+                                         string fandomSearchTerm = searchTermRaw;
+                                         string encodedFandomSearchTerm = WebUtility.UrlEncode(fandomSearchTerm);
+                                         Debug.WriteLine($"[DescProvider] UESP failed, Attempting Fandom for: \"{fandomSearchTerm}\"");
+                                         try
+                                         {
+                                              string? fandomUrl = await SearchWikiAsync($"https://elderscrolls.fandom.com/api.php?action=query&list=search&srsearch={encodedFandomSearchTerm}&format=json&srlimit=1", "https://elderscrolls.fandom.com/wiki/");
+                                              if (!string.IsNullOrEmpty(fandomUrl))
+                                              {
+                                                   Debug.WriteLine($"[DescProvider] Found Fandom URL: {fandomUrl}");
+                                                   string? rawFandomDesc = await FetchAndParseDescriptionAsync(fandomUrl, WikiSite.Fandom);
+                                                   if (ValidateDescription(rawFandomDesc, searchKeywords)) // Validate before assigning
+                                                   {
+                                                        finalDescription = rawFandomDesc; // Assign if valid
+                                                        Debug.WriteLine($"[DescProvider] Success: Valid Fandom description found ({sw.ElapsedMilliseconds}ms).");
+                                                   }
+                                                   else if(rawFandomDesc != null) { // Description was fetched but failed validation
+                                                        Debug.WriteLine($"[DescProvider] Fandom description failed validation against keywords: {string.Join(", ", searchKeywords)}");
+                                                   }
+                                                    else { // Fetch/Parse failed
+                                                        Debug.WriteLine($"[DescProvider] Fandom fetch/parse yielded no description.");
+                                                    }
+                                              }
+                                               else { Debug.WriteLine($"[DescProvider] Fandom search returned no URL for \"{fandomSearchTerm}\"."); }
+                                         }
+                                         catch (Exception ex) { Debug.WriteLine($"[DescProvider] Error during Fandom processing for \"{fandomSearchTerm}\": {ex.Message}"); }
+                                    }
+
+                                    // --- 5. Return Result ---
+                                    sw.Stop();
+                                    if (finalDescription == null)
+                                    {
+                                         Debug.WriteLine($"[DescProvider] No valid description found for '{searchTermRaw}' after trying both sites.");
+                                    }
+                                    return finalDescription;
+                                }
+
+                                /// <summary>Fetches the ENGLISH description for an NPC without translating it and without
+                                /// being gated by the ShowNpcDescriptions UI toggle; used by the CSV export flow. Serves
+                                /// from the cache when the English text is already known, otherwise scrapes UESP/Fandom
+                                /// and caches the English text for later (the translation, if any, is left untouched).</summary>
+                                public async Task<string?> GetEnglishDescriptionAsync(FormKey npcFormKey, string? displayName, string? editorId)
+                                {
+                                    if (npcFormKey.IsNull) return null;
+
+                                    string? overrideDescription = null;
+                                    if (!BaseGamePlugins.Contains(npcFormKey.ModKey.FileName) &&
+                                        !_overrideDescriptions.TryGetValue(npcFormKey, out overrideDescription))
+                                    {
+                                        return null; // not an eligible NPC
+                                    }
+                                    if (overrideDescription is not null)
+                                    {
+                                        return overrideDescription; // master override — no wiki look-up
+                                    }
+
+                                    string cacheKey = npcFormKey.ToString();
+                                    lock (_cacheLock)
+                                    {
+                                        if (_cache.TryGetValue(cacheKey, out var cached) && !string.IsNullOrWhiteSpace(cached.En))
+                                        {
+                                            return cached.En; // English already cached (from a prior view or pre-translate run)
+                                        }
+                                    }
+
+                                    // Build search term + validation keywords exactly like GetDescriptionAsync does.
+                                    string? displaySearchTerm = !string.IsNullOrWhiteSpace(displayName) ? displayName.Split('[')[0].Trim() : null;
+                                    string? editorSearchTerm = !string.IsNullOrWhiteSpace(editorId) ? editorId.Split('[')[0].Trim() : null;
+                                    bool displayNameIsAscii = displaySearchTerm != null && displaySearchTerm.All(ch => ch <= 127);
+                                    string? searchTermRaw = displayNameIsAscii ? displaySearchTerm
+                                        : editorSearchTerm != null ? SplitCamelCase(editorSearchTerm)
+                                        : displaySearchTerm;
+                                    if (string.IsNullOrWhiteSpace(searchTermRaw)) return null;
+
+                                    var searchKeywords = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                                    if (editorSearchTerm != null)
+                                    {
+                                        foreach (string word in SplitCamelCase(editorSearchTerm)
+                                            .Split(new[] { ' ', '-' }, StringSplitOptions.RemoveEmptyEntries)
+                                            .Where(w => !IgnoredWords.Contains(w)))
+                                        {
+                                            searchKeywords.Add(word);
+                                        }
+                                    }
+                                    if (displayNameIsAscii && displaySearchTerm != null)
+                                    {
+                                        foreach (string word in displaySearchTerm
+                                            .Split(new[] { ' ', '-' }, StringSplitOptions.RemoveEmptyEntries)
+                                            .Where(w => !IgnoredWords.Contains(w)))
+                                        {
+                                            searchKeywords.Add(word);
+                                        }
+                                    }
+                                    if (!searchKeywords.Any()) return null;
+
+                                    string? english = await FetchRawEnglishAsync(searchTermRaw, searchKeywords);
+
+                                    if (!string.IsNullOrWhiteSpace(english))
+                                    {
+                                        // Cache the English text (never overwrite an existing translation).
+                                        lock (_cacheLock)
+                                        {
+                                            _cache.TryGetValue(cacheKey, out var existing);
+                                            existing ??= new CachedNpcDescription();
+                                            existing.En = english;
+                                            _cache[cacheKey] = existing;
+                                        }
+                                        _ = PersistCacheAsync();
+                                    }
+                                    return english;
+                                }
+
+                                /// <summary>zh-CN translation from the cache, or null when none exists yet.</summary>
+                                public string? GetCachedZh(FormKey npcFormKey)
+                                {
+                                    lock (_cacheLock)
+                                    {
+                                        return _cache.TryGetValue(npcFormKey.ToString(), out var entry) ? entry.Zh : null;
+                                    }
+                                }
+
+                                /// <summary>Bulk-imports user-provided translations (from the CSV round-trip) into the
+                                /// cache. Only non-empty Chinese values are applied. Returns the number imported.</summary>
+                                public int ImportTranslations(IEnumerable<(string CacheKey, string? English, string Chinese)> entries)
+                                {
+                                    int imported = 0;
+                                    lock (_cacheLock)
+                                    {
+                                        foreach (var (cacheKey, english, chinese) in entries)
+                                        {
+                                            if (string.IsNullOrWhiteSpace(cacheKey) || string.IsNullOrWhiteSpace(chinese)) continue;
+                                            _cache.TryGetValue(cacheKey, out var existing);
+                                            existing ??= new CachedNpcDescription();
+                                            if (!string.IsNullOrWhiteSpace(english) && string.IsNullOrWhiteSpace(existing.En))
+                                            {
+                                                existing.En = english; // CSV carries the English too; adopt it if unknown
+                                            }
+                                            existing.Zh = chinese;
+                                            _cache[cacheKey] = existing;
+                                            imported++;
+                                        }
+                                    }
+                                    if (imported > 0)
+                                    {
+                                        _ = PersistCacheAsync();
+                                    }
+                                    return imported;
+                                }
 
         // --- FinalizeAsync Method ---
         // Shared exit point for every successful description fetch: translate it when the
