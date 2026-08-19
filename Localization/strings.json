@@ -765,5 +765,9 @@
       "importTranslations": "Import Translations (CSV)…",
       "importTranslationsTip": "Reads a CSV produced by Export NPC Descriptions and writes its Chinese column into the local description cache. Rows with an empty or unchanged Chinese cell are skipped, so a partially translated sheet is fine. The file must be UTF-8 (Excel: “CSV UTF-8”; WPS: “UTF-8 CSV”).",
       "importPickTitle": "Select a translations CSV",
-      "importDone": "Imported {0} translations from:\n{1}\n\n({2} rows skipped: empty or unchanged Chinese cell)"
-    }
+      "importDone": "Imported {0} translations from:\n{1}\n\n({2} rows skipped: empty or unchanged Chinese cell)",
+        "exportGenderFilter": "Gender:",
+        "exportGenderAny": "Any",
+        "exportGenderMale": "Male",
+        "exportGenderFemale": "Female"
+      }

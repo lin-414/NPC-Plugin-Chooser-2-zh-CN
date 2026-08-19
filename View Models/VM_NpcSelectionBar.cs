@@ -1337,14 +1337,21 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                 // choice, and save back; Import reads that CSV and writes the Chinese column into
                 // the description cache. Rows with an empty or unchanged Chinese cell are skipped.
 
-                /// <summary>Walks every eligible NPC, fetches (caching) its ENGLISH wiki description,
-                /// and writes a translatable CSV. Returns counters for the summary dialog.</summary>
-                public async Task<(int Total, int WithEnglish, int Failed)> ExportDescriptionsCsvAsync(
-                    string outputPath,
-                    IProgress<(int Done, int Total, int WithEnglish, int Failed)>? progress,
-                    CancellationToken ct)
-                {
-                    var eligible = AllNpcs.Where(n => _descriptionProvider.IsEligibleNpc(n.NpcFormKey)).ToList();
+                /// <summary>Walks the eligible NPCs (optionally filtered by gender), fetches (caching)
+                    /// each one's ENGLISH wiki description, and writes a translatable CSV. Returns counters
+                    /// for the summary dialog.</summary>
+                    public async Task<(int Total, int WithEnglish, int Failed)> ExportDescriptionsCsvAsync(
+                        string outputPath,
+                        GenderFilterType genderFilter,
+                        IProgress<(int Done, int Total, int WithEnglish, int Failed)>? progress,
+                        CancellationToken ct)
+                    {
+                        var eligible = AllNpcs
+                            .Where(n => _descriptionProvider.IsEligibleNpc(n.NpcFormKey))
+                            .Where(n => genderFilter == GenderFilterType.Any
+                                || (genderFilter == GenderFilterType.Male && n.NpcData?.Gender == Gender.Male)
+                                || (genderFilter == GenderFilterType.Female && n.NpcData?.Gender == Gender.Female))
+                            .ToList();
                     int total = eligible.Count;
                     int done = 0, withEnglish = 0, failed = 0;
                     var rows = new List<(string Key, string EditorId, string En, string? Zh)>();

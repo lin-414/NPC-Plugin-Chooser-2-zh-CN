@@ -765,5 +765,9 @@
       "importTranslations": "导入翻译（CSV）…",
       "importTranslationsTip": "读取由「导出 NPC 描述」生成的 CSV，并把其中文列写入本地描述缓存。中文列为空或未修改的行会自动跳过，因此翻译一半的表格也可以导入。文件必须是 UTF-8 编码（Excel：CSV UTF-8；WPS：UTF-8 CSV）。",
       "importPickTitle": "选择翻译 CSV 文件",
-      "importDone": "已从以下文件导入 {0} 条翻译：\n{1}\n\n（跳过 {2} 行：中文列为空或未修改）"
-    }
+      "importDone": "已从以下文件导入 {0} 条翻译：\n{1}\n\n（跳过 {2} 行：中文列为空或未修改）",
+        "exportGenderFilter": "性别：",
+        "exportGenderAny": "全部",
+        "exportGenderMale": "男性",
+        "exportGenderFemale": "女性"
+      }

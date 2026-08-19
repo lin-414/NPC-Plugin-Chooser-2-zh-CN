@@ -572,7 +572,12 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
             public ReactiveCommand<Unit, Unit> RestoreSettingsCommand { get; }
             public ReactiveCommand<Unit, Unit> ExportDescriptionsCsvCommand { get; }
             public ReactiveCommand<Unit, Unit> ImportTranslationsCsvCommand { get; }
-            public ReactiveCommand<Unit, Unit> BatchDownloadFaceFinderMugshotsCommand { get; }
+                public ReactiveCommand<Unit, Unit> BatchDownloadFaceFinderMugshotsCommand { get; }
+
+                // --- Manual CSV export: optional gender filter (a full run over every NPC takes a while,
+                // so let the user batch it by gender) ---
+                [Reactive] public GenderFilterType ExportGenderFilter { get; set; } = GenderFilterType.Any;
+                public List<KeyValuePair<GenderFilterType, string>> ExportGenderFilterOptions { get; }
     public ReactiveCommand<Unit, Unit> ShowFullEnvironmentErrorCommand { get; }
     public ReactiveCommand<Unit, Unit> AddIgnoredModCommand { get; }
     public ReactiveCommand<string, Unit> RemoveIgnoredModCommand { get; }
@@ -651,6 +656,13 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
         SectionRejectedNpcs = MakeSection("Rejected NPCs", defaultExpanded: false);
         SectionSpawnBatFile = MakeSection("Spawn Bat File Options", defaultExpanded: false);
         SectionLogging = MakeSection("Logging", defaultExpanded: false);
+
+        ExportGenderFilterOptions = new List<KeyValuePair<GenderFilterType, string>>
+        {
+            new(GenderFilterType.Any, TranslationServiceProvider.GetService()?.GetString("exportGenderAny") ?? "Any"),
+            new(GenderFilterType.Male, TranslationServiceProvider.GetService()?.GetString("exportGenderMale") ?? "Male"),
+            new(GenderFilterType.Female, TranslationServiceProvider.GetService()?.GetString("exportGenderFemale") ?? "Female"),
+        };
 
         // The rejection logs are read only once the user opens the panel — the folder holds one
         // file per mod and can run to tens of thousands of lines, which is not worth paying for
@@ -2888,7 +2900,7 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
                             bool cancelled = false;
                             try
                             {
-                                result = await npcBar.ExportDescriptionsCsvAsync(dialog.FileName, progress, cts.Token).ConfigureAwait(true);
+                                result = await npcBar.ExportDescriptionsCsvAsync(dialog.FileName, ExportGenderFilter, progress, cts.Token).ConfigureAwait(true);
                             }
                             catch (OperationCanceledException)
                             {
