@@ -135,16 +135,25 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                     => !npcFormKey.IsNull &&
                                        (BaseGamePlugins.Contains(npcFormKey.ModKey.FileName) || _overrideDescriptions.ContainsKey(npcFormKey));
 
-                                /// <summary>Whether a zh-CN translation already exists in the cache for this NPC
-                                /// (memory + disk merged at Initialize). Lets the pre-cache batch count completed
-                                /// entries without issuing any network request.</summary>
-                                public bool HasCachedZh(FormKey npcFormKey)
-                                {
-                                    lock (_cacheLock)
-                                    {
-                                        return _cache.TryGetValue(npcFormKey.ToString(), out var entry) &&
-                                               !string.IsNullOrWhiteSpace(entry.Zh);
-                                    }
+                                public bool HasCachedEn(FormKey npcFormKey)
+                                                                {
+                                                                    lock (_cacheLock)
+                                                                    {
+                                                                        return _cache.TryGetValue(npcFormKey.ToString(), out var entry) &&
+                                                                               !string.IsNullOrWhiteSpace(entry.En);
+                                                                    }
+                                                                }
+
+                                                                /// <summary>Whether a zh-CN translation already exists in the cache for this NPC
+                                                                /// (memory + disk merged at Initialize). Lets the pre-cache batch count completed
+                                                                /// entries without issuing any network request.</summary>
+                                                                public bool HasCachedZh(FormKey npcFormKey)
+                                                                {
+                                                                    lock (_cacheLock)
+                                                                    {
+                                                                        return _cache.TryGetValue(npcFormKey.ToString(), out var entry) &&
+                                                                               !string.IsNullOrWhiteSpace(entry.Zh);
+                                                                    }
                                 }
 
         public async Task<string?> GetDescriptionAsync(FormKey npcFormKey, string? displayName, string? editorId, bool forceTranslate = false)
@@ -281,17 +290,17 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                     string? finalDescription = null;
                                                                     bool lastAttemptWasNetwork = true; // default: classify total failure as network if neither site was reached cleanly
 
-                                                                    // --- 3. Try UESP First (max 3 attempts: network failures retry with backoff 2s then 4s) ---
-                                                                                                                                        string uespSearchTerm = $"Skyrim:{searchTermRaw}";
-                                                                                                                                        string encodedUespSearchTerm = WebUtility.UrlEncode(uespSearchTerm);
-                                                                                                                                        Debug.WriteLine($"[DescProvider] Attempting UESP for: \"{uespSearchTerm}\"");
-                                                                                                                                        for (int attempt = 0; attempt < 3 && finalDescription == null; attempt++)
-                                                                                                                                        {
-                                                                                                                                            if (attempt > 0)
-                                                                                                                                            {
-                                                                                                                                                Debug.WriteLine($"[DescProvider] UESP network failure — retrying in {attempt * 2}s (attempt {attempt + 1}/3).");
-                                                                                                                                                await Task.Delay(2000 * attempt).ConfigureAwait(false);
-                                                                                                                                            }
+                                                                    // --- 3. Try UESP First (max 3 attempts: network failures retry with backoff 3s then 10s) ---
+                                                                                                                                                                                                            string uespSearchTerm = $"Skyrim:{searchTermRaw}";
+                                                                                                                                                                                                            string encodedUespSearchTerm = WebUtility.UrlEncode(uespSearchTerm);
+                                                                                                                                                                                                            Debug.WriteLine($"[DescProvider] Attempting UESP for: \"{uespSearchTerm}\"");
+                                                                                                                                                                                                            for (int attempt = 0; attempt < 3 && finalDescription == null; attempt++)
+                                                                                                                                                                                                            {
+                                                                                                                                                                                                                if (attempt > 0)
+                                                                                                                                                                                                                {
+                                                                                                                                                                                                                    Debug.WriteLine($"[DescProvider] UESP network failure — retrying in {(attempt == 1 ? 3 : 10)}s (attempt {attempt + 1}/3).");
+                                                                                                                                                                                                                    await Task.Delay(attempt == 1 ? 3000 : 10000).ConfigureAwait(false);
+                                                                                                                                                                                                                }
                                                                         bool uespBlocked = false; // no point retrying when the query failed, not the network
                                                                         try
                                                                         {
@@ -339,12 +348,12 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                         string encodedFandomSearchTerm = WebUtility.UrlEncode(fandomSearchTerm);
                                                                         Debug.WriteLine($"[DescProvider] UESP failed, Attempting Fandom for: \"{fandomSearchTerm}\"");
                                                                         for (int attempt = 0; attempt < 3 && finalDescription == null; attempt++)
-                                                                                                                                                {
-                                                                                                                                                    if (attempt > 0)
-                                                                                                                                                    {
-                                                                                                                                                        Debug.WriteLine($"[DescProvider] Fandom network failure — retrying in {attempt * 2}s (attempt {attempt + 1}/3).");
-                                                                                                                                                        await Task.Delay(2000 * attempt).ConfigureAwait(false);
-                                                                                                                                                    }
+                                                                                                                                                                                                                        {
+                                                                                                                                                                                                                            if (attempt > 0)
+                                                                                                                                                                                                                            {
+                                                                                                                                                                                                                                Debug.WriteLine($"[DescProvider] Fandom network failure — retrying in {(attempt == 1 ? 3 : 10)}s (attempt {attempt + 1}/3).");
+                                                                                                                                                                                                                                await Task.Delay(attempt == 1 ? 3000 : 10000).ConfigureAwait(false);
+                                                                                                                                                                                                                            }
                                                                             bool fandomBlocked = false;
                                                                             try
                                                                             {

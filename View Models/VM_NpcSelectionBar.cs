@@ -1352,6 +1352,7 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                     IReadOnlyCollection<FormKey>? onlyNpcs,
                     bool mergeWithExistingFile,
                     IProgress<(int Done, int Total, int WithEnglish, int Failed, int NotFound)>? progress,
+                    IProgress<string>? status,
                     CancellationToken ct)
                 {
                     IEnumerable<VM_NpcsMenuSelection> eligible = AllNpcs
@@ -1370,6 +1371,12 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                     var failedKeys = new List<FormKey>();
                     var existingZh = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                     var rows = new List<(string Key, string EditorId, string En, string? Zh)>();
+
+                    // Global per-request pacing + wiki-wide rate-limit pause (see worker body).
+                    long nextRequestTicks = 0;
+                    var rateLock = new object();
+                    int consecutiveNetworkFailures = 0;
+                    int rateLimitPauseActive = 0;
 
                     // Merge previous rounds: rows already in the file stay (carrying any Chinese the
                     // user has already typed into them); this round only ADDS newly-fetched successes,
@@ -1401,8 +1408,9 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                         catch { /* unreadable file: the merged output falls back to this round only */ }
                     }
 
-                    // 2 workers: the wikis rate-limit aggressive bursts; a lower concurrency plus the
-                    // built-in retry keeps the batch alive where 4 workers previously 429'd everything.
+                    // 2 workers, but the request rate is capped GLOBALLY by shared time slots below:
+                    // the wikis throttle per-IP burst rates (UESP returns 429 once a short burst
+                    // window is exceeded) and no per-NPC retry can outlast that once tripped.
                     using var concurrency = new SemaphoreSlim(2, 2);
                     var tasks = eligibleList.Select(async npc =>
                     {
@@ -1410,6 +1418,31 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                         try
                         {
                             ct.ThrowIfCancellationRequested();
+
+                            // Only NPCs that actually need a network fetch pay the pacing cost:
+                            // already-cached descriptions are free (important on retry rounds,
+                            // where most of the list is cached and only the failed few re-fetch).
+                            bool needsFetch = !_descriptionProvider.HasCachedEn(npc.NpcFormKey);
+                            if (needsFetch)
+                            {
+                                // Allocate a monotonically increasing time slot shared by all workers
+                                // so requests go out at most one per interval (2s), which stays under
+                                // the wikis' sustained per-IP limits across a whole batch.
+                                long intervalTicks = TimeSpan.FromMilliseconds(2000).Ticks;
+                                long slot;
+                                lock (rateLock)
+                                {
+                                    long now = DateTime.UtcNow.Ticks;
+                                    slot = Math.Max(now, nextRequestTicks);
+                                    nextRequestTicks = slot + intervalTicks;
+                                }
+                                long waitTicks = slot - DateTime.UtcNow.Ticks;
+                                if (waitTicks > 0)
+                                {
+                                    await Task.Delay(TimeSpan.FromTicks(waitTicks), ct).ConfigureAwait(false);
+                                }
+                            }
+
                             var (en, networkError) = await _descriptionProvider
                                 .GetEnglishDescriptionAsync(npc.NpcFormKey, npc.DisplayName, npc.NpcData?.EditorID)
                                 .ConfigureAwait(false);
@@ -1437,9 +1470,34 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                                     Interlocked.Increment(ref notFound); // nothing on the wikis to find
                                 }
                             }
-                            // Gentle pacing: a short pause per NPC keeps the request rate below the
-                            // wikis' rate-limit windows even though retries now recover most hits.
-                            await Task.Delay(300, ct).ConfigureAwait(false);
+
+                            // Wiki-wide rate-limit pause: several back-to-back transport failures means
+                            // the site is almost certainly 429-ing for a time window (each retry inside
+                            // FetchRawEnglishAsync already burned 3-13s). Pause the whole batch 60s so
+                            // the window passes instead of failing every NPC in the list. Exactly one
+                            // worker runs the pause; the others just time into their next slot.
+                            if (networkError)
+                            {
+                                if (Interlocked.Increment(ref consecutiveNetworkFailures) >= 3 &&
+                                    Interlocked.Exchange(ref rateLimitPauseActive, 1) == 0)
+                                {
+                                    status?.Report(TranslationServiceProvider.GetService()?.GetString("exportRateLimitPause")
+                                        ?? "Rate limited by the wikis — pausing 60 s before continuing...");
+                                    try
+                                    {
+                                        await Task.Delay(TimeSpan.FromSeconds(60), ct).ConfigureAwait(false);
+                                    }
+                                    finally
+                                    {
+                                        Interlocked.Exchange(ref rateLimitPauseActive, 0);
+                                        Interlocked.Exchange(ref consecutiveNetworkFailures, 0);
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                Interlocked.Exchange(ref consecutiveNetworkFailures, 0);
+                            }
                         }
                         finally
                         {

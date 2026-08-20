@@ -2900,22 +2900,23 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
                                     .Subscribe(_ => { try { cts.Cancel(); } catch { /* already disposed */ } });
 
                                 var progress = new Progress<(int Done, int Total, int WithEnglish, int Failed, int NotFound)>(p =>
-                                {
-                                    if (p.Total > 0)
-                                    {
-                                        progressVm.IsIndeterminate = false;
-                                        progressVm.ProgressMaximum = p.Total;
-                                        progressVm.ProgressValue = p.Done;
-                                    }
-                                    progressVm.StatusMessage = string.Format(progressFmt, p.Done, p.Total, p.WithEnglish, p.Failed + p.NotFound);
-                                });
+                                                                {
+                                                                    if (p.Total > 0)
+                                                                    {
+                                                                        progressVm.IsIndeterminate = false;
+                                                                        progressVm.ProgressMaximum = p.Total;
+                                                                        progressVm.ProgressValue = p.Done;
+                                                                    }
+                                                                    progressVm.StatusMessage = string.Format(progressFmt, p.Done, p.Total, p.WithEnglish, p.Failed + p.NotFound);
+                                                                });
+                                                                var status = new Progress<string>(m => progressVm.StatusMessage = m);
 
-                                (int Total, int WithEnglish, int Failed, int NotFound, IReadOnlyList<FormKey> FailedKeys)? result = null;
-                                bool cancelled = false;
-                                try
-                                {
-                                    result = await npcBar.ExportDescriptionsCsvAsync(dialog.FileName, ExportGenderFilter,
-                                        firstRound ? null : failedKeys, !firstRound, progress, cts.Token).ConfigureAwait(true);
+                                                                (int Total, int WithEnglish, int Failed, int NotFound, IReadOnlyList<FormKey> FailedKeys)? result = null;
+                                                                bool cancelled = false;
+                                                                try
+                                                                {
+                                                                    result = await npcBar.ExportDescriptionsCsvAsync(dialog.FileName, ExportGenderFilter,
+                                                                        firstRound ? null : failedKeys, !firstRound, progress, status, cts.Token).ConfigureAwait(true);
                                 }
                                 catch (OperationCanceledException)
                                 {
