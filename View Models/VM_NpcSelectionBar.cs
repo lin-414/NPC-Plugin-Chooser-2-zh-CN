@@ -1528,6 +1528,33 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                     }
                     // UTF-8 with BOM so Excel/WPS open Chinese (and any CJK the user adds) correctly.
                     await File.WriteAllTextAsync(outputPath, sb.ToString(), new UTF8Encoding(true)).ConfigureAwait(false);
+                    // Write a diagnostic file listing every NPC that failed, so the user can
+                    // see which specific NPCs are consistently hitting network errors (and thus
+                    // whether they share a pattern — same mod, same EditorID prefix, etc.).
+                    if (failedKeys.Count > 0)
+                    {
+                        try
+                        {
+                            var failDir = Path.GetDirectoryName(outputPath) ?? ".";
+                            var failPath = Path.Combine(failDir,
+                                Path.GetFileNameWithoutExtension(outputPath) + ".failed.csv");
+                            var failSb = new StringBuilder();
+                            failSb.AppendLine("FormKey,EditorID,DisplayName");
+                            var failSet = new HashSet<FormKey>(failedKeys);
+                            foreach (var n in eligibleList)
+                            {
+                                if (failSet.Contains(n.NpcFormKey))
+                                {
+                                    failSb.Append(CsvField(n.NpcFormKey.ToString())).Append(',')
+                                          .Append(CsvField(n.NpcEditorId)).Append(',')
+                                          .Append(CsvField(n.DisplayName)).AppendLine();
+                                }
+                            }
+                            File.WriteAllText(failPath, failSb.ToString());
+                        }
+                        catch { /* diagnostic file is best-effort */ }
+                    }
+
                     return (total, withEnglish, failed, notFound, failedKeys);
                 }
 
