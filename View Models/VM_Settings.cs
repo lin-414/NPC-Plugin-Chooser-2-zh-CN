@@ -2867,66 +2867,98 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
                             };
                             if (dialog.ShowDialog() != true) return;
 
-                            var progressVm = new VM_ProgressWindow
-                            {
-                                Title = TranslationServiceProvider.GetService()?.GetString("exportDescriptions") ?? "Export NPC Descriptions (CSV)",
-                                StatusMessage = TranslationServiceProvider.GetService()?.GetString("preCachePreparing") ?? "Preparing...",
-                                IsIndeterminate = true,
-                                ProgressMaximum = 1
-                            };
-                            var progressWindow = new ProgressWindow { ViewModel = progressVm };
-                            TrySetOwner(progressWindow);
-                            progressWindow.Show();
-
-                            using var cts = new CancellationTokenSource();
-                            using var cancelSub = progressVm.WhenAnyValue(x => x.IsCancellationRequested)
-                                .Where(requested => requested)
-                                .Subscribe(_ => { try { cts.Cancel(); } catch { /* already disposed */ } });
-
+                            string exportTitle = TranslationServiceProvider.GetService()?.GetString("exportDescriptions") ?? "Export NPC Descriptions (CSV)";
                             string progressFmt = TranslationServiceProvider.GetService()?.GetString("exportProgress")
                                                         ?? "Fetching descriptions: {0}/{1} · with English {2} · failed {3}";
-                                                    var progress = new Progress<(int Done, int Total, int WithEnglish, int Failed, int NotFound)>(p =>
-                                                    {
-                                                        if (p.Total > 0)
-                                                        {
-                                                            progressVm.IsIndeterminate = false;
-                                                            progressVm.ProgressMaximum = p.Total;
-                                                            progressVm.ProgressValue = p.Done;
-                                                        }
-                                                        progressVm.StatusMessage = string.Format(progressFmt, p.Done, p.Total, p.WithEnglish, p.Failed + p.NotFound);
-                                                    });
+                            string doneFmt = TranslationServiceProvider.GetService()?.GetString("exportDone")
+                                                        ?? "Descriptions exported to:\n{0}\n\n{1} NPCs total · {2} with English text · {3} failed (network — retry later) · {4} not found on the wikis.\n\nTranslate the Chinese column offline, then use Import Translations to write your translations back.";
+                            string retryPrompt = TranslationServiceProvider.GetService()?.GetString("exportRetryPrompt")
+                                                        ?? "Retry the {0} NPCs that failed due to network issues now?";
 
-                                                    (int Total, int WithEnglish, int Failed, int NotFound)? result = null;
-                            bool cancelled = false;
-                            try
+                            // Retry loop: when a round has network failures, offer to re-run ONLY those
+                            // NPCs immediately — successes and not-found stay cached/skipped, and the
+                            // new successes are merged back into the same CSV file.
+                            var failedKeys = new List<FormKey>();
+                            bool firstRound = true;
+                            bool finished = false;
+                            while (!finished)
                             {
-                                result = await npcBar.ExportDescriptionsCsvAsync(dialog.FileName, ExportGenderFilter, progress, cts.Token).ConfigureAwait(true);
-                            }
-                            catch (OperationCanceledException)
-                            {
-                                cancelled = true; // nothing written yet — the method only writes after all rows are fetched
-                            }
-                            catch (Exception ex)
-                            {
-                                progressWindow.Close();
-                                progressVm.Dispose();
-                                ScrollableMessageBox.ShowError(
-                                    "Export failed: " + ExceptionLogger.GetExceptionStack(ex),
-                                    TranslationServiceProvider.GetService()?.GetString("exportDescriptions") ?? "Export NPC Descriptions (CSV)");
-                                return;
-                            }
+                                var progressVm = new VM_ProgressWindow
+                                {
+                                    Title = exportTitle,
+                                    StatusMessage = TranslationServiceProvider.GetService()?.GetString("preCachePreparing") ?? "Preparing...",
+                                    IsIndeterminate = true,
+                                    ProgressMaximum = 1
+                                };
+                                var progressWindow = new ProgressWindow { ViewModel = progressVm };
+                                TrySetOwner(progressWindow);
+                                progressWindow.Show();
 
-                            progressWindow.Close();
-                            progressVm.Dispose();
-                            if (cancelled || result == null) return;
+                                using var cts = new CancellationTokenSource();
+                                using var cancelSub = progressVm.WhenAnyValue(x => x.IsCancellationRequested)
+                                    .Where(requested => requested)
+                                    .Subscribe(_ => { try { cts.Cancel(); } catch { /* already disposed */ } });
 
-                            string doneMsg = string.Format(
-                                                        TranslationServiceProvider.GetService()?.GetString("exportDone")
-                                                        ?? "Descriptions exported to:\n{0}\n\n{1} NPCs total · {2} with English text · {3} failed (network — retry later) · {4} not found on the wikis.\n\nTranslate the Chinese column offline, then use Import Translations to write your translations back.",
-                                                        dialog.FileName, result.Value.Total, result.Value.WithEnglish, result.Value.Failed, result.Value.NotFound);
-                            MessageBox.Show(doneMsg,
-                                TranslationServiceProvider.GetService()?.GetString("exportDescriptions") ?? "Export NPC Descriptions (CSV)",
-                                MessageBoxButton.OK, MessageBoxImage.Information);
+                                var progress = new Progress<(int Done, int Total, int WithEnglish, int Failed, int NotFound)>(p =>
+                                {
+                                    if (p.Total > 0)
+                                    {
+                                        progressVm.IsIndeterminate = false;
+                                        progressVm.ProgressMaximum = p.Total;
+                                        progressVm.ProgressValue = p.Done;
+                                    }
+                                    progressVm.StatusMessage = string.Format(progressFmt, p.Done, p.Total, p.WithEnglish, p.Failed + p.NotFound);
+                                });
+
+                                (int Total, int WithEnglish, int Failed, int NotFound, IReadOnlyList<FormKey> FailedKeys)? result = null;
+                                bool cancelled = false;
+                                try
+                                {
+                                    result = await npcBar.ExportDescriptionsCsvAsync(dialog.FileName, ExportGenderFilter,
+                                        firstRound ? null : failedKeys, !firstRound, progress, cts.Token).ConfigureAwait(true);
+                                }
+                                catch (OperationCanceledException)
+                                {
+                                    cancelled = true; // user pressed Cancel — nothing has been written
+                                }
+                                catch (Exception ex)
+                                {
+                                    progressWindow.Close();
+                                    progressVm.Dispose();
+                                    ScrollableMessageBox.ShowError(
+                                        $"Description fetch failed:\n{ex.Message}",
+                                        exportTitle);
+                                    return;
+                                }
+                                finally
+                                {
+                                    progressWindow.Close();
+                                    progressVm.Dispose();
+                                }
+
+                                if (cancelled || result == null) return;
+                                var res = result.Value;
+
+                                if (res.Failed == 0)
+                                {
+                                    // Every NPC either got English text or was cleanly "not found".
+                                    string doneMsg = string.Format(doneFmt, dialog.FileName, res.Total, res.WithEnglish, res.Failed, res.NotFound);
+                                    MessageBox.Show(doneMsg, exportTitle, MessageBoxButton.OK, MessageBoxImage.Information);
+                                    finished = true;
+                                    continue;
+                                }
+
+                                // Some NPCs hit transient network errors — offer to retry just those right away.
+                                string askMsg = string.Format(doneFmt, dialog.FileName, res.Total, res.WithEnglish, res.Failed, res.NotFound)
+                                    + "\n\n" + string.Format(retryPrompt, res.Failed);
+                                if (MessageBox.Show(askMsg, exportTitle, MessageBoxButton.YesNo, MessageBoxImage.Question) != MessageBoxResult.Yes)
+                                {
+                                    finished = true;
+                                    continue;
+                                }
+                                failedKeys = new List<FormKey>(res.FailedKeys);
+                                firstRound = false;
+                            }
                         }
 
                         private async Task ImportTranslationsCsvAsync()

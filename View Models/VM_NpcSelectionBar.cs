@@ -1338,67 +1338,117 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                 // the description cache. Rows with an empty or unchanged Chinese cell are skipped.
 
                 /// <summary>Walks the eligible NPCs (optionally filtered by gender), fetches (caching)
-                    /// each one's ENGLISH wiki description, and writes a translatable CSV. Returns counters
-                    /// for the summary dialog: Failed = network-level failures (worth retrying later),
-                    /// NotFound = the wikis have no matching page (retrying won't help).</summary>
-                    public async Task<(int Total, int WithEnglish, int Failed, int NotFound)> ExportDescriptionsCsvAsync(
-                        string outputPath,
-                        GenderFilterType genderFilter,
-                        IProgress<(int Done, int Total, int WithEnglish, int Failed, int NotFound)>? progress,
-                        CancellationToken ct)
+                /// each one's ENGLISH wiki description, and writes a translatable CSV. When
+                /// <paramref name="onlyNpcs"/> is non-null (a retry round) only those NPCs are
+                /// processed; mergeWithExistingFile keeps rows already in the file (including any
+                /// Chinese the user has typed) and merges this round's new successes in, so a retry
+                /// round never loses earlier data. Returns counters for the summary dialog:
+                /// Failed = network-level failures (worth retrying later), NotFound = the wikis have
+                /// no matching page (retrying won't help), FailedKeys = the exact NPCs to feed back
+                /// into a retry round.</summary>
+                public async Task<(int Total, int WithEnglish, int Failed, int NotFound, IReadOnlyList<FormKey> FailedKeys)> ExportDescriptionsCsvAsync(
+                    string outputPath,
+                    GenderFilterType genderFilter,
+                    IReadOnlyCollection<FormKey>? onlyNpcs,
+                    bool mergeWithExistingFile,
+                    IProgress<(int Done, int Total, int WithEnglish, int Failed, int NotFound)>? progress,
+                    CancellationToken ct)
+                {
+                    IEnumerable<VM_NpcsMenuSelection> eligible = AllNpcs
+                        .Where(n => _descriptionProvider.IsEligibleNpc(n.NpcFormKey))
+                        .Where(n => genderFilter == GenderFilterType.Any
+                            || (genderFilter == GenderFilterType.Male && n.NpcData?.Gender == Gender.Male)
+                            || (genderFilter == GenderFilterType.Female && n.NpcData?.Gender == Gender.Female));
+                    if (onlyNpcs != null)
                     {
-                        var eligible = AllNpcs
-                            .Where(n => _descriptionProvider.IsEligibleNpc(n.NpcFormKey))
-                            .Where(n => genderFilter == GenderFilterType.Any
-                                || (genderFilter == GenderFilterType.Male && n.NpcData?.Gender == Gender.Male)
-                                || (genderFilter == GenderFilterType.Female && n.NpcData?.Gender == Gender.Female))
-                            .ToList();
-                            int total = eligible.Count;
-                            int done = 0, withEnglish = 0, failed = 0, notFound = 0;
-                            var rows = new List<(string Key, string EditorId, string En, string? Zh)>();
+                        var only = new HashSet<FormKey>(onlyNpcs);
+                        eligible = eligible.Where(n => only.Contains(n.NpcFormKey));
+                    }
+                    var eligibleList = eligible.ToList();
+                    int total = eligibleList.Count;
+                    int done = 0, withEnglish = 0, failed = 0, notFound = 0;
+                    var failedKeys = new List<FormKey>();
+                    var existingZh = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    var rows = new List<(string Key, string EditorId, string En, string? Zh)>();
 
-                            // 2 workers: the wikis rate-limit aggressive bursts; a lower concurrency plus the
-                            // built-in retry keeps the batch alive where 4 workers previously 429'd everything.
-                            using var concurrency = new SemaphoreSlim(2, 2);
-                            var tasks = eligible.Select(async npc =>
+                    // Merge previous rounds: rows already in the file stay (carrying any Chinese the
+                    // user has already typed into them); this round only ADDS newly-fetched successes,
+                    // so a retry round keeps the file complete without re-fetching known-good NPCs.
+                    if (mergeWithExistingFile && File.Exists(outputPath))
+                    {
+                        try
+                        {
+                            bool firstDataRow = true;
+                            foreach (var cols in ParseCsvRows(File.ReadAllText(outputPath)))
                             {
-                                await concurrency.WaitAsync(ct).ConfigureAwait(false);
-                                try
+                                if (firstDataRow && cols.Length > 0 && string.Equals(cols[0].Trim(), "FormKey", StringComparison.OrdinalIgnoreCase))
                                 {
-                                    ct.ThrowIfCancellationRequested();
-                                    var (en, networkError) = await _descriptionProvider
-                                        .GetEnglishDescriptionAsync(npc.NpcFormKey, npc.DisplayName, npc.NpcData?.EditorID)
-                                        .ConfigureAwait(false);
-                                    lock (rows)
+                                    firstDataRow = false;
+                                    continue;
+                                }
+                                firstDataRow = false;
+                                if (cols.Length >= 4)
+                                {
+                                    string key = cols[0].Trim();
+                                    if (!string.IsNullOrEmpty(key))
                                     {
-                                        if (!string.IsNullOrWhiteSpace(en))
-                                        {
-                                            // Chinese column deliberately left EMPTY: the user translates
-                                            // it offline (auto-translation quality is not worth pre-filling).
-                                            rows.Add((npc.NpcFormKey.ToString(), npc.NpcEditorId, en, null));
-                                            Interlocked.Increment(ref withEnglish);
-                                        }
-                                        else if (networkError)
-                                        {
-                                            Interlocked.Increment(ref failed); // transient — retry later
-                                        }
-                                        else
-                                        {
-                                            Interlocked.Increment(ref notFound); // nothing on the wikis to find
-                                        }
+                                        existingZh[key] = cols[3];
+                                        rows.Add((key, cols[1], cols[2], cols[3]));
                                     }
-                                    // Gentle pacing: a short pause per NPC keeps the request rate below the
-                                    // wikis' rate-limit windows even though retries now recover most hits.
-                                    await Task.Delay(300, ct).ConfigureAwait(false);
                                 }
-                                finally
+                            }
+                        }
+                        catch { /* unreadable file: the merged output falls back to this round only */ }
+                    }
+
+                    // 2 workers: the wikis rate-limit aggressive bursts; a lower concurrency plus the
+                    // built-in retry keeps the batch alive where 4 workers previously 429'd everything.
+                    using var concurrency = new SemaphoreSlim(2, 2);
+                    var tasks = eligibleList.Select(async npc =>
+                    {
+                        await concurrency.WaitAsync(ct).ConfigureAwait(false);
+                        try
+                        {
+                            ct.ThrowIfCancellationRequested();
+                            var (en, networkError) = await _descriptionProvider
+                                .GetEnglishDescriptionAsync(npc.NpcFormKey, npc.DisplayName, npc.NpcData?.EditorID)
+                                .ConfigureAwait(false);
+                            lock (rows)
+                            {
+                                if (!string.IsNullOrWhiteSpace(en))
                                 {
-                                    concurrency.Release();
-                                    int d = Interlocked.Increment(ref done);
-                                    progress?.Report((d, total,
-                                        Volatile.Read(ref withEnglish), Volatile.Read(ref failed), Volatile.Read(ref notFound)));
+                                    string key = npc.NpcFormKey.ToString();
+                                    // Already in the file from a previous round? Keep it as-is (its Chinese
+                                    // column may already be typed); otherwise add a fresh row (blank Chinese).
+                                    if (!existingZh.ContainsKey(key))
+                                    {
+                                        rows.Add((key, npc.NpcEditorId, en, null));
+                                        existingZh[key] = null;
+                                    }
+                                    Interlocked.Increment(ref withEnglish);
                                 }
-                            });
+                                else if (networkError)
+                                {
+                                    Interlocked.Increment(ref failed); // transient — retry later
+                                    failedKeys.Add(npc.NpcFormKey);
+                                }
+                                else
+                                {
+                                    Interlocked.Increment(ref notFound); // nothing on the wikis to find
+                                }
+                            }
+                            // Gentle pacing: a short pause per NPC keeps the request rate below the
+                            // wikis' rate-limit windows even though retries now recover most hits.
+                            await Task.Delay(300, ct).ConfigureAwait(false);
+                        }
+                        finally
+                        {
+                            concurrency.Release();
+                            int d = Interlocked.Increment(ref done);
+                            progress?.Report((d, total,
+                                Volatile.Read(ref withEnglish), Volatile.Read(ref failed), Volatile.Read(ref notFound)));
+                        }
+                    });
 
                     try
                     {
@@ -1419,12 +1469,11 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                           .Append(CsvField(zh ?? string.Empty)).AppendLine();
                     }
                     // UTF-8 with BOM so Excel/WPS open Chinese (and any CJK the user adds) correctly.
-                            await File.WriteAllTextAsync(outputPath, sb.ToString(), new UTF8Encoding(true)).ConfigureAwait(false);
-                            return (total, withEnglish, failed, notFound);
+                    await File.WriteAllTextAsync(outputPath, sb.ToString(), new UTF8Encoding(true)).ConfigureAwait(false);
+                    return (total, withEnglish, failed, notFound, failedKeys);
                 }
 
-                /// <summary>Parses an exported/edited CSV and pushes the Chinese column into the description
-                /// cache. Synchronous (local parse + cache write, no network). Returns import counters.</summary>
+
                 public (int Imported, int Skipped) ImportTranslationsCsv(string inputPath)
                 {
                     string text;
@@ -1510,7 +1559,7 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                     {
                         return "\"" + value.Replace("\"", "\"\"") + "\"";
                     }
-                    return value.ToString();
+                    return value;
                 }
 
                 private static List<string[]> ParseCsvRows(string text)

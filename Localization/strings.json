@@ -762,6 +762,7 @@
       "exportPickTitle": "Save descriptions CSV as…",
       "exportProgress": "Fetching descriptions: {0}/{1} · with English {2} · failed {3}",
       "exportDone": "Descriptions exported to:\n{0}\n\n{1} NPCs total · {2} with English text · {3} failed (network — retry later) · {4} not found on the wikis.\n\nTranslate the Chinese column offline, then use Import Translations to write your translations back.",
+      "exportRetryPrompt": "Retry the {0} NPCs that failed due to network issues now?",
       "importTranslations": "Import Translations (CSV)…",
       "importTranslationsTip": "Reads a CSV produced by Export NPC Descriptions and writes its Chinese column into the local description cache. Rows with an empty or unchanged Chinese cell are skipped, so a partially translated sheet is fine. The file must be UTF-8 (Excel: “CSV UTF-8”; WPS: “UTF-8 CSV”).",
       "importPickTitle": "Select a translations CSV",
