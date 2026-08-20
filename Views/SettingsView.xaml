@@ -1623,53 +1623,7 @@
                                                                                                       Margin="10,0,0,0"/>
                                                                                         </StackPanel>
 
-                                                                                        <!-- Pre-translate descriptions to cache -->
-                                                                                                                                                                                <Button Content="{l:Loc preCacheDescriptions}"
-                                                                                                                                                                                        Command="{Binding PreCacheDescriptionsCommand}"
-                                                                                                                                                                                        HorizontalAlignment="Left"
-                                                                                                                                                                                        Margin="0,8,0,0"
-                                                                                                                                                                                        Padding="8,3"
-                                                                                                                                                                                        ToolTip="{l:Loc preCacheDescriptionsTip}"/>
 
-                                                                                                                                                                                <!-- Backup / restore Settings.json -->
-                                                                                                                                                                                                                                                                        <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-                                                                                                                                                                                                                                                                            <Button Content="{l:Loc backupSettings}"
-                                                                                                                                                                                                                                                                                    Command="{Binding BackupSettingsCommand}"
-                                                                                                                                                                                                                                                                                    HorizontalAlignment="Left"
-                                                                                                                                                                                                                                                                                    Padding="8,3"
-                                                                                                                                                                                                                                                                                    ToolTip="{l:Loc backupSettingsTip}"/>
-                                                                                                                                                                                                                                                                            <Button Content="{l:Loc restoreSettings}"
-                                                                                                                                                                                                                                                                                    Command="{Binding RestoreSettingsCommand}"
-                                                                                                                                                                                                                                                                                    HorizontalAlignment="Left"
-                                                                                                                                                                                                                                                                                    Margin="8,0,0,0"
-                                                                                                                                                                                                                                                                                    Padding="8,3"
-                                                                                                                                                                                                                                                                                    ToolTip="{l:Loc restoreSettingsTip}"/>
-                                                                                                                                                                                                                                                                        </StackPanel>
-
-                                                                                                                                                                                                                                                                        <!-- Manual translation: CSV export / import -->
-                                                                                                                                                                                                                                                                                                                                                                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-                                                                                                                                                                                                                                                                                                                                                                    <TextBlock Text="{l:Loc exportGenderFilter}"
-                                                                                                                                                                                                                                                                                                                                                                               VerticalAlignment="Center"/>
-                                                                                                                                                                                                                                                                                                                                                                    <ComboBox ItemsSource="{Binding ExportGenderFilterOptions}"
-                                                                                                                                                                                                                                                                                                                                                                              SelectedValuePath="Key"
-                                                                                                                                                                                                                                                                                                                                                                              DisplayMemberPath="Value"
-                                                                                                                                                                                                                                                                                                                                                                              SelectedValue="{Binding ExportGenderFilter, Mode=TwoWay}"
-                                                                                                                                                                                                                                                                                                                                                                              MinWidth="90"
-                                                                                                                                                                                                                                                                                                                                                                              Margin="8,0,0,0"
-                                                                                                                                                                                                                                                                                                                                                                              VerticalAlignment="Center"/>
-                                                                                                                                                                                                                                                                                                                                                                    <Button Content="{l:Loc exportDescriptions}"
-                                                                                                                                                                                                                                                                                                                                                                            Command="{Binding ExportDescriptionsCsvCommand}"
-                                                                                                                                                                                                                                                                                                                                                                            HorizontalAlignment="Left"
-                                                                                                                                                                                                                                                                                                                                                                            Margin="8,0,0,0"
-                                                                                                                                                                                                                                                                                                                                                                            Padding="8,3"
-                                                                                                                                                                                                                                                                                                                                                                            ToolTip="{l:Loc exportDescriptionsTip}"/>
-                                                                                                                                                                                                                                                                                                                                                                    <Button Content="{l:Loc importTranslations}"
-                                                                                                                                                                                                                                                                                                                                                                            Command="{Binding ImportTranslationsCsvCommand}"
-                                                                                                                                                                                                                                                                                                                                                                            HorizontalAlignment="Left"
-                                                                                                                                                                                                                                                                                                                                                                            Margin="8,0,0,0"
-                                                                                                                                                                                                                                                                                                                                                                            Padding="8,3"
-                                                                                                                                                                                                                                                                                                                                                                            ToolTip="{l:Loc importTranslationsTip}"/>
-                                                                                                                                                                                                                                                                                                                                                                </StackPanel>
                     
                     <CheckBox Content="{l:Loc donTShowMe}"
                               IsChecked="{Binding SuppressPopupWarnings, Mode=TwoWay}"
@@ -1691,6 +1645,60 @@
                                   Visibility="{Binding ShowTemplateStatusInList, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                         <TextBlock Text="{l:Loc separator}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                         <TextBox Text="{Binding NpcListSeparator, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="30" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </StackPanel>
+            </Expander>
+
+            <!-- Section: Other Settings -->
+            <Expander Header="{l:Loc otherSettings}" Style="{StaticResource SettingsSectionExpander}"
+                      IsExpanded="{Binding SectionOtherSettings.IsExpanded, Mode=TwoWay}">
+                <StackPanel>
+                    <!-- Pre-translate descriptions to cache -->
+                    <Button Content="{l:Loc preCacheDescriptions}"
+                            Command="{Binding PreCacheDescriptionsCommand}"
+                            HorizontalAlignment="Left"
+                            Margin="0,8,0,0"
+                            Padding="8,3"
+                            ToolTip="{l:Loc preCacheDescriptionsTip}"/>
+
+                    <!-- Backup / restore Settings.json -->
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <Button Content="{l:Loc backupSettings}"
+                                Command="{Binding BackupSettingsCommand}"
+                                HorizontalAlignment="Left"
+                                Padding="8,3"
+                                ToolTip="{l:Loc backupSettingsTip}"/>
+                        <Button Content="{l:Loc restoreSettings}"
+                                Command="{Binding RestoreSettingsCommand}"
+                                HorizontalAlignment="Left"
+                                Margin="8,0,0,0"
+                                Padding="8,3"
+                                ToolTip="{l:Loc restoreSettingsTip}"/>
+                    </StackPanel>
+
+                    <!-- Manual translation: CSV export / import -->
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <TextBlock Text="{l:Loc exportGenderFilter}"
+                                   VerticalAlignment="Center"/>
+                        <ComboBox ItemsSource="{Binding ExportGenderFilterOptions}"
+                                  SelectedValuePath="Key"
+                                  DisplayMemberPath="Value"
+                                  SelectedValue="{Binding ExportGenderFilter, Mode=TwoWay}"
+                                  MinWidth="90"
+                                  Margin="8,0,0,0"
+                                  VerticalAlignment="Center"/>
+                        <Button Content="{l:Loc exportDescriptions}"
+                                Command="{Binding ExportDescriptionsCsvCommand}"
+                                HorizontalAlignment="Left"
+                                Margin="8,0,0,0"
+                                Padding="8,3"
+                                ToolTip="{l:Loc exportDescriptionsTip}"/>
+                        <Button Content="{l:Loc importTranslations}"
+                                Command="{Binding ImportTranslationsCsvCommand}"
+                                HorizontalAlignment="Left"
+                                Margin="8,0,0,0"
+                                Padding="8,3"
+                                ToolTip="{l:Loc importTranslationsTip}"/>
                     </StackPanel>
                 </StackPanel>
             </Expander>

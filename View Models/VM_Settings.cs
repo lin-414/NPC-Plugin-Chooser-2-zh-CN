@@ -527,6 +527,7 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
     public VM_SettingsSection SectionMugshotSettings { get; }
     public VM_SettingsSection SectionFaceGenAnalysis { get; }
     public VM_SettingsSection SectionDisplaySettings { get; }
+    public VM_SettingsSection SectionOtherSettings { get; }
     public VM_SettingsSection SectionEasyNpcTransfer { get; }
     public VM_SettingsSection SectionLoadOrderImport { get; }
     public VM_SettingsSection SectionModImport { get; }
@@ -650,6 +651,7 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
         SectionMugshotSettings = MakeSection("Mugshot Settings", defaultExpanded: false);
         SectionFaceGenAnalysis = MakeSection("FaceGen Analysis", defaultExpanded: false);
         SectionDisplaySettings = MakeSection("Display Settings", defaultExpanded: false);
+        SectionOtherSettings = MakeSection("Other Settings", defaultExpanded: false);
         SectionEasyNpcTransfer = MakeSection("EasyNPC Transfer", defaultExpanded: false);
         SectionLoadOrderImport = MakeSection("Load Order Import Settings", defaultExpanded: false);
         SectionModImport = MakeSection("Mod Import Settings", defaultExpanded: false);
