@@ -264,14 +264,30 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                         Stopwatch sw = Stopwatch.StartNew();
 
                                                 // --- 3+4. Try UESP, then Fandom, with keyword validation (shared with the CSV export path) ---
-                                                                                                var rawResult = await FetchRawEnglishAsync(searchTermRaw, searchKeywords);
+                                                                                                (string? Description, bool NetworkError) rawResult;
+                                                                                                
+                                                                                                // Try the primary term first (EditorID with CamelCase split).
+                                                                                                rawResult = await FetchRawEnglishAsync(searchTermRaw, searchKeywords);
                                                                                                 sw.Stop();
+                                                                                                
+                                                                                                // If the primary term found nothing, try fallback search terms that strip
+                                                                                                // gameplay prefixes (e.g. "DA01AzuraVoice" -> "AzuraVoice", "Azura").
+                                                                                                if (rawResult.Description is null && !rawResult.NetworkError)
+                                                                                                {
+                                                                                                    foreach (string fbTerm in DeriveSearchTermFallbacks(editorSearchTerm, displaySearchTerm, displayNameIsAscii))
+                                                                                                    {
+                                                                                                        if (string.IsNullOrWhiteSpace(fbTerm) || fbTerm == searchTermRaw) continue;
+                                                                                                        Debug.WriteLine($"[DescProvider] Primary term '{searchTermRaw}' failed, trying fallback '{fbTerm}' for {editorId}.");
+                                                                                                        rawResult = await FetchRawEnglishAsync(fbTerm, searchKeywords);
+                                                                                                        if (rawResult.Description is not null || rawResult.NetworkError) break;
+                                                                                                    }
+                                                                                                }
+                                                                                                
                                                                                                 if (rawResult.Description != null)
                                                                                                 {
                                                                                                     Debug.WriteLine($"[DescProvider] Raw English fetched for '{searchTermRaw}' ({sw.ElapsedMilliseconds}ms). Finalizing.");
                                                                                                     return await FinalizeAsync(cacheKey, rawResult.Description, forceTranslate);
                                                                                                 }
-
                                                 Debug.WriteLine($"[DescProvider] No valid description found for '{searchTermRaw}' after trying both sites.");
                                                 return null;
                                 }
@@ -284,6 +300,73 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                 // reports differently. Both sites get one retry after a 2s pause, since the
                                                                 // wikis rate-limit bursts and a single transient failure currently marks ~all
                                                                 // NPCs in a batch as failed.
+        // --- DeriveSearchTermFallbacks: when the primary EditorID search fails,
+        // try derived search terms. Skyrim EditorIDs encode gameplay prefixes and
+        // role descriptors that do not match wiki page titles:
+        //   "DA01AzuraVoice" -> try "AzuraVoice", "Azura"
+        //   "MS14LaeletteVampire" -> try "LaeletteVampire", "Laelette"
+        //   "DLC2Frea" -> try "Frea"
+        //   "DB02Captive2" -> try "Captive" (may still fail, but worth a shot)
+        //   "EncVampire03BretonF" -> try "EncVampire" (likely fails)
+        private static IEnumerable<string> DeriveSearchTermFallbacks(string editorSearchTerm, string? displaySearchTerm, bool displayNameIsAscii)
+        {
+            // 1. Strip known gameplay prefixes (letters+digits at the start) from the EditorID.
+            //    "DA01AzuraVoice" -> "AzuraVoice"; "MS14LaeletteVampire" -> "LaeletteVampire"
+            string? stripped = Regex.Replace(editorSearchTerm, @"^[A-Z]+[0-9]+", "");
+            if (!string.IsNullOrWhiteSpace(stripped) && stripped != editorSearchTerm)
+            {
+                yield return SplitCamelCase(stripped);
+            }
+
+            // 2. Also try just the FIRST CamelCase word after stripping (often the core name).
+            //    "AzuraVoice" -> "Azura"; "LaeletteVampire" -> "Laelette"
+            if (stripped != null)
+            {
+                string[] words = SplitCamelCase(stripped).Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (words.Length >= 2)
+                {
+                    string firstWord = words[0];
+                    if (!IgnoredWords.Contains(firstWord) && firstWord.Length >= 3)
+                    {
+                        yield return firstWord;
+                    }
+                }
+            }
+
+            // 3. Fallback to display name if it is ASCII (English) and different from the EditorID.
+            //    When the game is Chinese-localized the display name is Chinese (not ASCII),
+            //    so this branch only fires for non-localized installs.
+            if (displayNameIsAscii && displaySearchTerm != null && displaySearchTerm != editorSearchTerm)
+            {
+                yield return displaySearchTerm;
+            }
+        }
+
+        // --- SearchFallbackTerms: returns all terms to try for a given NPC, starting with the
+        // primary EditorID-derived term and then each fallback in order.
+        private static IEnumerable<string> GetSearchTerms(string? displayName, string? editorId)
+        {
+            string? displaySearchTerm = !string.IsNullOrWhiteSpace(displayName) ? displayName.Split('[')[0].Trim() : null;
+            string? editorSearchTerm = !string.IsNullOrWhiteSpace(editorId) ? editorId.Split('[')[0].Trim() : null;
+            bool displayNameIsAscii = displaySearchTerm != null && displaySearchTerm.All(ch => ch <= 127);
+
+            string? primaryTerm = displayNameIsAscii ? displaySearchTerm
+                : editorSearchTerm != null ? SplitCamelCase(editorSearchTerm)
+                : displaySearchTerm;
+            if (!string.IsNullOrWhiteSpace(primaryTerm))
+            {
+                yield return primaryTerm;
+            }
+
+            if (editorSearchTerm != null)
+            {
+                foreach (string fb in DeriveSearchTermFallbacks(editorSearchTerm, displaySearchTerm, displayNameIsAscii))
+                {
+                    yield return fb;
+                }
+            }
+        }
+
                                                                 private async Task<(string? Description, bool NetworkError)> FetchRawEnglishAsync(string searchTermRaw, HashSet<string> searchKeywords)
                                                                 {
                                                                     Stopwatch sw = Stopwatch.StartNew();
@@ -484,11 +567,28 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                     }
                                                                     if (!searchKeywords.Any()) return (null, false);
 
-                                                                    var rawResult = await FetchRawEnglishAsync(searchTermRaw, searchKeywords);
+                                                                    (string? Description, bool NetworkError) rawResult;
+
+                                                                    // Try the primary term first (EditorID with CamelCase split).
+                                                                    rawResult = await FetchRawEnglishAsync(searchTermRaw, searchKeywords);
+
+                                                                    // If the primary term found nothing (not a network error), try
+                                                                    // fallback search terms that strip gameplay prefixes from the EditorID.
+                                                                    // e.g. "DA01AzuraVoice" -> try "AzuraVoice", "Azura"
+                                                                    if (rawResult.Description is null && !rawResult.NetworkError)
+                                                                    {
+                                                                        foreach (string fbTerm in DeriveSearchTermFallbacks(editorSearchTerm, displaySearchTerm, displayNameIsAscii))
+                                                                        {
+                                                                            if (string.IsNullOrWhiteSpace(fbTerm) || fbTerm == searchTermRaw) continue;
+                                                                            Debug.WriteLine($"[DescProvider] Primary term '{searchTermRaw}' failed, trying fallback '{fbTerm}' for {editorId}.");
+                                                                            rawResult = await FetchRawEnglishAsync(fbTerm, searchKeywords);
+                                                                            if (rawResult.Description is not null || rawResult.NetworkError) break;
+                                                                        }
+                                                                    }
 
                                                                     if (!string.IsNullOrWhiteSpace(rawResult.Description))
                                                                     {
-                                                                        // Cache the English text (never overwrite an existing translation).
+                                                                        // Cache the English text (never overwrite an existing entry).
                                                                         lock (_cacheLock)
                                                                         {
                                                                             _cache.TryGetValue(cacheKey, out var existing);
