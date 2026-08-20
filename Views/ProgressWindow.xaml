@@ -9,9 +9,9 @@
         Title="{Binding Title}"
         Height="220" Width="450"
         WindowStartupLocation="CenterOwner"
-        ResizeMode="NoResize"
-        WindowStyle="ToolWindow"
-        ShowInTaskbar="False"
+        ResizeMode="CanMinimize"
+        WindowStyle="SingleBorderWindow"
+        ShowInTaskbar="True"
         Style="{StaticResource ThemedWindowStyle}">
 
     <Grid Margin="20">
