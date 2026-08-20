@@ -255,16 +255,25 @@ public class Auxilliary : IDisposable
         StringBuilder logBuilder = new();
         if (majorRecordGetter is ITranslatedNamedGetter namedGetter)
         {
+            string? name = null;
             if (namedGetter.Name != null && namedGetter.Name.String != null)
             {
-                if (language != null && namedGetter.Name.TryLookup(language.Value, out var localizedName))
-                {
-                    logBuilder.Append(localizedName);
-                }
-                else
-                {
-                    logBuilder.Append(namedGetter.Name.String);
-                }
+                name = language != null && namedGetter.Name.TryLookup(language.Value, out var localizedName)
+                    ? localizedName
+                    : namedGetter.Name.String;
+            }
+
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                logBuilder.Append(name);
+            }
+            else if (fullString)
+            {
+                // A blank slot in the full "Name | EditorID | FormKey" form used to render as a
+                // leading " | ", which reads as a formatting glitch rather than as a nameless
+                // record — say what it is instead (user direction 2026-08-20). The short form
+                // needs no placeholder: it falls through to the EditorID/FormKey below.
+                logBuilder.Append("[No Name]");
             }
 
             if (fullString)
@@ -275,20 +284,31 @@ public class Auxilliary : IDisposable
 
         if (logBuilder.Length == 0 || fullString)
         {
-            if (majorRecordGetter.EditorID != null)
+            if (fullString)
             {
-                // The separator belongs to the full form only. In the short form nothing follows
-                // the EditorID (the FormKey below is appended only when nothing was written at
-                // all), so appending it there left a Name-less record labelled "EditorID | ".
-                logBuilder.Append(fullString ? majorRecordGetter.EditorID + " | " : majorRecordGetter.EditorID);
-            }
-
-            if (logBuilder.Length == 0 || fullString)
-            {
+                // The full form always renders all three slots; a blank EditorID gets the same
+                // placeholder treatment as a blank Name.
+                logBuilder.Append(string.IsNullOrWhiteSpace(majorRecordGetter.EditorID)
+                    ? "[Blank EditorID] | "
+                    : majorRecordGetter.EditorID + " | ");
                 logBuilder.Append(majorRecordGetter.FormKey.ToString());
             }
+            else
+            {
+                // Short form: EditorID when there is one, else the FormKey — never a separator,
+                // never a placeholder (the fallback chain already guarantees a non-empty label).
+                if (!string.IsNullOrWhiteSpace(majorRecordGetter.EditorID))
+                {
+                    logBuilder.Append(majorRecordGetter.EditorID);
+                }
+
+                if (logBuilder.Length == 0)
+                {
+                    logBuilder.Append(majorRecordGetter.FormKey.ToString());
+                }
+            }
         }
-        
+
         return logBuilder.ToString();
     }
 

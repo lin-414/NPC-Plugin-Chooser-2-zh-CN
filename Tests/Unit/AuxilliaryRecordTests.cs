@@ -345,15 +345,38 @@ public class AuxilliaryRecordTests
     }
 
     [Fact]
-    public void GetLogString_FullString_NoName_IncludesEditorIdAndFormKey()
+    public void GetLogString_FullString_NoName_UsesNoNamePlaceholder()
     {
         var mod = MutagenFixtures.NewMod("Log.esp");
         var npc = MutagenFixtures.NewNpc(mod, editorId: "MyEditorId");
 
-        // An NPC is ITranslatedNamedGetter, so with no Name set the name slot is emitted as
-        // empty followed by the " | " separator -> the string begins with " | " before the EditorID.
-        var expected = $" | MyEditorId | {npc.FormKey}";
+        // A Name-less NPC used to render its empty name slot as a leading " | ", which read as
+        // a formatting glitch (the Miraak soul-steal specimen); the placeholder says what it is.
+        var expected = $"[No Name] | MyEditorId | {npc.FormKey}";
         Auxilliary.GetLogString(npc, language: null, fullString: true).Should().Be(expected);
+    }
+
+    [Fact]
+    public void GetLogString_FullString_NoNameNoEditorId_UsesBothPlaceholders()
+    {
+        var mod = MutagenFixtures.NewMod("Log.esp");
+        var npc = MutagenFixtures.NewNpc(mod);
+
+        var expected = $"[No Name] | [Blank EditorID] | {npc.FormKey}";
+        Auxilliary.GetLogString(npc, language: null, fullString: true).Should().Be(expected);
+    }
+
+    [Fact]
+    public void GetLogString_WhitespaceName_TreatedAsNoName()
+    {
+        var mod = MutagenFixtures.NewMod("Log.esp");
+        var npc = MutagenFixtures.NewNpc(mod, editorId: "MyEditorId", name: "   ");
+
+        // Whitespace is as unreadable as absent: short form falls through to the EditorID,
+        // full form gets the placeholder.
+        Auxilliary.GetLogString(npc, language: null).Should().Be("MyEditorId");
+        Auxilliary.GetLogString(npc, language: null, fullString: true)
+            .Should().Be($"[No Name] | MyEditorId | {npc.FormKey}");
     }
 
     [Fact]

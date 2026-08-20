@@ -1930,7 +1930,7 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         var rng = new Random();
         int successCount = 0;
         int totalAffectedCount = 0;
-        var fullyExhausted = new List<string>();
+        var fullyExhausted = new List<(string Npc, string FormKey, string Detail, IReadOnlyList<string> Failures)>();
         int inheritedTemplateCount = 0;
         int clearedCount = 0;
         var processedNpcs = new HashSet<FormKey>();
@@ -2002,7 +2002,9 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                 {
                     var pool = new List<RandomCandidate>(eligibleByNpc[npcVM.NpcFormKey]);
                     bool succeeded = false;
-                    string lastFailure = string.Empty;
+                    // Every candidate rejection, "Mod: reason", in the order tried — the
+                    // completion table renders one column per entry for exhausted NPCs.
+                    var candidateFailures = new List<string>();
 
                     while (pool.Count > 0 && !succeeded)
                     {
@@ -2023,7 +2025,7 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                                 if (!allowDuplicateShares &&
                                     usedShares.Contains((candidate.ModName, candidate.SourceKey)))
                                 {
-                                    lastFailure = $"borrowed face '{candidate.ModName}' from {candidate.SourceKey} is already used by another NPC";
+                                    candidateFailures.Add($"{candidate.ModName}: borrowed face from {candidate.SourceKey} is already used by another NPC");
                                     continue;
                                 }
 
@@ -2041,14 +2043,14 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                                             mergeSnapshotsByName, npcProvidingOwnersByPlugin,
                                             out var guestMasterFailure))
                                     {
-                                        lastFailure = guestMasterFailure;
+                                        candidateFailures.Add($"{candidate.ModName}: {guestMasterFailure}");
                                         continue;
                                     }
 
                                     if (!CandidateAppearanceDependenciesAreResolvable(candidate.SourceKey,
                                             guestMod, out var guestDependencyFailure))
                                     {
-                                        lastFailure = guestDependencyFailure;
+                                        candidateFailures.Add($"{candidate.ModName}: {guestDependencyFailure}");
                                         continue;
                                     }
                                 }
@@ -2082,7 +2084,7 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                                         mergeSnapshotsByName, npcProvidingOwnersByPlugin,
                                         out var masterFailure))
                                 {
-                                    lastFailure = masterFailure;
+                                    candidateFailures.Add($"{candidate.ModName}: {masterFailure}");
                                     continue;
                                 }
 
@@ -2094,7 +2096,7 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                                 if (!CandidateAppearanceDependenciesAreResolvable(npcVM.NpcFormKey, ownMod,
                                         out var dependencyFailure))
                                 {
-                                    lastFailure = dependencyFailure;
+                                    candidateFailures.Add($"{candidate.ModName}: {dependencyFailure}");
                                     continue;
                                 }
 
@@ -2125,13 +2127,13 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                                 }
                                 else
                                 {
-                                    lastFailure = failureReason;
+                                    candidateFailures.Add($"{candidate.ModName}: {failureReason}");
                                 }
                             }
                         }
                         catch (Exception ex)
                         {
-                            lastFailure = $"candidate '{candidate.ModName}' threw while parsing its plugin ({ex.GetType().Name}: {ex.Message})";
+                            candidateFailures.Add($"{candidate.ModName}: threw while parsing its plugin ({ex.GetType().Name}: {ex.Message})");
                             Debug.WriteLine($"Randomize: skipping {candidate.ModName} for {npcVM.NpcFormKeyString} -- {ex}");
                         }
                     }
@@ -2176,9 +2178,27 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                         }
                         else
                         {
-                            fullyExhausted.Add(string.IsNullOrWhiteSpace(lastFailure)
-                                ? $"{npcVM.DisplayName} ({npcVM.NpcFormKeyString})"
-                                : $"{npcVM.DisplayName} ({npcVM.NpcFormKeyString}) — last reason: {lastFailure}");
+                            // For a templated NPC the unplaced outcome is concrete and worth
+                            // stating in the table's Detail column: left unpatched, its record
+                            // keeps inheriting, so in game it shows whatever its template ends
+                            // up looking like (user direction 2026-08-19).
+                            string exhaustedDetail = string.Empty;
+                            var templateFk = npcVM.NpcData?.TemplateFormKey ?? FormKey.Null;
+                            if (npcVM.WinningOverrideHasTemplate && !templateFk.IsNull)
+                            {
+                                string templateName = npcByKey.TryGetValue(templateFk, out var templateVm)
+                                    ? templateVm.DisplayName
+                                    : string.Empty;
+                                string templateLabel = string.IsNullOrWhiteSpace(templateName) ||
+                                                       templateName.Contains(templateFk.ToString(), StringComparison.OrdinalIgnoreCase)
+                                    ? templateFk.ToString()
+                                    : $"{templateName} ({templateFk})";
+                                exhaustedDetail =
+                                    $"Templated NPC: uses the appearance of its template, {templateLabel}, " +
+                                    "since no valid appearance could be selected from the options.";
+                            }
+                            fullyExhausted.Add((npcVM.DisplayName, npcVM.NpcFormKeyString, exhaustedDetail,
+                                candidateFailures));
                         }
                     }
                 }
@@ -2205,60 +2225,53 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
             }
         }
 
-        var resultMessage = new StringBuilder();
-        if (totalAffectedCount > successCount)
+        string summary = totalAffectedCount > successCount
+            ? $"Randomized appearances for {successCount} NPC(s) " +
+              $"(plus {totalAffectedCount - successCount} template(s))."
+            : $"Randomized appearances for {successCount} NPC(s).";
+
+        // Outcome notes — context that applies to a whole class of NPCs, kept out of the
+        // per-NPC issue rows.
+        var notes = new List<string>();
+        if (inheritedTemplateCount > 0) notes.Add(BuildInheritedTemplateRandomizeNote(inheritedTemplateCount));
+        if (clearedCount > 0) notes.Add(BuildClearedSelectionsRandomizeNote(clearedCount));
+        if (skippedOutOfLoadOrder.Any()) notes.Add(BuildNotInLoadOrderRandomizeNote(skippedOutOfLoadOrder.Count));
+
+        // One table row per affected NPC (user direction 2026-08-19, matching the pre-run
+        // invalid-selections table): the bullet-list message box stopped being parseable at
+        // load-order scale. The Issue strings align with the pre-run Validator's wording where
+        // the classes coincide.
+        var issueRows = new List<RandomizeIssueRow>();
+        foreach (var (npc, formKey, detail, failures) in fullyExhausted)
         {
-            resultMessage.AppendLine($"Randomized appearances for {successCount} NPC(s) " +
-                                     $"(plus {totalAffectedCount - successCount} template(s)).");
+            issueRows.Add(new RandomizeIssueRow("No candidate passed validation", npc, formKey, detail)
+            {
+                CandidateFailures = failures,
+            });
+        }
+        foreach (var skipped in skippedOutOfLoadOrder)
+        {
+            var (existingMod, _) = _consistencyProvider.GetSelectedMod(skipped.NpcFormKey);
+            issueRows.Add(new RandomizeIssueRow("Base NPC not found in load order",
+                skipped.DisplayName, skipped.NpcFormKeyString,
+                string.IsNullOrEmpty(existingMod)
+                    ? string.Empty
+                    : $"keeps its existing selection '{existingMod}'"));
+        }
+
+        if (issueRows.Count > 0)
+        {
+            RandomizeResultsWindow.ShowResults(summary, notes, issueRows);
         }
         else
         {
-            resultMessage.AppendLine($"Randomized appearances for {successCount} NPC(s).");
-        }
-
-        if (inheritedTemplateCount > 0)
-        {
-            resultMessage.AppendLine();
-            resultMessage.AppendLine(BuildInheritedTemplateRandomizeNote(inheritedTemplateCount));
-        }
-
-        if (clearedCount > 0)
-        {
-            resultMessage.AppendLine();
-            resultMessage.AppendLine(BuildClearedSelectionsRandomizeNote(clearedCount));
-        }
-
-        if (fullyExhausted.Any())
-        {
-            resultMessage.AppendLine();
-            resultMessage.AppendLine($"{fullyExhausted.Count} NPC(s) had no candidate that passed validation:");
-            resultMessage.AppendLine();
-            foreach (var entry in fullyExhausted)
+            var resultMessage = new StringBuilder(summary);
+            foreach (var note in notes)
             {
-                resultMessage.AppendLine($"• {entry}");
+                resultMessage.AppendLine();
+                resultMessage.AppendLine();
+                resultMessage.Append(note);
             }
-        }
-
-        if (skippedOutOfLoadOrder.Any())
-        {
-            resultMessage.AppendLine();
-            resultMessage.AppendLine(BuildNotInLoadOrderRandomizeNote(skippedOutOfLoadOrder.Count));
-            resultMessage.AppendLine();
-            foreach (var skipped in skippedOutOfLoadOrder)
-            {
-                var (existingMod, _) = _consistencyProvider.GetSelectedMod(skipped.NpcFormKey);
-                resultMessage.AppendLine(string.IsNullOrEmpty(existingMod)
-                    ? $"• {skipped.DisplayName} ({skipped.NpcFormKeyString})"
-                    : $"• {skipped.DisplayName} ({skipped.NpcFormKeyString}) — keeps its existing selection '{existingMod}'");
-            }
-        }
-
-        if (fullyExhausted.Any() || skippedOutOfLoadOrder.Any())
-        {
-            ScrollableMessageBox.ShowWarning(resultMessage.ToString(), "Randomize Complete with Warnings");
-        }
-        else
-        {
             ScrollableMessageBox.Show(resultMessage.ToString(), "Randomize Complete");
         }
     }
@@ -4935,8 +4948,14 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                 {
                     if (currentNpcGetter.Template == null || currentNpcGetter.Template.IsNull)
                     {
-                        var chainStr = string.Join(" -> ", templateChain.Select(x => $"{x.displayName} ({x.formKey})"));
-                        return (false, $"{targetNpcName}: Template flag set but no template specified\n  Template chain: {chainStr}", true,
+                        // No chain trace on this failure (user direction 2026-08-20): the walk
+                        // usually dies on the STARTING record, and a one-entry breadcrumb reads
+                        // as a chain that does not exist. When the defect sits deeper, the broken
+                        // record is named directly instead of dumping the whole walk.
+                        string where = templateChain.Count > 1
+                            ? $" (on template {templateChain[^1].displayName})"
+                            : string.Empty;
+                        return (false, $"{targetNpcName}: Template flag set but no template specified{where}", true,
                                 templateChain, fromLinkCacheOnly);
                     }
                     else
@@ -5039,8 +5058,13 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                 {
                     if (!string.Equals(selectedModName, modSetting.DisplayName, StringComparison.OrdinalIgnoreCase))
                     {
+                        // Lay phrasing (user direction 2026-08-19): what matters to the reader is
+                        // not the chain mechanics but the consequence — this mod's appearance for
+                        // the NPC is inherited from a template, so the pick could only ever show
+                        // the template's selected look, and the template is already spoken for.
                         return (false,
-                            $"template reference {refName} already has '{selectedModName}' selected",
+                            $"this mod's appearance for the NPC is templated — the NPC would just look like " +
+                            $"its template, {refName}, which already has '{selectedModName}' selected",
                             wasValidated, affectedNpcs);
                     }
                 }
