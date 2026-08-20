@@ -3016,17 +3016,32 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
         {
             try
             {
-                var mainWindow = Application.Current?.MainWindow;
-            if (mainWindow != null && mainWindow != window)
+                var owner = Application.Current?.MainWindow
+                            ?? Application.Current?.Windows.OfType<Window>().FirstOrDefault(w => w.IsActive && w != window);
+                if (owner != null && owner != window && owner.IsLoaded)
+                {
+                    window.Owner = owner;
+                    // Ensure the window follows the owner's minimize/restore even when shown
+                    // with Show() (modeless). WPF's owned-window behavior is reliable once
+                    // Owner is set, but guard against edge cases where the owner reference
+                    // goes stale (e.g. the main window is recreated during startup).
+                    owner.StateChanged += OnOwnerStateChanged;
+                    window.Closed += (s, e) => owner.StateChanged -= OnOwnerStateChanged;
+                    void OnOwnerStateChanged(object? s, EventArgs e)
+                    {
+                        if (owner.WindowState == WindowState.Minimized)
+                            window.WindowState = WindowState.Minimized;
+                        else if (window.WindowState == WindowState.Minimized &&
+                                 owner.WindowState == WindowState.Normal)
+                            window.WindowState = WindowState.Normal;
+                    }
+                }
+            }
+            catch (Exception ex)
             {
-                window.Owner = mainWindow;
+                Debug.WriteLine($"Could not set window owner: {ex.Message}");
             }
         }
-        catch (Exception ex)
-        {
-            Debug.WriteLine($"Could not set window owner: {ex.Message}");
-        }
-    }
 
     private async Task DeleteCachedFaceFinderImagesAsync()
     {
