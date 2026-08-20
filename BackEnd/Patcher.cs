@@ -2184,7 +2184,7 @@ public class Patcher : OptionalUIModule
                     ReportInheritedFaceNpcs();
                     ReportFlattenedFallbackNpcs();
                     ReportInertOutfitNpcs();
-                    _headPartWigConverter.ReportMultiWigSkinSkips((msg, isError, force) => AppendLog(msg, isError, force));
+                    _headPartWigConverter.ReportWnamConversionSkips((msg, isError, force) => AppendLog(msg, isError, force));
 
                     // Race-drift findings were held back during processing because their remedy
                     // (which Record Override Handling Mode to recommend) depends on the whole

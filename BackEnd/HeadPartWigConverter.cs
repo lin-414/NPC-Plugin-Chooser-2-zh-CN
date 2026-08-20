@@ -95,10 +95,12 @@ public class HeadPartWigConverter
     private readonly HashSet<string> _usedPhysicsXmlRelPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _lock = new();
 
-    // NPCs whose WNAM conversion was declined because the skin carries more than one applicable
-    // wig ArmorAddon. Collected across the run and reported once, grouped, by
-    // ReportMultiWigSkinSkips — the per-NPC explanation used to repeat itself dozens of times.
+    // NPCs whose WNAM conversion was declined — because the skin carries more than one
+    // applicable wig ArmorAddon, or because none of its wig ArmorAddons apply to the NPC's
+    // race. Collected across the run and reported once, grouped, by ReportWnamConversionSkips —
+    // the per-NPC explanations used to repeat themselves dozens of times.
     private readonly System.Collections.Concurrent.ConcurrentBag<string> _multiWigSkinSkips = new();
+    private readonly System.Collections.Concurrent.ConcurrentBag<string> _raceInapplicableWigSkips = new();
 
     private string? _tempExtractDir;
 
@@ -518,8 +520,11 @@ public class HeadPartWigConverter
         var applicable = wnamWigArmas.Where(a => IsArmatureForRace(a, raceKey, armorRaceKey)).ToList();
         if (applicable.Count == 0)
         {
+            // Reported once, grouped, at the end of the run (ReportWnamConversionSkips); the
+            // verbose in-context line stays for per-NPC log reading.
+            _raceInapplicableWigSkips.Add(npcIdentifier);
             appendLog($"      Wig conversion: {npcIdentifier}'s skin-carried wig ArmorAddon(s) are not " +
-                      "applicable to the NPC's race — leaving the skin-carried hair as-is.", false, true);
+                      "applicable to the NPC's race — leaving the skin-carried hair as-is.", false, false);
             return null;
         }
 
@@ -705,6 +710,7 @@ public class HeadPartWigConverter
             _renamePrefixOwners.Clear();
             _usedPhysicsXmlRelPaths.Clear();
             _multiWigSkinSkips.Clear();
+            _raceInapplicableWigSkips.Clear();
             // The race probe reads the link cache per call now, and the ValidRaces list it feeds
             // lives on the output mod, which is itself rebuilt per run — nothing to reset here.
         }
@@ -721,29 +727,45 @@ public class HeadPartWigConverter
     }
 
     /// <summary>
-    /// End-of-run grouped report of the NPCs whose skin carried more than one applicable wig
-    /// ArmorAddon, so their WNAM wig-to-head-part conversion was declined (the skin-carried hair
-    /// stays as-is, which renders correctly — informational, not a WARNING). Wording after the
-    /// user's own (2026-08-19): header, plain NPC list, then the explanation and remedy once.
-    /// Clears the collected list; <see cref="ResetSession"/> also clears it at run start.
+    /// End-of-run grouped report of the NPCs whose WNAM wig-to-head-part conversion was declined
+    /// (the skin-carried hair stays as-is, which renders correctly — informational, not a
+    /// WARNING): one block for skins carrying more than one applicable wig ArmorAddon, one for
+    /// skins whose wig ArmorAddons don't apply to the NPC's race. Wording after the user's own
+    /// (2026-08-19): header, plain NPC list, then any explanation and remedy once. Clears the
+    /// collected lists; <see cref="ResetSession"/> also clears them at run start.
     /// </summary>
-    public void ReportMultiWigSkinSkips(Action<string, bool, bool> appendLog)
+    public void ReportWnamConversionSkips(Action<string, bool, bool> appendLog)
     {
-        if (_multiWigSkinSkips.IsEmpty) return;
-
-        var npcs = _multiWigSkinSkips.Distinct(StringComparer.OrdinalIgnoreCase)
-            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
-        _multiWigSkinSkips.Clear();
-
-        appendLog("\nThe following NPCs have a skin containing multiple wig ArmorAddons:", false, true);
-        foreach (var npc in npcs)
+        if (!_multiWigSkinSkips.IsEmpty)
         {
-            appendLog($"  - {npc}", false, true);
+            var npcs = _multiWigSkinSkips.Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+            _multiWigSkinSkips.Clear();
+
+            appendLog("\nThe following NPCs have a skin containing multiple wig ArmorAddons:", false, true);
+            foreach (var npc in npcs)
+            {
+                appendLog($"  - {npc}", false, true);
+            }
+            appendLog("Only a single wig can become the Hair head part. Aborted wig-to-headpart " +
+                      "conversion for the NPCs listed above; their skin-carried hair was left as-is. " +
+                      "You can use the 3D preview's Set Wig Meshes selector to designate a single mesh " +
+                      "as a wig.", false, true);
         }
-        appendLog("Only a single wig can become the Hair head part. Aborted wig-to-headpart " +
-                  "conversion for the NPCs listed above; their skin-carried hair was left as-is. " +
-                  "You can use the 3D preview's Set Wig Meshes selector to designate a single mesh " +
-                  "as a wig.", false, true);
+
+        if (!_raceInapplicableWigSkips.IsEmpty)
+        {
+            var npcs = _raceInapplicableWigSkips.Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+            _raceInapplicableWigSkips.Clear();
+
+            appendLog("\nWig conversion: the following NPCs' skin-carried wig ArmorAddon(s) are not " +
+                      "applicable to their race — leaving the wigs as-is:", false, true);
+            foreach (var npc in npcs)
+            {
+                appendLog($"  - {npc}", false, true);
+            }
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────
