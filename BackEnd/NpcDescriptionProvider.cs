@@ -47,6 +47,14 @@ namespace NPC_Plugin_Chooser_2.BackEnd
             "a", "an", "the", "is", "of", "in", "on", "at", "skyrim", "with", "and", "to", "who" // Added a few more
         };
 
+        // Shared rate-limit gate: when any wiki API returns 429/503, all subsequent calls
+        // wait out the pause window instead of hammering the site and tripping the limit
+        // harder. This is what turned 260 real failures into 895 "network error" rows —
+        // the fallback search terms multiplied each NPC's requests ~4x and blew past the
+        // wikis' per-IP quota, so every batch became a mass rate-limit.
+        private static readonly object _rateLimitLock = new();
+        private static DateTimeOffset _rateLimitUntil = DateTimeOffset.MinValue;
+
         private enum WikiSite { UESP, Fandom }
 
         public NpcDescriptionProvider(IHttpClientFactory httpClientFactory, Settings settings)
@@ -218,6 +226,14 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                             return null; // Cannot validate if no keywords
                         }
 
+                        // Early-out: leveled/encounter/template EditorIDs have no wiki page,
+                        // so skip the lookup outright instead of burning rate-limit quota.
+                        if (IsTemplateNpc(editorSearchTerm))
+                        {
+                            Debug.WriteLine($"[DescProvider] '{editorSearchTerm}' is an Enc/Lvl/TreasCorpse template — skipping wiki lookup.");
+                            return null;
+                        }
+
                         // 2.5 Cache check: a fully cached entry (English + translation when the UI is
                                     // Chinese) returns instantly with zero network requests. A cache entry with only
                                     // the English text re-runs just the translation step below (see FinalizeAsync).
@@ -274,9 +290,14 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                                                 // gameplay prefixes (e.g. "DA01AzuraVoice" -> "AzuraVoice", "Azura").
                                                                                                 if (rawResult.Description is null && !rawResult.NetworkError)
                                                                                                 {
+                                                                                                    // At most 2 fallback terms, each paced 1s apart (see GetEnglishDescriptionAsync).
+                                                                                                    int fallbackCount = 0;
                                                                                                     foreach (string fbTerm in DeriveSearchTermFallbacks(editorSearchTerm, displaySearchTerm, displayNameIsAscii))
                                                                                                     {
+                                                                                                        if (fallbackCount >= 2) break;
                                                                                                         if (string.IsNullOrWhiteSpace(fbTerm) || fbTerm == searchTermRaw) continue;
+                                                                                                        fallbackCount++;
+                                                                                                        await Task.Delay(1000).ConfigureAwait(false);
                                                                                                         Debug.WriteLine($"[DescProvider] Primary term '{searchTermRaw}' failed, trying fallback '{fbTerm}' for {editorId}.");
                                                                                                         rawResult = await FetchRawEnglishAsync(fbTerm, searchKeywords);
                                                                                                         if (rawResult.Description is not null || rawResult.NetworkError) break;
@@ -300,6 +321,41 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                 // reports differently. Both sites get one retry after a 2s pause, since the
                                                                 // wikis rate-limit bursts and a single transient failure currently marks ~all
                                                                 // NPCs in a batch as failed.
+        // --- Rate-limit gate helpers ---
+
+        private static void EnterRateLimitPause(TimeSpan duration)
+        {
+            lock (_rateLimitLock)
+            {
+                var until = DateTime.UtcNow + duration;
+                if (until > _rateLimitUntil) _rateLimitUntil = until;
+            }
+        }
+
+        private static async Task WaitIfRateLimitedAsync()
+        {
+            DateTimeOffset until;
+            lock (_rateLimitLock) until = _rateLimitUntil;
+            if (until > DateTimeOffset.UtcNow)
+            {
+                var wait = until - DateTimeOffset.UtcNow;
+                Debug.WriteLine($"[DescProvider] Rate-limit pause active, waiting {wait.TotalSeconds:F0}s.");
+                await Task.Delay(wait).ConfigureAwait(false);
+            }
+        }
+
+        // --- IsTemplateNpc: leveled/encounter/template EditorIDs have NO wiki page
+        // (EncVampire03BretonF, TreasCorpseRiverwoodSleeping01, LvlWarlockNecromancerFemaleHighElf,
+        // DA13EncAfflicted01Melee1HEvenTonedF, DLC2dunHaknirShoal_LvlBanditMissileFemaleDarkElfCommoner).
+        // Searching them wastes quota and speeds up rate-limiting; skip them outright.
+        private static bool IsTemplateNpc(string? editorSearchTerm)
+        {
+            if (string.IsNullOrEmpty(editorSearchTerm)) return false;
+            return System.Text.RegularExpressions.Regex.IsMatch(editorSearchTerm,
+                @"^(Enc|Lvl|TreasCorpse|DA\d+Enc|DA\d+Lvl|DLC\d+.*Lvl)"
+                + @"|SoulCairnSoul");
+        }
+
         // --- DeriveSearchTermFallbacks: when the primary EditorID search fails,
         // try derived search terms. Skyrim EditorIDs encode gameplay prefixes and
         // role descriptors that do not match wiki page titles:
@@ -308,8 +364,12 @@ namespace NPC_Plugin_Chooser_2.BackEnd
         //   "DLC2Frea" -> try "Frea"
         //   "DB02Captive2" -> try "Captive" (may still fail, but worth a shot)
         //   "EncVampire03BretonF" -> try "EncVampire" (likely fails)
-        private static IEnumerable<string> DeriveSearchTermFallbacks(string editorSearchTerm, string? displaySearchTerm, bool displayNameIsAscii)
+        private static IEnumerable<string> DeriveSearchTermFallbacks(string? editorSearchTerm, string? displaySearchTerm, bool displayNameIsAscii)
         {
+            // Null guard: some NPCs have no EditorID (e.g. FormKey-only entries),
+            // so fallback is not possible.
+            if (string.IsNullOrEmpty(editorSearchTerm)) yield break;
+
             // 1. Strip known gameplay prefixes (letters+digits at the start) from the EditorID.
             //    "DA01AzuraVoice" -> "AzuraVoice"; "MS14LaeletteVampire" -> "LaeletteVampire"
             string? stripped = Regex.Replace(editorSearchTerm, @"^[A-Z]+[0-9]+", "");
@@ -339,31 +399,6 @@ namespace NPC_Plugin_Chooser_2.BackEnd
             if (displayNameIsAscii && displaySearchTerm != null && displaySearchTerm != editorSearchTerm)
             {
                 yield return displaySearchTerm;
-            }
-        }
-
-        // --- SearchFallbackTerms: returns all terms to try for a given NPC, starting with the
-        // primary EditorID-derived term and then each fallback in order.
-        private static IEnumerable<string> GetSearchTerms(string? displayName, string? editorId)
-        {
-            string? displaySearchTerm = !string.IsNullOrWhiteSpace(displayName) ? displayName.Split('[')[0].Trim() : null;
-            string? editorSearchTerm = !string.IsNullOrWhiteSpace(editorId) ? editorId.Split('[')[0].Trim() : null;
-            bool displayNameIsAscii = displaySearchTerm != null && displaySearchTerm.All(ch => ch <= 127);
-
-            string? primaryTerm = displayNameIsAscii ? displaySearchTerm
-                : editorSearchTerm != null ? SplitCamelCase(editorSearchTerm)
-                : displaySearchTerm;
-            if (!string.IsNullOrWhiteSpace(primaryTerm))
-            {
-                yield return primaryTerm;
-            }
-
-            if (editorSearchTerm != null)
-            {
-                foreach (string fb in DeriveSearchTermFallbacks(editorSearchTerm, displaySearchTerm, displayNameIsAscii))
-                {
-                    yield return fb;
-                }
             }
         }
 
@@ -408,6 +443,7 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                                 var uespFetch = await FetchAndParseDescriptionAsync(uespUrl, WikiSite.UESP);
                                                                                 if (uespFetch.NetworkError) { lastAttemptWasNetwork = true; continue; } // transient — retry
                                                                                 rawUespDesc = uespFetch.Description;
+                                                                                if (rawUespDesc != null) lastAttemptWasNetwork = false; // HTML fallback succeeded
                                                                             }
                                                                             if (ValidateDescription(rawUespDesc, searchKeywords)) // Validate before assigning
                                                                                 {
@@ -471,6 +507,7 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                                 var fandomFetch = await FetchAndParseDescriptionAsync(fandomUrl, WikiSite.Fandom);
                                                                                 if (fandomFetch.NetworkError) { lastAttemptWasNetwork = true; continue; }
                                                                                 rawFandomDesc = fandomFetch.Description;
+                                                                                if (rawFandomDesc != null) lastAttemptWasNetwork = false; // HTML fallback succeeded
                                                                             }
                                                                             if (ValidateDescription(rawFandomDesc, searchKeywords))
                                                                                     {
@@ -567,6 +604,14 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                     }
                                                                     if (!searchKeywords.Any()) return (null, false);
 
+                                                                    // Skip leveled/encounter/template NPCs outright — no wiki page exists,
+                                                                    // so searching only burns rate-limit quota (see IsTemplateNpc).
+                                                                    if (IsTemplateNpc(editorSearchTerm))
+                                                                    {
+                                                                        Debug.WriteLine($"[DescProvider] '{editorSearchTerm}' is an Enc/Lvl/TreasCorpse template — skipping wiki lookup.");
+                                                                        return (null, false);
+                                                                    }
+
                                                                     (string? Description, bool NetworkError) rawResult;
 
                                                                     // Try the primary term first (EditorID with CamelCase split).
@@ -577,9 +622,16 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                     // e.g. "DA01AzuraVoice" -> try "AzuraVoice", "Azura"
                                                                     if (rawResult.Description is null && !rawResult.NetworkError)
                                                                     {
+                                                                        // At most 2 fallback terms, each paced 1s apart: every fallback is a
+                                                                        // full multi-request scrape, and firing all of them back-to-back
+                                                                        // multiplied request volume ~4x and tripped the wikis' rate limit.
+                                                                        int fallbackCount = 0;
                                                                         foreach (string fbTerm in DeriveSearchTermFallbacks(editorSearchTerm, displaySearchTerm, displayNameIsAscii))
                                                                         {
+                                                                            if (fallbackCount >= 2) break;
                                                                             if (string.IsNullOrWhiteSpace(fbTerm) || fbTerm == searchTermRaw) continue;
+                                                                            fallbackCount++;
+                                                                            await Task.Delay(1000).ConfigureAwait(false); // space fallback scrapes out
                                                                             Debug.WriteLine($"[DescProvider] Primary term '{searchTermRaw}' failed, trying fallback '{fbTerm}' for {editorId}.");
                                                                             rawResult = await FetchRawEnglishAsync(fbTerm, searchKeywords);
                                                                             if (rawResult.Description is not null || rawResult.NetworkError) break;
@@ -834,6 +886,7 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                 {
                     try
                     {
+                        await WaitIfRateLimitedAsync().ConfigureAwait(false);
                         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
                                                 using var request = new HttpRequestMessage(HttpMethod.Get, apiUrl);
                         using var response = await _httpClient.SendAsync(request, cts.Token);
@@ -858,7 +911,16 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                             return (baseWikiUrl + firstHit.Title.Replace(' ', '_'), false);
                         } else { Debug.WriteLine($"[DescProvider][Search] No valid title found in first search result from {apiUrl}"); }
                     }
-                    catch (HttpRequestException ex) { Debug.WriteLine($"[DescProvider][Search] HTTP Error: {apiUrl} - {ex.StatusCode} {ex.Message}"); return (null, true); }
+                    catch (HttpRequestException ex)
+                    {
+                        Debug.WriteLine($"[DescProvider][Search] HTTP Error: {apiUrl} - {ex.StatusCode} {ex.Message}");
+                        if (ex.StatusCode == HttpStatusCode.TooManyRequests || ex.StatusCode == HttpStatusCode.ServiceUnavailable)
+                        {
+                            Debug.WriteLine("[DescProvider][Search] RATE LIMITED (429/503) — pausing 60s to let the quota reset.");
+                            EnterRateLimitPause(TimeSpan.FromSeconds(60));
+                        }
+                        return (null, true);
+                    }
                     catch (TaskCanceledException ex) { Debug.WriteLine($"[DescProvider][Search] Timeout: {apiUrl} - {ex.Message}"); return (null, true); }
                     catch (JsonException ex) { Debug.WriteLine($"[DescProvider][Search] JSON Error: {apiUrl} - {ex.Message}"); }
                     catch (Exception ex) { Debug.WriteLine($"[DescProvider][Search] Unexpected Error: {apiUrl} - {ex.Message}"); return (null, true); }
@@ -872,6 +934,7 @@ namespace NPC_Plugin_Chooser_2.BackEnd
         {
             try
             {
+                await WaitIfRateLimitedAsync().ConfigureAwait(false);
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
                                 using var request = new HttpRequestMessage(HttpMethod.Get, pageUrl);
                 using var response = await _httpClient.SendAsync(request, cts.Token);
@@ -965,7 +1028,16 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                     Debug.WriteLine($"[DescProvider][Parse] Could not extract description content from {pageUrl} (Site: {site}).");
                 }
             }
-            catch (HttpRequestException ex) { Debug.WriteLine($"[DescProvider][Parse] HTTP Error: {pageUrl} - {ex.StatusCode} {ex.Message}"); return (null, true); }
+            catch (HttpRequestException ex)
+            {
+                Debug.WriteLine($"[DescProvider][Parse] HTTP Error: {pageUrl} - {ex.StatusCode} {ex.Message}");
+                if (ex.StatusCode == HttpStatusCode.TooManyRequests || ex.StatusCode == HttpStatusCode.ServiceUnavailable)
+                {
+                    Debug.WriteLine("[DescProvider][Parse] RATE LIMITED (429/503) — pausing 60s to let the quota reset.");
+                    EnterRateLimitPause(TimeSpan.FromSeconds(60));
+                }
+                return (null, true);
+            }
             catch (TaskCanceledException ex) { Debug.WriteLine($"[DescProvider][Parse] Timeout: {pageUrl} - {ex.Message}"); return (null, true); }
             catch (Exception ex) { Debug.WriteLine($"[DescProvider][Parse] Unexpected Error: {pageUrl} - {ex.Message}"); return (null, true); }
             return (null, false);
@@ -994,6 +1066,7 @@ namespace NPC_Plugin_Chooser_2.BackEnd
 
             try
             {
+                await WaitIfRateLimitedAsync().ConfigureAwait(false);
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(8));
                 using var request = new HttpRequestMessage(HttpMethod.Get, apiUrl);
                 using var response = await _httpClient.SendAsync(request, cts.Token);
@@ -1035,6 +1108,11 @@ namespace NPC_Plugin_Chooser_2.BackEnd
             catch (HttpRequestException ex)
             {
                 Debug.WriteLine($"[DescProvider][Extract] HTTP Error: {apiUrl} - {ex.StatusCode} {ex.Message}");
+                if (ex.StatusCode == HttpStatusCode.TooManyRequests || ex.StatusCode == HttpStatusCode.ServiceUnavailable)
+                {
+                    Debug.WriteLine("[DescProvider][Extract] RATE LIMITED (429/503) — pausing 60s to let the quota reset.");
+                    EnterRateLimitPause(TimeSpan.FromSeconds(60));
+                }
                 return (null, true);
             }
             catch (TaskCanceledException ex)
