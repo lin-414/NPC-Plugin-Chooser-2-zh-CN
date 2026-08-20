@@ -131,6 +131,10 @@ public class SkyPatcherInterface : OptionalUIModule
     /// own its face outright, so the destination is always its own path and each NPC's choice is
     /// honoured independently. Costs one duplicated FaceGen per surrogate, which is the price of
     /// that independence.</para>
+    ///
+    /// <para><b>Failure contract:</b> if the donor cannot be read (malformed plugin), the copy's
+    /// exception is rethrown after the half-built surrogate is removed again — no record and no
+    /// surrogate-map/ini state is left behind, so the caller can log and skip just that NPC.</para>
     /// </summary>
     /// <param name="appearanceTerminus">
     /// The end of the donor's Traits chain, or null when the donor does not inherit — or when the
@@ -150,23 +154,36 @@ public class SkyPatcherInterface : OptionalUIModule
         INpcGetter? appearanceTerminus = null, bool appearanceOnly = false, bool includeOutfit = false)
     {
         var npcCopy = _environmentStateProvider.OutputMod.Npcs.AddNew();
-        npcCopy.DeepCopyIn(appearanceDonor, out _);
-
-        if (appearanceTerminus != null && !appearanceTerminus.FormKey.Equals(appearanceDonor.FormKey))
+        try
         {
-            // Overlay only the appearance the engine would have inherited; everything else stays
-            // the donor's, since the surrogate exists to carry a visual style and nothing more.
-            Auxilliary.CopyInheritedAppearance(npcCopy, appearanceTerminus);
-            npcCopy.Configuration.TemplateFlags &= ~NpcConfiguration.TemplateFlag.Traits;
-        }
+            npcCopy.DeepCopyIn(appearanceDonor, out _);
 
-        if (appearanceOnly)
+            if (appearanceTerminus != null && !appearanceTerminus.FormKey.Equals(appearanceDonor.FormKey))
+            {
+                // Overlay only the appearance the engine would have inherited; everything else stays
+                // the donor's, since the surrogate exists to carry a visual style and nothing more.
+                Auxilliary.CopyInheritedAppearance(npcCopy, appearanceTerminus);
+                npcCopy.Configuration.TemplateFlags &= ~NpcConfiguration.TemplateFlag.Traits;
+            }
+
+            if (appearanceOnly)
+            {
+                StripNonAppearanceData(npcCopy, includeOutfit);
+            }
+
+            var edid = appearanceDonor.EditorID ?? "NoEditorID";
+            npcCopy.EditorID = edid + "_Template";
+        }
+        catch
         {
-            StripNonAppearanceData(npcCopy, includeOutfit);
+            // The deep copy is the first full read of the donor, so a malformed donor plugin
+            // (e.g. a truncated NAM5 subrecord) throws from the lazy overlay right here. Unwind
+            // the AddNew before rethrowing so the caller can skip just this NPC: the orphan
+            // sweep only REPORTS leftover NPC records, it never removes them, so the empty
+            // surrogate would otherwise ship in the output plugin.
+            _environmentStateProvider.OutputMod.Npcs.Remove(npcCopy.FormKey);
+            throw;
         }
-
-        var edid = appearanceDonor.EditorID ?? "NoEditorID";
-        npcCopy.EditorID = edid + "_Template";
 
         _keyOriginalValSurrogate.Add(targetNpcFormKey, npcCopy.FormKey);
         _keySurrogateValOrriginal.Add(npcCopy.FormKey, targetNpcFormKey);

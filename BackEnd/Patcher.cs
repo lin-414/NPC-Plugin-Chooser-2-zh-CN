@@ -1214,9 +1214,20 @@ public class Patcher : OptionalUIModule
                                             // the output. Record mode merges none of them: its target is an
                                             // override of the WINNING record, whose non-appearance links are
                                             // the recipient's own.
-                                            patchNpc = _skyPatcherInterface.CreateSkyPatcherNpc(npcFormKey,
-                                                appearanceNpcRecord, flattenTerminus,
-                                                appearanceOnly: true, includeOutfit: includeOutfit);
+                                            try
+                                            {
+                                                patchNpc = _skyPatcherInterface.CreateSkyPatcherNpc(npcFormKey,
+                                                    appearanceNpcRecord, flattenTerminus,
+                                                    appearanceOnly: true, includeOutfit: includeOutfit);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                AppendLog(
+                                                    $"      ERROR: Failed to copy appearance record {appearanceNpcFormKey} from {appearanceModKey?.FileName ?? "N/A"} for {npcIdentifier}. Skipping this NPC. This usually means a malformed record in the appearance plugin; opening that plugin in xEdit and re-saving it normalizes its records. Details: {ex.Message}",
+                                                    isError: true,
+                                                    forceLog: true);
+                                                return;
+                                            }
                                         }
                                         else
                                         {
@@ -1640,8 +1651,19 @@ public class Patcher : OptionalUIModule
                                             // into the surrogate — see CreateSkyPatcherNpc. No
                                             // CopyAppearanceData runs in this branch, so the surrogate's
                                             // overlay is not disturbed afterwards.
-                                            patchNpc = _skyPatcherInterface.CreateSkyPatcherNpc(npcFormKey,
-                                                appearanceNpcRecord, flattenTerminus);
+                                            try
+                                            {
+                                                patchNpc = _skyPatcherInterface.CreateSkyPatcherNpc(npcFormKey,
+                                                    appearanceNpcRecord, flattenTerminus);
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                AppendLog(
+                                                    $"      ERROR: Failed to copy appearance record {appearanceNpcFormKey} from {appearanceModKey?.FileName ?? "N/A"} for {npcIdentifier}. Skipping this NPC. This usually means a malformed record in the appearance plugin; opening that plugin in xEdit and re-saving it normalizes its records. Details: {ex.Message}",
+                                                    isError: true,
+                                                    forceLog: true);
+                                                return;
+                                            }
                                         }
                                         else
                                         {
