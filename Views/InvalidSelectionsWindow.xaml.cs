@@ -8,8 +8,9 @@ using NPC_Plugin_Chooser_2.View_Models;
 namespace NPC_Plugin_Chooser_2.Views;
 
 /// <summary>
-/// The pre-run screening result: everything the validator rejected, as an issue -> mod -> NPC
-/// tree, with the same go/no-go answer the message box it replaced returned.
+/// The pre-run screening result: everything the validator rejected, as a sortable/filterable
+/// table (one row per rejected NPC), with the same go/no-go answer the message box and the
+/// tree dialog it replaced returned.
 /// </summary>
 public partial class InvalidSelectionsWindow : Window
 {
@@ -48,31 +49,6 @@ public partial class InvalidSelectionsWindow : Window
         catch (System.Exception ex)
         {
             Debug.WriteLine($"Could not set window owner: {ex.Message}");
-        }
-    }
-
-    private bool _suppressingBringIntoView;
-
-    /// <summary>
-    /// Re-issues a row's bring-into-view request with zero width, so keyboard navigation still
-    /// scrolls vertically to the selected row but nothing ever scrolls the tree sideways. Rows
-    /// here end in a FormKey and are commonly wider than the window, and the default behaviour
-    /// scrolls the chevron column off the left edge the moment a row is clicked.
-    /// </summary>
-    private void TreeViewItem_RequestBringIntoView(object sender, RequestBringIntoViewEventArgs e)
-    {
-        if (_suppressingBringIntoView || sender is not FrameworkElement item) return;
-
-        e.Handled = true;
-        try
-        {
-            // The re-issued request raises this same event; the flag keeps it from recursing.
-            _suppressingBringIntoView = true;
-            item.BringIntoView(new Rect(0, 0, 0, item.ActualHeight));
-        }
-        finally
-        {
-            _suppressingBringIntoView = false;
         }
     }
 
