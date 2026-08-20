@@ -334,7 +334,39 @@ namespace NPC_Plugin_Chooser_2.BackEnd
         private static bool IsIndexPageGarbage(string? text)
         {
             if (string.IsNullOrWhiteSpace(text)) return false;
-            return text.Contains("==", StringComparison.Ordinal);
+            // Heading-markup lists (faction-index bodies).
+            if (text.Contains("==", StringComparison.Ordinal)) return true;
+            // Disambiguation boilerplate ("Karita may refer to: Karita (bard), ...").
+            return Regex.IsMatch(text, @"may refer to\s*:", RegexOptions.IgnoreCase);
+        }
+
+        // --- TryParseDisambiguationCandidates: a "X may refer to:" page lists the
+        // real articles on separate lines, e.g.
+        //   "Karita may refer to:\n\nKarita (bard), a bard at the inn in Dawnstar\nKarita (warrior), a pilgrim..."
+        // Each candidate line leads with "Title (subtitle)" followed by a separator.
+        // Returns TRUE when at least one candidate was parsed; the titles are fully
+        // namespaced (the source page's namespace prefix is prepended, so "Karita (bard)"
+        // under "Skyrim:Karita" becomes "Skyrim:Karita (bard)") — exactly what the
+        // extracts API wants.
+        private static bool TryParseDisambiguationCandidates(string extract, string sourcePageTitle, out List<string> candidates)
+        {
+            candidates = new List<string>();
+            if (string.IsNullOrWhiteSpace(extract)) return false;
+
+            // Namespace prefix from the source page (e.g. "Skyrim:" for "Skyrim:Karita").
+            string nsPrefix = "";
+            int colonIdx = sourcePageTitle != null ? sourcePageTitle.IndexOf(':') : -1;
+            if (colonIdx > 0) nsPrefix = sourcePageTitle.Substring(0, colonIdx + 1);
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (Match m in Regex.Matches(extract, @"(?m)^\s*\*?\s*([A-Za-z][A-Za-z0-9 '\-]*\([^)\n]+\))\s*(?:[,—:]|$)"))
+            {
+                string rawTitle = m.Groups[1].Value.Trim();
+                if (rawTitle.Length == 0) continue;
+                string fullTitle = nsPrefix + rawTitle;
+                if (seen.Add(fullTitle)) candidates.Add(fullTitle);
+            }
+            return candidates.Count > 0;
         }
 
         // --- Rate-limit gate helpers ---
@@ -470,7 +502,7 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                             // "Just a moment..." Challenge page instead of the real content.
                                                                             // The extracts API endpoint is whitelisted and returns plain text.
                                                                             string uespPageTitle = uespUrl.Replace("https://en.uesp.net/wiki/", "").Replace("_", " ");
-                                                                            var uespExtract = await FetchExtractViaApiAsync(uespPageTitle, WikiSite.UESP);
+                                                                            var uespExtract = await FetchExtractViaApiAsync(uespPageTitle, WikiSite.UESP, searchKeywords);
                                                                             string? rawUespDesc = uespExtract.Description;
                                                                             if (uespExtract.NetworkError) { lastAttemptWasNetwork = true; }
                                                                             // Fall back to the rendered page if the extracts API gave nothing.
@@ -534,7 +566,7 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                             // Try the MediaWiki extracts API first — Fandom pages are
                                                                             // behind Cloudflare too, so the extracts API is more reliable.
                                                                             string fandomPageTitle = fandomUrl.Replace("https://elderscrolls.fandom.com/wiki/", "").Replace("_", " ");
-                                                                            var fandomExtract = await FetchExtractViaApiAsync(fandomPageTitle, WikiSite.Fandom);
+                                                                            var fandomExtract = await FetchExtractViaApiAsync(fandomPageTitle, WikiSite.Fandom, searchKeywords);
                                                                             string? rawFandomDesc = fandomExtract.Description;
                                                                             if (fandomExtract.NetworkError) { lastAttemptWasNetwork = true; }
                                                                             // Fall back to the rendered page if the extracts API gave nothing.
@@ -907,6 +939,16 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                 return false;
             }
 
+            // Disambiguation pages ("Karita may refer to: Karita (bard), a bard at the
+            // inn in Dawnstar") pass the keyword gate below (the name is in the text),
+            // but they are navigation boilerplate, not a description. A real NPC
+            // description never tells you the article "may refer to" other articles.
+            if (Regex.IsMatch(description, @"may refer to\s*:", RegexOptions.IgnoreCase))
+            {
+                Debug.WriteLine($"[DescProvider] Validation failed: description is disambiguation boilerplate ('may refer to:').");
+                return false;
+            }
+
             // Check if the description contains at least one significant keyword (case-insensitive)
             foreach (string keyword in keywords)
             {
@@ -1105,7 +1147,11 @@ namespace NPC_Plugin_Chooser_2.BackEnd
         // API endpoint is also whitelisted and returns plain-text content with no Cloudflare
         // challenge, so we use it directly when a wiki search succeeds, falling back to page HTML
         // only if the API gives us nothing.
-        private async Task<(string? Description, bool NetworkError)> FetchExtractViaApiAsync(string pageTitle, WikiSite site)
+        // `keywords` arranges disambiguation resolution: when the page is a "X may refer to:"
+        // disambig, the candidates are fetched one by one and only one whose extract passes
+        // ValidateDescription is returned. `depth` bounds that recursion. Either can be null/0
+        // from callers that don't need candidate resolution.
+        private async Task<(string? Description, bool NetworkError)> FetchExtractViaApiAsync(string pageTitle, WikiSite site, HashSet<string>? keywords = null, int depth = 0)
         {
             string baseUrl = site == WikiSite.UESP
                 ? "https://en.uesp.net/w/api.php"
@@ -1149,6 +1195,39 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                 if (Regex.IsMatch(rawExtract, @"(?m)^\s*==.*==\s*$"))
                 {
                     Debug.WriteLine($"[DescProvider][Extract] Rejected heading-list extract (index page?) for '{pageTitle}'");
+                    return (null, false);
+                }
+
+                // UESP/Fandom disambiguation pages ("Karita may refer to: Karita (bard), a bard
+                // at the inn in Dawnstar...") are navigation stubs: the name always appears so
+                // ValidateDescription would let them through, but the text describes the *other*
+                // pages, not this NPC. When we hit one, resolve the real articles it points at
+                // and take the first candidate whose extract passes keyword validation.
+                if (depth < 3 && Regex.IsMatch(rawExtract, @"may refer to\s*:", RegexOptions.IgnoreCase)
+                    && TryParseDisambiguationCandidates(rawExtract, pageTitle, out List<string> candidates))
+                {
+                    Debug.WriteLine($"[DescProvider][Extract] '{pageTitle}' is a disambiguation page with {candidates.Count} candidates.");
+
+                    // The candidates are full page titles (namespaced where the wiki uses one,
+                    // e.g. "Skyrim:Karita (bard)"); fetch each in turn until one validates.
+                    foreach (string candidate in candidates)
+                    {
+                        Debug.WriteLine($"[DescProvider][Extract] Trying disambiguation candidate '{candidate}'.");
+                        var candidateResult = await FetchExtractViaApiAsync(candidate, site, keywords, depth + 1);
+                        if (candidateResult.NetworkError) return (null, true); // transient — caller retries
+                        if (string.IsNullOrWhiteSpace(candidateResult.Description)) continue;
+
+                        // Accept the first candidate whose extract passes keyword validation;
+                        // without keywords (no caller context) accept the first non-empty one.
+                        if (keywords == null || ValidateDescription(candidateResult.Description, keywords))
+                        {
+                            Debug.WriteLine($"[DescProvider][Extract] Disambiguation candidate '{candidate}' accepted.");
+                            return (candidateResult.Description, false);
+                        }
+                        Debug.WriteLine($"[DescProvider][Extract] Disambiguation candidate '{candidate}' failed validation, trying next.");
+                    }
+
+                    Debug.WriteLine($"[DescProvider][Extract] No usable candidate from disambiguation page '{pageTitle}'.");
                     return (null, false);
                 }
 
