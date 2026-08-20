@@ -310,11 +310,23 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                                                                                                         string? uespUrl = uespSearch.Url;
                                                                                                                                                         if (!string.IsNullOrEmpty(uespUrl))
                                                                                                                                                         {
-                                                                                                                                                            Debug.WriteLine($"[DescProvider] Found UESP URL: {uespUrl}");
-                                                                                                                                                            var uespFetch = await FetchAndParseDescriptionAsync(uespUrl, WikiSite.UESP);
-                                                                                                                                                            if (uespFetch.NetworkError) { lastAttemptWasNetwork = true; continue; } // transient — retry
-                                                                                                                                                            string? rawUespDesc = uespFetch.Description;
-                                                                                if (ValidateDescription(rawUespDesc, searchKeywords)) // Validate before assigning
+                                    Debug.WriteLine($"[DescProvider] Found UESP URL: {uespUrl}");
+                                                                            // Try the MediaWiki extracts API first — UESP pages are
+                                                                            // behind Cloudflare, so direct HTML fetching often returns a
+                                                                            // "Just a moment..." Challenge page instead of the real content.
+                                                                            // The extracts API endpoint is whitelisted and returns plain text.
+                                                                            string uespPageTitle = uespUrl.Replace("https://en.uesp.net/wiki/", "").Replace("_", " ");
+                                                                            var uespExtract = await FetchExtractViaApiAsync(uespPageTitle, WikiSite.UESP);
+                                                                            string? rawUespDesc = uespExtract.Description;
+                                                                            if (uespExtract.NetworkError) { lastAttemptWasNetwork = true; }
+                                                                            // Fall back to the rendered page if the extracts API gave nothing.
+                                                                            if (string.IsNullOrWhiteSpace(rawUespDesc))
+                                                                            {
+                                                                                var uespFetch = await FetchAndParseDescriptionAsync(uespUrl, WikiSite.UESP);
+                                                                                if (uespFetch.NetworkError) { lastAttemptWasNetwork = true; continue; } // transient — retry
+                                                                                rawUespDesc = uespFetch.Description;
+                                                                            }
+                                                                            if (ValidateDescription(rawUespDesc, searchKeywords)) // Validate before assigning
                                                                                 {
                                                                                     finalDescription = rawUespDesc; // Assign if valid
                                                                                     Debug.WriteLine($"[DescProvider] Success: Valid UESP description found ({sw.ElapsedMilliseconds}ms).");
@@ -363,11 +375,21 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                                                                                                                 string? fandomUrl = fandomSearch.Url;
                                                                                                                                                                 if (!string.IsNullOrEmpty(fandomUrl))
                                                                                                                                                                 {
-                                                                                                                                                                    Debug.WriteLine($"[DescProvider] Found Fandom URL: {fandomUrl}");
-                                                                                                                                                                    var fandomFetch = await FetchAndParseDescriptionAsync(fandomUrl, WikiSite.Fandom);
-                                                                                                                                                                    if (fandomFetch.NetworkError) { lastAttemptWasNetwork = true; continue; }
-                                                                                                                                                                    string? rawFandomDesc = fandomFetch.Description;
-                                                                                    if (ValidateDescription(rawFandomDesc, searchKeywords))
+                                    Debug.WriteLine($"[DescProvider] Found Fandom URL: {fandomUrl}");
+                                                                            // Try the MediaWiki extracts API first — Fandom pages are
+                                                                            // behind Cloudflare too, so the extracts API is more reliable.
+                                                                            string fandomPageTitle = fandomUrl.Replace("https://elderscrolls.fandom.com/wiki/", "").Replace("_", " ");
+                                                                            var fandomExtract = await FetchExtractViaApiAsync(fandomPageTitle, WikiSite.Fandom);
+                                                                            string? rawFandomDesc = fandomExtract.Description;
+                                                                            if (fandomExtract.NetworkError) { lastAttemptWasNetwork = true; }
+                                                                            // Fall back to the rendered page if the extracts API gave nothing.
+                                                                            if (string.IsNullOrWhiteSpace(rawFandomDesc))
+                                                                            {
+                                                                                var fandomFetch = await FetchAndParseDescriptionAsync(fandomUrl, WikiSite.Fandom);
+                                                                                if (fandomFetch.NetworkError) { lastAttemptWasNetwork = true; continue; }
+                                                                                rawFandomDesc = fandomFetch.Description;
+                                                                            }
+                                                                            if (ValidateDescription(rawFandomDesc, searchKeywords))
                                                                                     {
                                                                                         finalDescription = rawFandomDesc;
                                                                                         Debug.WriteLine($"[DescProvider] Success: Valid Fandom description found ({sw.ElapsedMilliseconds}ms).");
@@ -854,11 +876,89 @@ namespace NPC_Plugin_Chooser_2.BackEnd
         private class MediaQuery { [JsonPropertyName("searchinfo")] public SearchInfo? SearchInfo { get; set; } [JsonPropertyName("search")] public List<SearchItem>? Search { get; set; } }
         private class SearchInfo { [JsonPropertyName("totalhits")] public int TotalHits { get; set; } }
         private class SearchItem { [JsonPropertyName("ns")] public int Ns { get; set; } [JsonPropertyName("title")] public string? Title { get; set; } [JsonPropertyName("pageid")] public int PageId { get; set; } [JsonPropertyName("snippet")] public string? Snippet { get; set; } }
+
+        // --- FetchExtractViaApiAsync: bypass Cloudflare by using the MediaWiki extracts API ---
+        // UESP and Elderscrolls Fandom serve their HTML pages behind Cloudflare (the 250 failed NPCs
+        // all returned "Just a moment..." Challenge pages instead of wiki content). The search API
+        // endpoint is whitelisted and works, but the rendered page is blocked. The `prop=extracts`
+        // API endpoint is also whitelisted and returns plain-text content with no Cloudflare
+        // challenge, so we use it directly when a wiki search succeeds, falling back to page HTML
+        // only if the API gives us nothing.
+        private async Task<(string? Description, bool NetworkError)> FetchExtractViaApiAsync(string pageTitle, WikiSite site)
+        {
+            string baseUrl = site == WikiSite.UESP
+                ? "https://en.uesp.net/w/api.php"
+                : "https://elderscrolls.fandom.com/api.php";
+            string encodedTitle = WebUtility.UrlEncode(pageTitle);
+            string apiUrl = $"{baseUrl}?action=query&prop=extracts&explaintext=1&titles={encodedTitle}&format=json";
+
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+                using var request = new HttpRequestMessage(HttpMethod.Get, apiUrl);
+                using var response = await _httpClient.SendAsync(request, cts.Token);
+                response.EnsureSuccessStatusCode();
+
+                string jsonResponse = await response.Content.ReadAsStringAsync(cts.Token);
+                if (string.IsNullOrWhiteSpace(jsonResponse))
+                {
+                    Debug.WriteLine($"[DescProvider][Extract] Empty JSON from {apiUrl}");
+                    return (null, false);
+                }
+
+                var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+                var query = JsonSerializer.Deserialize<MediaWikiExtractResult>(jsonResponse)?.Query;
+                if (query?.Pages == null || query.Pages.Count == 0)
+                {
+                    Debug.WriteLine($"[DescProvider][Extract] No pages returned from {apiUrl}");
+                    return (null, false);
+                }
+
+                string? rawExtract = query.Pages.Values.FirstOrDefault()?.Extract;
+                if (string.IsNullOrWhiteSpace(rawExtract))
+                {
+                    Debug.WriteLine($"[DescProvider][Extract] Page found but extract is empty for '{pageTitle}'");
+                    return (null, false);
+                }
+
+                // Take first sentence like FetchAndParseDescriptionAsync does
+                var sentenceMatch = Regex.Match(rawExtract, @"^([^.!?]+[.!?])");
+                string firstSentence = sentenceMatch.Success ? sentenceMatch.Groups[1].Value.Trim() : rawExtract.Trim();
+                if (firstSentence.Length > 400)
+                {
+                    firstSentence = firstSentence.Substring(0, 400) + "...";
+                }
+
+                Debug.WriteLine($"[DescProvider][Extract] Extracted description from {apiUrl}: '{firstSentence.Substring(0, Math.Min(firstSentence.Length, 80))}...'");
+                return (firstSentence, false);
             }
+            catch (HttpRequestException ex)
+            {
+                Debug.WriteLine($"[DescProvider][Extract] HTTP Error: {apiUrl} - {ex.StatusCode} {ex.Message}");
+                return (null, true);
+            }
+            catch (TaskCanceledException ex)
+            {
+                Debug.WriteLine($"[DescProvider][Extract] Timeout: {apiUrl} - {ex.Message}");
+                return (null, true);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[DescProvider][Extract] Unexpected Error: {apiUrl} - {ex.Message}");
+                return (null, true);
+            }
+        }
+
+        // Helper for MediaWiki extracts API
+        private class MediaWikiExtractResult { [JsonPropertyName("query")] public MediaExtractQuery? Query { get; set; } }
+        private class MediaExtractQuery { [JsonPropertyName("pages")] public Dictionary<int, MediaExtractPage>? Pages { get; set; } }
+        private class MediaExtractPage { [JsonPropertyName("extract")] public string? Extract { get; set; } }
 
             /// <summary>One cached NPC description entry (persisted to DescriptionCache/descriptions.json).
             /// En is the UESP/Fandom English source; Zh is the zh-CN translation produced for Chinese UIs,
             /// null while not yet translated (a later view will translate just the cached English text).</summary>
+            }
+
             public sealed class CachedNpcDescription
             {
                 public string? En { get; set; }
