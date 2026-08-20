@@ -240,42 +240,47 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                     // When forceTranslate is set (pre-cache batch), a zh-CN entry is a completed
                                     // job (skip); an English-only entry re-runs only the translation step.
                                     string cacheKey = npcFormKey.ToString();
-                                    string? cachedEnOnly = null;
-                                    lock (_cacheLock)
-                                    {
-                                        if (_cache.TryGetValue(cacheKey, out var cached))
-                                        {
-                                            if (forceTranslate)
-                                            {
-                                                if (!string.IsNullOrEmpty(cached.Zh))
-                                                {
-                                                    Debug.WriteLine($"[DescProvider] Cache hit (force zh-CN) for '{cacheKey}': skipping.");
-                                                    return cached.Zh;
-                                                }
-                                                cachedEnOnly = cached.En;
-                                            }
-                                            else
-                                            {
-                                                bool uiChinese = !string.IsNullOrWhiteSpace(_settings.UiLanguage) &&
-                                                                 _settings.UiLanguage.Equals("zh-CN", StringComparison.OrdinalIgnoreCase);
-                                                if (uiChinese && !string.IsNullOrEmpty(cached.Zh))
-                                                {
-                                                    Debug.WriteLine($"[DescProvider] Cache hit (zh-CN) for '{cacheKey}': returning instantly.");
-                                                    return cached.Zh;
-                                                }
-                                                if (!uiChinese && !string.IsNullOrEmpty(cached.En))
-                                                {
-                                                    Debug.WriteLine($"[DescProvider] Cache hit (en) for '{cacheKey}': returning instantly.");
-                                                    return cached.En;
-                                                }
-                                                cachedEnOnly = cached.En;
-                                            }
-                                        }
-                                    }
-                                    if (cachedEnOnly != null)
-                                    {
-                                        return await FinalizeAsync(cacheKey, cachedEnOnly, forceTranslate);
-                                    }
+                                                                        string? cachedEnOnly = null;
+                                                                        lock (_cacheLock)
+                                                                        {
+                                                                            if (_cache.TryGetValue(cacheKey, out var cached) &&
+                                                                                !IsIndexPageGarbage(cached.En) && !IsIndexPageGarbage(cached.Zh))
+                                                                            {
+                                                                                if (forceTranslate)
+                                                                                {
+                                                                                    if (!string.IsNullOrEmpty(cached.Zh))
+                                                                                    {
+                                                                                        Debug.WriteLine($"[DescProvider] Cache hit (force zh-CN) for '{cacheKey}': skipping.");
+                                                                                        return cached.Zh;
+                                                                                    }
+                                                                                    cachedEnOnly = cached.En;
+                                                                                }
+                                                                                else
+                                                                                {
+                                                                                    bool uiChinese = !string.IsNullOrWhiteSpace(_settings.UiLanguage) &&
+                                                                                                     _settings.UiLanguage.Equals("zh-CN", StringComparison.OrdinalIgnoreCase);
+                                                                                    if (uiChinese && !string.IsNullOrEmpty(cached.Zh))
+                                                                                    {
+                                                                                        Debug.WriteLine($"[DescProvider] Cache hit (zh-CN) for '{cacheKey}': returning instantly.");
+                                                                                        return cached.Zh;
+                                                                                    }
+                                                                                    if (!uiChinese && !string.IsNullOrEmpty(cached.En))
+                                                                                    {
+                                                                                        Debug.WriteLine($"[DescProvider] Cache hit (en) for '{cacheKey}': returning instantly.");
+                                                                                        return cached.En;
+                                                                                    }
+                                                                                    cachedEnOnly = cached.En;
+                                                                                }
+                                                                            }
+                                                                            else if (cached != null && (IsIndexPageGarbage(cached.En) || IsIndexPageGarbage(cached.Zh)))
+                                                                            {
+                                                                                Debug.WriteLine($"[DescProvider] Cache hit for '{cacheKey}' is index-page garbage (contains '=='); refetching.");
+                                                                            }
+                                                                        }
+                                                                        if (cachedEnOnly != null)
+                                                                        {
+                                                                            return await FinalizeAsync(cacheKey, cachedEnOnly, forceTranslate);
+                                                                        }
 
                         Stopwatch sw = Stopwatch.StartNew();
 
@@ -321,6 +326,17 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                 // reports differently. Both sites get one retry after a 2s pause, since the
                                                                 // wikis rate-limit bursts and a single transient failure currently marks ~all
                                                                 // NPCs in a batch as failed.
+        // --- IsIndexPageGarbage: cached descriptions polluted by UESP faction-index
+        // pages ("== EditorID ==" heading lists) must never be served. They were
+        // written before the index-page guards existed (SearchWikiAsync skip +
+        // extract rejection + ValidateDescription), so check at every cache read and
+        // treat a polluted entry as a cache miss: the refetch overwrites it.
+        private static bool IsIndexPageGarbage(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+            return text.Contains("==", StringComparison.Ordinal);
+        }
+
         // --- Rate-limit gate helpers ---
 
         private static void EnterRateLimitPause(TimeSpan duration)
@@ -353,7 +369,27 @@ namespace NPC_Plugin_Chooser_2.BackEnd
             if (string.IsNullOrEmpty(editorSearchTerm)) return false;
             return System.Text.RegularExpressions.Regex.IsMatch(editorSearchTerm,
                 @"^(Enc|Lvl|TreasCorpse|DA\d+Enc|DA\d+Lvl|DLC\d+.*Lvl)"
-                + @"|SoulCairnSoul");
+                + @"|SoulCairnSoul",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        }
+
+        // --- IsIndexNavigationPage: UESP maintains alphabetical faction-index pages
+        // ("Skyrim:Factions D", "Skyrim:Factions S", ...) whose body is just a list of
+        // "== EditorID ==" headings. MediaWiki full-text search ranks them above the
+        // real NPC page when the EditorID contains a faction name substring (e.g.
+        // DLC1SeranaFaction appears verbatim in the "Factions D" index, so searching
+        // "DLC1Serana" surfaces the index before "Skyrim:Serana"). The description
+        // pipeline must never treat those navigation pages as hits.
+        private static bool IsIndexNavigationPage(string? title)
+        {
+            if (string.IsNullOrWhiteSpace(title)) return false;
+            // UESP faction indexes: "Skyrim:Factions D" / "Skyrim:Factions S" ...
+            if (System.Text.RegularExpressions.Regex.IsMatch(title, @"^Skyrim:Factions [A-Z]$"))
+                return true;
+            // Other obvious navigation pages (should they ever surface):
+            if (title.Equals("Skyrim:Factions", StringComparison.OrdinalIgnoreCase)) return true;
+            if (title.Contains("Unused", StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
         }
 
         // --- DeriveSearchTermFallbacks: when the primary EditorID search fails,
@@ -422,7 +458,7 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                         bool uespBlocked = false; // no point retrying when the query failed, not the network
                                                                         try
                                                                         {
-                                                                            var uespSearch = await SearchWikiAsync($"https://en.uesp.net/w/api.php?action=query&list=search&srsearch={encodedUespSearchTerm}&format=json&srlimit=1", "https://en.uesp.net/wiki/");
+                                                                            var uespSearch = await SearchWikiAsync($"https://en.uesp.net/w/api.php?action=query&list=search&srsearch={encodedUespSearchTerm}&format=json&srlimit=5", "https://en.uesp.net/wiki/");
                                                                                                                                                         if (uespSearch.NetworkError) { lastAttemptWasNetwork = true; continue; } // transient — retry
                                                                                                                                                         lastAttemptWasNetwork = false;
                                                                                                                                                         string? uespUrl = uespSearch.Url;
@@ -488,7 +524,7 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                             bool fandomBlocked = false;
                                                                             try
                                                                             {
-                                                                                var fandomSearch = await SearchWikiAsync($"https://elderscrolls.fandom.com/api.php?action=query&list=search&srsearch={encodedFandomSearchTerm}&format=json&srlimit=1", "https://elderscrolls.fandom.com/wiki/");
+                                                                                var fandomSearch = await SearchWikiAsync($"https://elderscrolls.fandom.com/api.php?action=query&list=search&srsearch={encodedFandomSearchTerm}&format=json&srlimit=5", "https://elderscrolls.fandom.com/wiki/");
                                                                                                                                                                 if (fandomSearch.NetworkError) { lastAttemptWasNetwork = true; continue; }
                                                                                                                                                                 lastAttemptWasNetwork = false;
                                                                                                                                                                 string? fandomUrl = fandomSearch.Url;
@@ -568,7 +604,7 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                                                                     string cacheKey = npcFormKey.ToString();
                                                                     lock (_cacheLock)
                                                                     {
-                                                                        if (_cache.TryGetValue(cacheKey, out var cached) && !string.IsNullOrWhiteSpace(cached.En))
+                                                                        if (_cache.TryGetValue(cacheKey, out var cached) && !string.IsNullOrWhiteSpace(cached.En) && !IsIndexPageGarbage(cached.En))
                                                                         {
                                                                             return (cached.En, false); // English already cached (from a prior view or pre-translate run)
                                                                         }
@@ -863,6 +899,14 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                 return false;
             }
 
+            // Last-line defense against wiki index pages: a real NPC description never
+            // contains "==" MediaWiki heading markup (index bodies are pure heading lists).
+            if (description.Contains("==", StringComparison.Ordinal))
+            {
+                Debug.WriteLine($"[DescProvider] Validation failed: description contains '==' heading markup (index page?).");
+                return false;
+            }
+
             // Check if the description contains at least one significant keyword (case-insensitive)
             foreach (string keyword in keywords)
             {
@@ -905,11 +949,16 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                              return (null, false);
                         }
 
-                        var firstHit = searchResult.Query.Search.FirstOrDefault();
-                        if (firstHit != null && !string.IsNullOrWhiteSpace(firstHit.Title)) {
+                        // UESP ranks its alphabetical faction-index pages ("Skyrim:Factions D")
+                        // above the real NPC page for EditorID searches, because the index body
+                        // contains every faction EditorID (e.g. DLC1SeranaFaction). Skipping those
+                        // navigation pages lets the actual NPC page win. Uses srlimit>1 so there
+                        // are candidates left after the skip.
+                        var hit = searchResult.Query.Search.FirstOrDefault(h => !IsIndexNavigationPage(h.Title));
+                        if (hit != null && !string.IsNullOrWhiteSpace(hit.Title)) {
                             // MediaWiki titles often need spaces replaced with underscores for URLs
-                            return (baseWikiUrl + firstHit.Title.Replace(' ', '_'), false);
-                        } else { Debug.WriteLine($"[DescProvider][Search] No valid title found in first search result from {apiUrl}"); }
+                            return (baseWikiUrl + hit.Title.Replace(' ', '_'), false);
+                        } else { Debug.WriteLine($"[DescProvider][Search] Search results were all index/navigation pages (e.g. 'Skyrim:Factions D') from {apiUrl}"); }
                     }
                     catch (HttpRequestException ex)
                     {
@@ -1091,6 +1140,15 @@ namespace NPC_Plugin_Chooser_2.BackEnd
                 if (string.IsNullOrWhiteSpace(rawExtract))
                 {
                     Debug.WriteLine($"[DescProvider][Extract] Page found but extract is empty for '{pageTitle}'");
+                    return (null, false);
+                }
+
+                // UESP's alphabetical index pages ("Skyrim:Factions D") are bodies of
+                // "== EditorID ==" heading lines with no prose. A heading list is never a
+                // usable NPC description — reject it as "page not useful" (not a network error).
+                if (Regex.IsMatch(rawExtract, @"(?m)^\s*==.*==\s*$"))
+                {
+                    Debug.WriteLine($"[DescProvider][Extract] Rejected heading-list extract (index page?) for '{pageTitle}'");
                     return (null, false);
                 }
 
