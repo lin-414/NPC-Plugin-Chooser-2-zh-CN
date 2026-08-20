@@ -1408,10 +1408,10 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                         catch { /* unreadable file: the merged output falls back to this round only */ }
                     }
 
-                    // 2 workers, but the request rate is capped GLOBALLY by shared time slots below:
-                    // the wikis throttle per-IP burst rates (UESP returns 429 once a short burst
-                    // window is exceeded) and no per-NPC retry can outlast that once tripped.
-                    using var concurrency = new SemaphoreSlim(2, 2);
+                    // 3 workers × 1s global pacing = 3 requests/sec (was 2×2s = 1 rps).
+                    // The extracts API is fast and reliable now that Cloudflare
+                    // is bypassed, so we can afford a tighter cadence.
+                    using var concurrency = new SemaphoreSlim(3, 3);
                     var tasks = eligibleList.Select(async npc =>
                     {
                         await concurrency.WaitAsync(ct).ConfigureAwait(false);
@@ -1426,9 +1426,9 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                             if (needsFetch)
                             {
                                 // Allocate a monotonically increasing time slot shared by all workers
-                                // so requests go out at most one per interval (2s), which stays under
+                                // so requests go out at most one per interval (1s), which stays under
                                 // the wikis' sustained per-IP limits across a whole batch.
-                                long intervalTicks = TimeSpan.FromMilliseconds(2000).Ticks;
+                                long intervalTicks = TimeSpan.FromMilliseconds(1000).Ticks;
                                 long slot;
                                 lock (rateLock)
                                 {
