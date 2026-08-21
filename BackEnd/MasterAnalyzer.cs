@@ -94,26 +94,6 @@ public class MasterAnalyzer
         result.TargetPlugin = targetModKey;
         result.AnalyzedMasters = masterSet.ToList();
 
-        // Build a combined set of FormKeys from all candidate masters for fast lookup
-        var masterFormKeys = new Dictionary<ModKey, HashSet<FormKey>>();
-        foreach (var masterKey in masterSet)
-        {
-            masterFormKeys[masterKey] = new HashSet<FormKey>();
-            
-            // Try to load the master from the load order
-            var masterListing = _environmentStateProvider.LoadOrder.TryGetValue(masterKey);
-            if (masterListing?.Mod != null)
-            {
-                foreach (var record in masterListing.Mod.EnumerateMajorRecords())
-                {
-                    if (record.FormKey.ModKey.Equals(masterKey))
-                    {
-                        masterFormKeys[masterKey].Add(record.FormKey);
-                    }
-                }
-            }
-        }
-
         // Initialize result containers for each master
         foreach (var masterKey in masterSet)
         {
@@ -132,8 +112,13 @@ public class MasterAnalyzer
             cancellationToken.ThrowIfCancellationRequested();
 
             var recordLogString = GetLogString(record, true);
-            var visitedObjects = new HashSet<object>();
-            
+
+            // Reference identity, not structural: Mutagen types implement deep structural
+            // Equals, so two DISTINCT links to the same FormKey would collide and the second
+            // path would be silently dropped (and hashing whole records is expensive).
+            // Cycle prevention only needs instance identity.
+            var visitedObjects = new HashSet<object>(ReferenceEqualityComparer.Instance);
+
             // Check if this is an NPC and get appearance mod info
             string? appearanceModInfo = null;
             if (record is INpcGetter npcGetter)
@@ -141,26 +126,27 @@ public class MasterAnalyzer
                 appearanceModInfo = GetAppearanceModInfo(npcGetter.FormKey);
             }
 
-            // Search for references to each master
-            foreach (var masterKey in masterSet)
-            {
-                var references = new List<string>();
-                
-                // Check trivial case: The record itself acts as a reference because it is an override of the master
-                if (record.FormKey.ModKey.Equals(masterKey))
-                {
-                    references.Add("Record Override (The record itself is defined in the master)");
-                }
-                
-                FindMasterReferences(
-                    record,
-                    new List<string>(),
-                    masterFormKeys[masterKey],
-                    masterKey,
-                    recordLogString,
-                    visitedObjects,
-                    references);
+            // One walk per record collects references to ALL selected masters at once. (A
+            // per-master loop sharing visitedObjects previously meant only the first master
+            // got a real walk — every later master saw everything already visited.)
+            var referencesByMaster = masterSet.ToDictionary(k => k, _ => new List<string>());
 
+            // Trivial case: the record itself is a reference because it overrides the master
+            if (masterSet.Contains(record.FormKey.ModKey))
+            {
+                referencesByMaster[record.FormKey.ModKey]
+                    .Add("Record Override (The record itself is defined in the master)");
+            }
+
+            FindMasterReferences(
+                record,
+                new List<string>(),
+                masterSet,
+                visitedObjects,
+                referencesByMaster);
+
+            foreach (var (masterKey, references) in referencesByMaster)
+            {
                 foreach (var reference in references)
                 {
                     result.ReferencesByMaster[masterKey].Add(new MasterReference
@@ -227,16 +213,18 @@ public class MasterAnalyzer
     }
 
     /// <summary>
-    /// Recursively searches through an object's properties to find FormLinks that point to a master plugin.
+    /// Recursively searches through an object's properties to find FormLinks that point to any
+    /// of the selected master plugins. Detection is by the link's FormKey.ModKey alone — any
+    /// link whose FormKey originates in a master forces that master into the plugin's masters
+    /// list, whether or not the record resolves — so it needs no load order and cannot
+    /// false-negative when a master isn't loadable (e.g. a direct launch outside the MO2 VFS).
     /// </summary>
     private void FindMasterReferences(
         object? currentObject,
         List<string> currentPath,
-        HashSet<FormKey> masterFormKeys,
-        ModKey masterKey,
-        string rootRecordLogString,
+        HashSet<ModKey> masterKeys,
         HashSet<object> visitedObjects,
-        List<string> foundReferences)
+        Dictionary<ModKey, List<string>> foundReferences)
     {
         if (currentObject == null) return;
 
@@ -251,11 +239,11 @@ public class MasterAnalyzer
         // Base Case: Found a FormLink
         if (currentObject is IFormLinkGetter formLink)
         {
-            if (!formLink.IsNull && masterFormKeys.Contains(formLink.FormKey))
+            if (!formLink.IsNull && masterKeys.Contains(formLink.FormKey.ModKey))
             {
                 var pathString = string.Join(" -> ", currentPath);
                 var targetRecordString = GetLogStringForLink(formLink);
-                foundReferences.Add($"{pathString} -> {targetRecordString}");
+                foundReferences[formLink.FormKey.ModKey].Add($"{pathString} -> {targetRecordString}");
             }
             return;
         }
@@ -275,7 +263,7 @@ public class MasterAnalyzer
                 {
                     newPath.Add($"[{i++}]");
                 }
-                FindMasterReferences(item, newPath, masterFormKeys, masterKey, rootRecordLogString, visitedObjects, foundReferences);
+                FindMasterReferences(item, newPath, masterKeys, visitedObjects, foundReferences);
             }
             return;
         }
@@ -300,7 +288,7 @@ public class MasterAnalyzer
             }
 
             var newPath = new List<string>(currentPath) { property.Name };
-            FindMasterReferences(propertyValue, newPath, masterFormKeys, masterKey, rootRecordLogString, visitedObjects, foundReferences);
+            FindMasterReferences(propertyValue, newPath, masterKeys, visitedObjects, foundReferences);
         }
     }
 
