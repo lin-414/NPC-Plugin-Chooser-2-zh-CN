@@ -7,17 +7,50 @@
 >
 > ### Changes in this fork (2026-08)
 >
-> - **Full Chinese (zh-CN) UI localization** — 25 XAML files + ViewModel dynamic strings covered
->   (MessageBoxes, collapsible group titles, run button, etc.), ~741 keys, runtime language switching
+> **UI language**
+> - **Full Chinese (zh-CN) UI localization** — all XAML views + ViewModel dynamic strings covered
+>   (MessageBoxes, collapsible group titles, run button, etc.), ~770 keys, runtime language switching
 >   (zh-CN / en) without restart, no .resx files (custom `LocExtension` + JSON).
-> - **Chinese NPC descriptions for localized games** — when the game is Chinese-localized, NPC
->   display names are Chinese and the original code couldn't find them on the English wikis.
->   This fork searches by English `EditorID` instead (CamelCase-split) and automatically translates
->   fetched English descriptions to Chinese via a free translation endpoint when the UI language is
->   Chinese; falls back to English on failure.
-> - **Build fixes** — `FodyWeavers.xml` for ReactiveUI.Fody, resource file packaging fixes
->   (`<Content>` vs `<Resource>`, conditional ItemGroup), csproj condition for optional
->   NPC Portrait Creator native binaries, and CharacterViewer.Rendering API bumps.
+> - **Settings backup/restore** — back up `Settings.json` and restore it later (failed restores keep a
+>   safety copy instead of clobbering your live settings).
+>
+> **NPC descriptions for localized games**
+> - **EditorID-based wiki lookup** — when the game is Chinese-localized, display names are Chinese and
+>   the original code couldn't find them on the English wikis. This fork searches UESP / Elder Scrolls
+>   Wiki by English `EditorID` instead (CamelCase-split, gameplay prefixes stripped) and validates the
+>   result against the NPC's keywords.
+> - **Automatic translation** — fetched English descriptions are translated to Chinese (Google free
+>   endpoint with a MyMemory fallback) when the UI language is Chinese; falls back to English on failure.
+> - **Local description cache** — fetched descriptions are cached (`DescriptionCache/descriptions.json`)
+>   so re-exporting doesn't hit the wikis again; English + Chinese cached separately.
+> - **One-shot batch pre-translation** — pre-translate all cached English descriptions to Chinese in a
+>   single run, then work offline.
+> - **Manual translation via CSV** — export English descriptions to a CSV (Chinese column left blank),
+>   translate offline at your own pace, and re-import: full control over translation quality.
+> - **Batch-export from the NPC menu** — export descriptions for a selection or filtered subset (gender
+>   filter included) with a retry button for the failed keys.
+> - **Failure classification** — network failures (rate-limit / timeout / Cloudflare) are told apart from
+>   "page simply not found", and reported separately so a real lookup miss isn't counted as a network error.
+>
+> **Fetch reliability**
+> - **Cloudflare bypass via the extracts API** — UESP/Fandom HTML pages are Cloudflare-challenged; the
+>   `prop=extracts` API returns plain text and is used first, with page HTML only as a fallback.
+> - **Rate-limit protection** — shared pause gate on HTTP 429/503, paced fallback searches (≤2 derived
+>   terms, 1s apart), and template NPCs (Enc…/Lvl…/TreasCorpse…/SoulCairnSoul…) are skipped entirely
+>   before any request — fixed a batch run collapsing into mass failures.
+> - **Navigation-page rejection** — UESP alphabetical faction-index pages ("Skyrim:Factions D") and
+>   disambiguation pages ("Karita may refer to:") are detected and rejected at the search/extract/
+>   validation/cache layers, and disambiguation candidates (e.g. `Skyrim:Karita (bard)`) are resolved
+>   to the real article instead of serving the navigation stub.
+>
+> **Window behavior**
+> - **Progress windows follow the main window** — export/progress windows minimize and restore with the
+>   app instead of floating on top of the desktop, and can be minimized individually.
+>
+> **Build fixes**
+> - `FodyWeavers.xml` for ReactiveUI.Fody, resource file packaging fixes (`<Content>` vs `<Resource>`,
+>   conditional ItemGroup), csproj condition for optional NPC Portrait Creator native binaries, and
+>   CharacterViewer.Rendering API bumps.
 >
 > ### License
 >
@@ -469,6 +502,20 @@ N.P.C. 2's diagnostic logs are written as **HTML files** — open them in any we
 Both provenance logs take effect on the next Run; no restart needed.
 
 
+### Other Settings (fork additions)
+
+Tools added by this fork, grouped in the **Other Settings** section of the Settings menu:
+
+* **UI Language**: Switch the interface between **English** and **中文 (zh-CN)** at runtime — no restart required. All UI strings (XAML markup and ViewModel-generated text) switch together.
+* **Pre-Translate Descriptions**: Runs a one-shot batch translation of every cached English NPC description into Chinese, then re-caches the results so later exports are instant and offline. Useful after a fresh batch fetch — translate once, then browse/edit without hitting the wikis or the translation API again.
+* **Backup Settings**: Saves a copy of `Settings.json` (with a timestamp) next to the app.
+* **Restore Settings**: Picks a backup file and swaps it in. The restore validates the file, keeps an automatic safety copy of the current settings before replacing them, and then restarts the app so everything re-initializes from the restored state.
+* **Export Descriptions (CSV)**: Writes a CSV of NPC descriptions — NPC name, EditorID, and the English description — with the Chinese column left **blank** for you to fill in yourself. The export window shows per-NPC progress, retries failed lookups, and summarizes how many succeeded/failed at the end, so you can re-export just the failures.
+* **Import Descriptions (CSV)**: Reads a CSV written by the export (or any file with the same columns) and stores the Chinese values into the cache. Rows whose Chinese cell is empty or identical to the English source are skipped, so a partially finished translation file can be re-imported anytime.
+
+The translation endpoints used by automatic translation are the Google free endpoint with a MyMemory fallback — both reachable from Chinese networks (see the **BackEnd/NpcDescriptionProvider.cs** comments for the fallback chain).
+
+
 ## NPCs Menu
 
 This is where you actually choose each NPC’s appearance. The left panel lists your NPCs; the main area shows a gallery of mugshots — one per appearance mod that provides the selected NPC.
@@ -721,7 +768,9 @@ Two gallery actions work by dragging mugshots around:
 
 ![NPC description](docs/Screenshots/NPCs/NPC_Description_Text.png)
 
-When **Show NPC Descriptions** is on, a short bio of the selected NPC appears at the bottom of the screen — helpful for deciding what an NPC *should* look like when you don’t remember who they are.
+When **Show NPC Descriptions** is on, a short bio of the selected NPC appears at the bottom of the screen — helpful for deciding what an NPC *should* look like when you don't remember who they are.
+
+Descriptions are fetched live from UESP / the Elder Scrolls Wiki (the Cloudflare-free `extracts` API is tried first, rendered HTML as fallback). In this fork's Chinese localization, the lookup always searches by the NPC's English **EditorID** (CamelCase-split) rather than its display name, because the Chinese display names don't exist on the English wikis. Fetched English text is cached locally (`DescriptionCache/descriptions.json`) and — when the UI language is Chinese — auto-translated to Chinese (Google free endpoint with a MyMemory fallback; the English original is kept if translation fails). Use the CSV export / import or the one-shot batch pre-translation in Settings to control or complete the translations offline.
 
 ### 3D Preview
 
