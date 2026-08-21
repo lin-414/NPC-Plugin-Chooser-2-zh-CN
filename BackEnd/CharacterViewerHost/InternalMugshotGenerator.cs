@@ -252,7 +252,9 @@ public sealed class InternalMugshotGenerator
                 // textures that a mod references from ANOTHER mod's BSA (e.g.
                 // hairs reusing the original hair mod's paths) resolve the way
                 // the game resolves them, instead of rendering as missing.
-                AllowLoadOrderFallback = true,
+                // ForceLegacy is the render harness's A/B switch — never set in
+                // normal operation (see RenderResolutionMode).
+                AllowLoadOrderFallback = !RenderResolutionMode.ForceLegacy,
                 Cancellation = token,
                 MissingMeshPathsOut = missingMeshPathsOut,
                 MissingTexturePathsOut = missingTexturePathsOut,

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -71,6 +72,13 @@ public static class RenderHarnessRunner
 
     public static bool ConfigExists => File.Exists(TriggerPath);
 
+    /// <summary>The user's persisted UsePortraitCreatorFallback, stashed by
+    /// App startup when it suppresses the NPC bar's autogen kick for a harness
+    /// run (see App.xaml.cs). Restored onto the settings model at the end of
+    /// <see cref="RunAsync"/> so the exit-time settings save writes the user's
+    /// real value. Null when no suppression happened.</summary>
+    public static bool? SuppressedUsePortraitCreatorFallback;
+
     public class HarnessConfig
     {
         public string OutputDirectory { get; set; } = "";
@@ -82,6 +90,39 @@ public static class RenderHarnessRunner
         public int BurnInRenders { get; set; } = 0;
         public List<HarnessRender> Renders { get; set; } = new();
         public List<HarnessVariant> Variants { get; set; } = new();
+
+        /// <summary>When non-null, runs the click simulation (before any
+        /// renders/variants): for each target NPC, every renderable mod
+        /// providing it gets a mugshot render fired CONCURRENTLY — the same
+        /// burst VM_NpcSelectionBar.TriggerAsyncMugshotGeneration produces on
+        /// an NPC click, throttled by the generator's own render semaphore and
+        /// the renderer's serialized GL queue. Per-burst wall time and
+        /// broadcast-lookup stats land in RenderHarness.log; per-render phase
+        /// timings in RenderLogs\RenderTimings.csv when LogRenderTimings.txt
+        /// exists.</summary>
+        public ClickSimulationConfig? ClickSimulation { get; set; }
+    }
+
+    public class ClickSimulationConfig
+    {
+        /// <summary>NPCs to "click", in order. Empty → auto-pick the
+        /// <see cref="NpcCount"/> NPCs provided by the most renderable mods,
+        /// which maximizes queue depth like a popular vanilla NPC does.</summary>
+        public List<string> NpcFormKeys { get; set; } = new();
+
+        /// <summary>How many NPCs to auto-pick when <see cref="NpcFormKeys"/> is empty.</summary>
+        public int NpcCount { get; set; } = 3;
+
+        /// <summary>Tile cap per click (the UI renders one tile per providing mod).</summary>
+        public int MaxTiles { get; set; } = 25;
+
+        /// <summary>Re-click the FIRST NPC again at the end: a fully-warm burst
+        /// (per-NPC caches hot) separating session-warmup cost from steady state.</summary>
+        public bool RepeatFirstNpc { get; set; } = true;
+
+        /// <summary>"engineOrder" (default; current algorithm) or "legacy"
+        /// (pre-2.8.0 strict resolution via <see cref="RenderResolutionMode.ForceLegacy"/>).</summary>
+        public string ResolutionMode { get; set; } = "engineOrder";
     }
 
     public class HarnessRender
@@ -133,6 +174,11 @@ public static class RenderHarnessRunner
         try
         {
             Directory.CreateDirectory(outDir);
+
+            if (config.ClickSimulation != null)
+            {
+                await RunClickSimulationAsync(settings, generator, config.ClickSimulation, outDir, log);
+            }
 
             // Snapshot the mugshot settings so variant overrides never leak
             // into the user's persisted Settings.json (the app saves settings
@@ -188,10 +234,145 @@ public static class RenderHarnessRunner
             log.AppendLine($"FATAL: {ex}");
         }
 
+        // Undo the startup autogen suppression (see App.xaml.cs) so the
+        // exit-time settings save persists the user's real value.
+        if (SuppressedUsePortraitCreatorFallback is { } restored)
+        {
+            settings.UsePortraitCreatorFallback = restored;
+            SuppressedUsePortraitCreatorFallback = null;
+        }
+
         try { File.WriteAllText(Path.Combine(outDir, "RenderHarness.log"), log.ToString()); }
         catch { /* best-effort */ }
 
         return config.ExitWhenDone;
+    }
+
+    /// <summary>
+    /// Simulates clicking NPC(s) in the NPCs tab: for each target, the burst
+    /// of concurrent GenerateAsync calls the tile kick produces (one per
+    /// renderable providing mod, all launched at once via Task.Run — the
+    /// generator's MaxParallelPortraitRenders semaphore and the serialized GL
+    /// queue then shape execution exactly as in the UI). PNGs go to
+    /// per-burst scratch dirs so every render is real (no staleness cache).
+    /// </summary>
+    private static async Task RunClickSimulationAsync(
+        Settings settings,
+        InternalMugshotGenerator generator,
+        ClickSimulationConfig cfg,
+        string outDir,
+        StringBuilder log)
+    {
+        bool legacy = string.Equals(cfg.ResolutionMode, "legacy", StringComparison.OrdinalIgnoreCase);
+        RenderResolutionMode.ForceLegacy = legacy;
+        log.AppendLine($"ClickSim: resolutionMode={(legacy ? "legacy" : "engineOrder")} maxTiles={cfg.MaxTiles}");
+        try
+        {
+            static bool Renderable(ModSetting ms) =>
+                ms.CorrespondingFolderPaths.Any() || ms.IsAutoGenerated;
+
+            var targets = new List<FormKey>();
+            if (cfg.NpcFormKeys is { Count: > 0 })
+            {
+                foreach (var s in cfg.NpcFormKeys)
+                {
+                    if (FormKey.TryFactory(s, out var fk)) targets.Add(fk);
+                    else log.AppendLine($"ClickSim: invalid FormKey '{s}' — skipped");
+                }
+            }
+            else
+            {
+                // Auto-pick: NPCs provided by the most renderable mods (deepest queues).
+                var counts = new Dictionary<FormKey, int>();
+                foreach (var ms in settings.ModSettings)
+                {
+                    if (!Renderable(ms)) continue;
+                    foreach (var fk in ms.NpcFormKeys)
+                    {
+                        counts[fk] = counts.TryGetValue(fk, out var c) ? c + 1 : 1;
+                    }
+                }
+
+                targets = counts
+                    .OrderByDescending(kv => kv.Value)
+                    .ThenBy(kv => kv.Key.ToString(), StringComparer.OrdinalIgnoreCase)
+                    .Take(Math.Max(1, cfg.NpcCount))
+                    .Select(kv => kv.Key)
+                    .ToList();
+            }
+
+            if (targets.Count == 0)
+            {
+                log.AppendLine("ClickSim: no target NPCs resolved — nothing to do");
+                return;
+            }
+
+            var bursts = new List<(string Label, FormKey Npc)>();
+            for (int i = 0; i < targets.Count; i++) bursts.Add(($"click{i + 1}", targets[i]));
+            if (cfg.RepeatFirstNpc) bursts.Add(("reclick1-warm", targets[0]));
+
+            foreach (var (label, npc) in bursts)
+            {
+                // Tile set in the UI's order: the mod natively defining the NPC
+                // first, then name — the same sort CreateMugShotViewModelsAsync
+                // applies before the generation kick iterates.
+                var tiles = settings.ModSettings
+                    .Where(ms => Renderable(ms) && ms.NpcFormKeys.Contains(npc))
+                    .OrderByDescending(ms => ms.CorrespondingModKeys.Contains(npc.ModKey))
+                    .ThenBy(ms => ms.DisplayName, StringComparer.OrdinalIgnoreCase)
+                    .Take(Math.Max(1, cfg.MaxTiles))
+                    .ToList();
+
+                if (tiles.Count == 0)
+                {
+                    log.AppendLine($"ClickSim {label}: no renderable mod provides {npc} — skipped");
+                    continue;
+                }
+
+                string burstDir = Path.Combine(outDir, Sanitize($"{(legacy ? "legacy" : "engine")}_{label}"));
+                Directory.CreateDirectory(burstDir);
+                BroadcastLookupStats.Reset();
+                var sw = Stopwatch.StartNew();
+
+                // Per-tile wall time measured around the whole GenerateAsync —
+                // semaphore wait + NPC2-side pre-render (record resolution,
+                // attire walk, archive sweeps) + the renderer. RenderTimings.csv
+                // only covers the RenderToPngAsync slice, so this is what
+                // catches host-side pre-render regressions.
+                var tasks = tiles
+                    .Select(ms =>
+                    {
+                        string path = Path.Combine(burstDir, Sanitize(ms.DisplayName) + ".png");
+                        return Task.Run(async () =>
+                        {
+                            var tileSw = Stopwatch.StartNew();
+                            bool ok = await generator.GenerateAsync(npc, ms, path);
+                            return (Ok: ok, Ms: tileSw.ElapsedMilliseconds, Mod: ms.DisplayName);
+                        });
+                    })
+                    .ToList();
+                var results = await Task.WhenAll(tasks);
+                sw.Stop();
+
+                int okCount = results.Count(r => r.Ok);
+                var tileMs = results.Select(r => r.Ms).OrderBy(v => v).ToList();
+                long sumTileMs = tileMs.Sum();
+                long medTileMs = tileMs[tileMs.Count / 2];
+                var slowest = results.OrderByDescending(r => r.Ms).First();
+                log.AppendLine(
+                    $"ClickSim {label}: npc={npc} tiles={tiles.Count} ok={okCount} fail={tiles.Count - okCount} " +
+                    $"wallMs={sw.ElapsedMilliseconds} tileTotalMs sum={sumTileMs} med={medTileMs} " +
+                    $"max={slowest.Ms}({slowest.Mod}) | " + BroadcastLookupStats.Report());
+            }
+        }
+        catch (Exception ex)
+        {
+            log.AppendLine($"ClickSim FATAL: {ex}");
+        }
+        finally
+        {
+            RenderResolutionMode.ForceLegacy = false;
+        }
     }
 
     private static async Task RunOneAsync(

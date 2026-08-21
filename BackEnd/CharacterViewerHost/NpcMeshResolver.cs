@@ -1392,8 +1392,8 @@ public class NpcMeshResolver
                     // routinely point into a third mod's archive (a wig reusing
                     // the original hair mod's paths) — the same shape as the
                     // outfit fallback. Also keeps these pieces in the
-                    // unreachable-sweep probe set.
-                    allowLoadOrderFallback: true);
+                    // unreachable-sweep probe set. ForceLegacy = harness A/B only.
+                    allowLoadOrderFallback: !RenderResolutionMode.ForceLegacy);
                 emitted++;
             }
 
@@ -1510,7 +1510,8 @@ public class NpcMeshResolver
                     // Worn-armor headgear assets can live outside the mod's
                     // scope just like outfit armors; let them reach the
                     // broadcast tier and join the unreachable-sweep probe.
-                    allowLoadOrderFallback: true);
+                    // ForceLegacy = harness A/B only.
+                    allowLoadOrderFallback: !RenderResolutionMode.ForceLegacy);
             }
         }
 
@@ -1810,9 +1811,19 @@ public class NpcMeshResolver
     /// <see cref="BsaHandler.EnsureDataFolderArchivesIndexed"/> keeps even a persistent
     /// miss (a genuinely absent asset) from paying the sweep twice in a session.</para>
     /// </summary>
+    /// <summary>Latched once the full enabled load order's archives are known
+    /// to be indexed (a sweep found nothing left to add, or one completed the
+    /// indexing). From then on no sweep can ever admit another archive — the
+    /// load order is fixed for the session — so the per-render probe loop
+    /// below is pure waste and is skipped. The broadcast adapter's own
+    /// startup pre-warm typically satisfies this before the first render.</summary>
+    private volatile bool _fullLoadOrderIndexSatisfied;
+
     private void WidenArchiveIndexToFullLoadOrderIfUnreachable(
         IReadOnlyList<MeshOverride> overrides, string npcName)
     {
+        if (_fullLoadOrderIndexSatisfied) return;
+
         string dataFolder = _env.DataFolderPath;
         var unreachable = CollectUnreachableFallbackAssetPaths(
             overrides,
@@ -1838,9 +1849,14 @@ public class NpcMeshResolver
             + " unreachable after donor-scoped widening (" + string.Join(", ", unreachable)
             + ") — widening archive index to the full enabled load order ("
             + keys.Count + " plugin(s) not yet indexed).");
-        if (keys.Count == 0) return;
+        if (keys.Count == 0)
+        {
+            _fullLoadOrderIndexSatisfied = true;
+            return;
+        }
 
         _bsaHandler.EnsureDataFolderArchivesIndexed(keys, _env.SkyrimVersion.ToGameRelease());
+        _fullLoadOrderIndexSatisfied = true;
     }
 
     /// <summary>

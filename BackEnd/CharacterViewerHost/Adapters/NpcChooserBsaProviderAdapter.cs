@@ -87,7 +87,12 @@ public sealed class NpcChooserBsaProviderAdapter : IBsaArchiveProvider
 
             var release = _env.SkyrimVersion.ToGameRelease();
             int i = 0;
-            foreach (var ms in _settings.ModSettings)
+            // Snapshot: this runs on a background pre-warm task while the UI
+            // thread may still be mutating Settings.ModSettings (startup sync,
+            // user edits). Iterating the live list intermittently died with
+            // "Collection was modified", which skipped the latch and pushed
+            // this whole walk into the first mugshot render instead.
+            foreach (var ms in _settings.ModSettings.ToList())
             {
                 i++;
                 long modStart = sw.ElapsedMilliseconds;
@@ -183,72 +188,113 @@ public sealed class NpcChooserBsaProviderAdapter : IBsaArchiveProvider
     /// </summary>
     public bool TryLocateInBsa(string subpath, out string? containingBsaPath)
     {
-        containingBsaPath = null;
-
-        var enabledKeys = GetEnabledLoadOrderKeys();
-        if (enabledKeys.Count == 0)
+        long t0 = Stopwatch.GetTimestamp();
+        bool hit = false;
+        try
         {
-            Trace($"TryLocateInBsa: NO ENABLED LOAD-ORDER PLUGINS (environment not resolved?) — file=[{subpath}]");
+            containingBsaPath = null;
+
+            var ranking = GetEnabledRanking();
+            if (ranking.KeysAscending.Count == 0)
+            {
+                Trace($"TryLocateInBsa: NO ENABLED LOAD-ORDER PLUGINS (environment not resolved?) — file=[{subpath}]");
+                return false;
+            }
+
+            if (TryLocateAmongEnabled(subpath, ranking, out containingBsaPath)) return hit = true;
+
+            // First miss: make sure every enabled plugin's data-folder archives are
+            // actually in the index, then retry. Memoized — later misses are final.
+            if (TryWidenToEnabledLoadOrder(ranking.KeysAscending) &&
+                TryLocateAmongEnabled(subpath, ranking, out containingBsaPath))
+            {
+                return hit = true;
+            }
+
+            // Definitive miss. The full BSA-path inventory was dumped at the end of
+            // EnsureAllArchivesOpened, and the widen above logged its additions;
+            // correlate this miss against those blocks to verify the expected
+            // archive is actually indexed.
+            Trace($"TryLocateInBsa: MISS — file=[{subpath}] (scanned {_bsa.GetIndexedBsaPaths().Count} indexed BSA file(s) across {_bsa.GetIndexedModKeys().Count} mod key(s); see EnsureAllArchivesOpened inventory)");
             return false;
         }
-
-        if (TryLocateAmongEnabled(subpath, enabledKeys, out containingBsaPath)) return true;
-
-        // First miss: make sure every enabled plugin's data-folder archives are
-        // actually in the index, then retry. Memoized — later misses are final.
-        if (TryWidenToEnabledLoadOrder(enabledKeys) &&
-            TryLocateAmongEnabled(subpath, enabledKeys, out containingBsaPath))
+        finally
         {
-            return true;
+            BroadcastLookupStats.RecordLookup(Stopwatch.GetTimestamp() - t0, hit);
         }
-
-        // Definitive miss. The full BSA-path inventory was dumped at the end of
-        // EnsureAllArchivesOpened, and the widen above logged its additions;
-        // correlate this miss against those blocks to verify the expected
-        // archive is actually indexed.
-        Trace($"TryLocateInBsa: MISS — file=[{subpath}] (scanned {_bsa.GetIndexedBsaPaths().Count} indexed BSA file(s) across {_bsa.GetIndexedModKeys().Count} mod key(s); see EnsureAllArchivesOpened inventory)");
-        return false;
     }
 
     /// <summary>One ranked pass over the current index: all archives holding
     /// <paramref name="subpath"/>, filtered+ranked by the enabled load order.</summary>
-    private bool TryLocateAmongEnabled(string subpath, IReadOnlyList<ModKey> enabledKeys, out string? containingBsaPath)
+    private bool TryLocateAmongEnabled(string subpath, EnabledRanking ranking, out string? containingBsaPath)
     {
         containingBsaPath = null;
         var candidates = _bsa.LocateAllInBsas(subpath);
         if (candidates.Count == 0) return false;
 
-        var best = SelectByLoadOrder(candidates, enabledKeys);
+        var best = SelectByLoadOrderRanked(candidates, ranking.Rank);
         if (best == null)
         {
             // Present in the index, but only in archives no enabled plugin
             // loads (e.g. a disabled mod's folder BSA). The game wouldn't see
             // those bytes, so neither do we.
             Trace($"TryLocateInBsa: {candidates.Count} candidate(s) for file=[{subpath}] but none owned by an enabled load-order plugin — treating as miss " +
-                  $"([{string.Join(" | ", candidates.Select(c => c.BsaPath))}])");
+                  (BsaContentsDiag.IsEnabled ? $"([{string.Join(" | ", candidates.Select(c => c.BsaPath))}])" : "(enable LogBsaDiag.txt for the candidate list)"));
             return false;
         }
 
         string winner = best.Value.BsaPath;
         containingBsaPath = winner;
-        // Log the exact BSA file path the lookup resolved to, plus the
-        // field it beat, so a surprising winner can be checked against the
-        // load order without re-running.
+        // Log the exact BSA file path the lookup resolved to, plus the field
+        // it beat, so a surprising winner can be checked against the load
+        // order without re-running. The candidate join is diag-gated: it is
+        // per-lookup string work on the render hot path.
         Trace($"TryLocateInBsa: HIT (load order #{best.Value.LoadOrderIndex}, {candidates.Count} candidate(s)) — " +
               $"file=[{subpath}] in [{winner}] modKey=[{best.Value.ModKey.FileName}]" +
-              (candidates.Count > 1
+              (candidates.Count > 1 && BsaContentsDiag.IsEnabled
                   ? $"; also in [{string.Join(" | ", candidates.Where(c => c.BsaPath != winner).Select(c => c.BsaPath))}]"
                   : string.Empty));
         return true;
     }
 
-    /// <summary>Enabled plugins in ascending load-order position. Listed-but-
-    /// disabled plugins are excluded — the game does not load their archives.</summary>
-    private IReadOnlyList<ModKey> GetEnabledLoadOrderKeys()
+    /// <summary>Immutable enabled-load-order snapshot: keys ascending + a
+    /// ModKey→position rank map. Built once per resolved load order instead of
+    /// per broadcast lookup — with a ~1000-plugin load order the per-call
+    /// enumeration + dictionary build dominated the lookup itself.</summary>
+    private sealed record EnabledRanking(
+        object LoadOrderIdentity,
+        IReadOnlyList<ModKey> KeysAscending,
+        IReadOnlyDictionary<ModKey, int> Rank);
+
+    private volatile EnabledRanking? _enabledRanking;
+
+    /// <summary>Returns the cached ranking, rebuilding when the environment
+    /// re-resolved (the LoadOrder object's identity changes). Never caches an
+    /// EMPTY load order — an early call during startup must not pin
+    /// "no plugins" for the session.</summary>
+    private EnabledRanking GetEnabledRanking()
     {
         var loadOrder = _env.LoadOrder;
-        if (loadOrder == null) return Array.Empty<ModKey>();
-        return loadOrder.ListedOrder.Where(l => l.Enabled).Select(l => l.ModKey).ToList();
+        if (loadOrder == null)
+        {
+            return new EnabledRanking(this, Array.Empty<ModKey>(),
+                new Dictionary<ModKey, int>());
+        }
+
+        var cached = _enabledRanking;
+        if (cached != null && ReferenceEquals(cached.LoadOrderIdentity, loadOrder)) return cached;
+
+        var keys = loadOrder.ListedOrder.Where(l => l.Enabled).Select(l => l.ModKey).ToList();
+        var rank = new Dictionary<ModKey, int>(keys.Count);
+        for (int i = 0; i < keys.Count; i++)
+        {
+            // First listing wins if a key somehow repeats.
+            rank.TryAdd(keys[i], i);
+        }
+
+        var built = new EnabledRanking(loadOrder, keys, rank);
+        if (keys.Count > 0) _enabledRanking = built;
+        return built;
     }
 
     /// <summary>
@@ -262,9 +308,27 @@ public sealed class NpcChooserBsaProviderAdapter : IBsaArchiveProvider
     /// lookup). Does not latch on an empty load order, so an early call during
     /// an unresolved environment can retry later.
     /// </summary>
+    /// <summary>
+    /// Startup counterpart of the lazy first-miss widen: indexes the full
+    /// enabled load order's data-folder archives so no RENDER ever pays that
+    /// cost in-band (on large load orders it is seconds of BSA file-table
+    /// reads). Called from App startup's background pre-warm after
+    /// <see cref="EnsureAllArchivesOpened"/>; a no-op once latched, and safe
+    /// to skip — the lazy path in <see cref="TryLocateInBsa"/> remains the
+    /// correctness backstop.
+    /// </summary>
+    public void PrewarmEnabledLoadOrderArchives()
+    {
+        var ranking = GetEnabledRanking();
+        if (ranking.KeysAscending.Count == 0) return;
+        TryWidenToEnabledLoadOrder(ranking.KeysAscending);
+    }
+
     private bool TryWidenToEnabledLoadOrder(IReadOnlyList<ModKey> enabledKeys)
     {
         if (_loadOrderWidened) return false;
+        // Harness A/B: legacy mode never widened on a broadcast miss.
+        if (RenderResolutionMode.ForceLegacy) return false;
         lock (_ensureLock)
         {
             if (_loadOrderWidened) return false;
@@ -283,6 +347,7 @@ public sealed class NpcChooserBsaProviderAdapter : IBsaArchiveProvider
                     var sw = Stopwatch.StartNew();
                     _bsa.EnsureDataFolderArchivesIndexed(keys, _env.SkyrimVersion.ToGameRelease());
                     Trace($"TryWidenToEnabledLoadOrder: done in {sw.ElapsedMilliseconds}ms");
+                    BroadcastLookupStats.RecordWiden(sw.ElapsedMilliseconds);
                 }
                 _loadOrderWidened = true;
                 return keys.Count > 0;
@@ -328,6 +393,18 @@ public sealed class NpcChooserBsaProviderAdapter : IBsaArchiveProvider
             if (!loadOrderIndex.ContainsKey(mk)) loadOrderIndex[mk] = i;
             i++;
         }
+
+        return SelectByLoadOrderRanked(candidates, loadOrderIndex);
+    }
+
+    /// <summary>Ranked core of <see cref="SelectByLoadOrder"/>, taking a
+    /// prebuilt ModKey→position map so hot-path callers (the broadcast tier)
+    /// don't rebuild the map per lookup.</summary>
+    public static (ModKey ModKey, string BsaPath, int LoadOrderIndex)? SelectByLoadOrderRanked(
+        IReadOnlyList<(ModKey ModKey, string BsaPath)> candidates,
+        IReadOnlyDictionary<ModKey, int> loadOrderIndex)
+    {
+        if (candidates == null || candidates.Count == 0 || loadOrderIndex == null) return null;
 
         (ModKey ModKey, string BsaPath, int LoadOrderIndex)? best = null;
         foreach (var candidate in candidates)

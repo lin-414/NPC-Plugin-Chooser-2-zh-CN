@@ -210,6 +210,19 @@ namespace NPC_Plugin_Chooser_2
             splashVM.UpdateProgress(15, "Loading settings model...");
             StartupLogger.Log("Loading settings from disk");
             var settingsModel = VM_Settings.LoadSettings(); // Use the static method from your Settings model
+            // Render-harness runs must own every render in the process: the NPC bar
+            // restores the last-selected NPC during startup and its tiles would kick
+            // off autogen renders that race the harness's measured bursts (and append
+            // foreign rows to RenderTimings.csv). Disabling the fallback here — before
+            // any VM exists — suppresses that kick; the tiles still display existing
+            // images. RenderHarnessRunner restores the flag before the exit-time
+            // settings save so the user's persisted value is untouched.
+            if (RenderHarnessRunner.ConfigExists)
+            {
+                RenderHarnessRunner.SuppressedUsePortraitCreatorFallback = settingsModel.UsePortraitCreatorFallback;
+                settingsModel.UsePortraitCreatorFallback = false;
+                StartupLogger.Log("RenderHarness.json detected — startup mugshot auto-generation suppressed for the harness run");
+            }
             // Enable startup logging from settings if not already enabled by file trigger
             StartupLogger.InitializeFromSettings(settingsModel.LogStartup);
             // Apply the persisted "Log Asset Provenance" setting (the file trigger, if present, keeps it on).
@@ -500,6 +513,21 @@ namespace NPC_Plugin_Chooser_2
                     catch (Exception ex)
                     {
                         StartupLogger.Log("Background BSA pre-warm failed: " + ex.Message, "WARN");
+                    }
+
+                    // Then the enabled load order's data-folder archives (the
+                    // engine-order broadcast tier), so the one-time widen never
+                    // stalls the first mugshot render mid-click. Ordered after
+                    // the ModSettings walk above: that walk populates the index
+                    // entries the widen's already-indexed filter keys on.
+                    try
+                    {
+                        (bsaProvider as BackEnd.CharacterViewerHost.Adapters.NpcChooserBsaProviderAdapter)
+                            ?.PrewarmEnabledLoadOrderArchives();
+                    }
+                    catch (Exception ex)
+                    {
+                        StartupLogger.Log("Background load-order archive pre-warm failed: " + ex.Message, "WARN");
                     }
                 });
             }
