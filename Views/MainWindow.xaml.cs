@@ -89,6 +89,10 @@ namespace NPC_Plugin_Chooser_2.Views
                           vm => vm.IsRunTabSelected,
                           v  => v.RunRadioButton.IsChecked)
                     .DisposeWith(disposables);
+                this.Bind(ViewModel,
+                          vm => vm.IsValidateTabSelected,
+                          v  => v.ValidateRadioButton.IsChecked)
+                    .DisposeWith(disposables);
 
                 // 3) Enable/disable the “other” tabs
                 this.WhenAnyValue(x => x.ViewModel.AreOtherTabsEnabled)
@@ -99,6 +103,7 @@ namespace NPC_Plugin_Chooser_2.Views
                         ModIssuesRadioButton.IsEnabled = enabled;
                         SummaryRadioButton.IsEnabled   = enabled;
                         RunRadioButton.IsEnabled       = enabled;
+                        ValidateRadioButton.IsEnabled  = enabled;
                         // Settings remains always enabled
                     })
                     .Subscribe()
@@ -116,6 +121,7 @@ namespace NPC_Plugin_Chooser_2.Views
                             ModIssuesRadioButton.ClearValue(Control.ForegroundProperty);
                             SummaryRadioButton.ClearValue(Control.ForegroundProperty);
                             RunRadioButton.ClearValue(Control.ForegroundProperty);
+                            ValidateRadioButton.ClearValue(Control.ForegroundProperty);
                         }
                         else
                         {
@@ -133,6 +139,9 @@ namespace NPC_Plugin_Chooser_2.Views
                                 Control.ForegroundProperty,
                                 SystemColors.GrayTextBrushKey);
                             RunRadioButton.SetResourceReference(
+                                Control.ForegroundProperty,
+                                SystemColors.GrayTextBrushKey);
+                            ValidateRadioButton.SetResourceReference(
                                 Control.ForegroundProperty,
                                 SystemColors.GrayTextBrushKey);
                         }
@@ -164,6 +173,7 @@ namespace NPC_Plugin_Chooser_2.Views
                 SummaryRadioButton.Template = template;
                 SettingsRadioButton.Template = template;
                 RunRadioButton.Template = template;
+                ValidateRadioButton.Template = template;
             }
         }
 

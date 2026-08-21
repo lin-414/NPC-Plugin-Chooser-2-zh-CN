@@ -117,51 +117,50 @@
                 Background="{DynamicResource NavBarBackground}"
                 BorderBrush="{DynamicResource BorderBrush}"
                 BorderThickness="0,0,0,1">
+        <!-- The tab radios carry NO {Binding}s: MainWindow's DataContext is never set, so a
+             XAML binding here never resolves — and at Loaded, WPF re-evaluates the unresolved
+             binding and resets the property to its default, stomping the value the code-behind
+             this.Bind(...) wiring (MainWindow.xaml.cs, WhenActivated) just pushed and feeding
+             false back into the VM. That is exactly the "no tab underlined on startup" bug
+             pinned by MainWindowStartupUnderlineTests. IsChecked / IsEnabled are owned solely
+             by the code-behind. -->
         <StackPanel Orientation="Horizontal" Margin="4,0">
 
           <RadioButton x:Name="NpcsRadioButton"
                        Style="{StaticResource TabToggleButtonStyle}"
                        Content="NPCs"
-                       GroupName="MainTabs"
-                       IsChecked="{Binding IsNpcsTabSelected, Mode=TwoWay}"
-                       IsEnabled="{Binding AreOtherTabsEnabled}" />
-        
+                       GroupName="MainTabs" />
+
           <RadioButton x:Name="ModsRadioButton"
                        Style="{StaticResource TabToggleButtonStyle}"
                        Content="Mods"
-                       GroupName="MainTabs"
-                       IsChecked="{Binding IsModsTabSelected, Mode=TwoWay}"
-                       IsEnabled="{Binding AreOtherTabsEnabled}" />
+                       GroupName="MainTabs" />
 
           <RadioButton x:Name="ModIssuesRadioButton"
                        Style="{StaticResource TabToggleButtonStyle}"
                        Content="Mod Issues"
-                       GroupName="MainTabs"
-                       IsChecked="{Binding IsModIssuesTabSelected, Mode=TwoWay}"
-                       IsEnabled="{Binding AreOtherTabsEnabled}" />
-
+                       GroupName="MainTabs" />
 
           <RadioButton x:Name="SummaryRadioButton"
                        Style="{StaticResource TabToggleButtonStyle}"
                        Content="Summary"
-                       GroupName="MainTabs"
-                       IsChecked="{Binding IsSummaryTabSelected, Mode=TwoWay}"
-                       IsEnabled="{Binding AreOtherTabsEnabled}" />
-        
+                       GroupName="MainTabs" />
+
           <RadioButton x:Name="SettingsRadioButton"
                        Style="{StaticResource TabToggleButtonStyle}"
                        Content="Settings"
-                       GroupName="MainTabs"
-                       IsChecked="{Binding IsSettingsTabSelected, Mode=TwoWay}"
-                       IsEnabled="True" />
-        
+                       GroupName="MainTabs" />
+
           <RadioButton x:Name="RunRadioButton"
                        Style="{StaticResource TabToggleButtonStyle}"
                        Content="Run"
-                       GroupName="MainTabs"
-                       IsChecked="{Binding IsRunTabSelected, Mode=TwoWay}"
-                       IsEnabled="{Binding AreOtherTabsEnabled}" />
-        
+                       GroupName="MainTabs" />
+
+          <RadioButton x:Name="ValidateRadioButton"
+                       Style="{StaticResource TabToggleButtonStyle}"
+                       Content="Validate"
+                       GroupName="MainTabs" />
+
         </StackPanel>
         </Border>
 

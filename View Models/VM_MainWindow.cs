@@ -21,6 +21,7 @@ public class VM_MainWindow : ReactiveObject, IDisposable
     private readonly VM_Summary _summaryViewModel;
     private readonly VM_Settings _settingsViewModel;
     private readonly VM_Run _runViewModel;
+    private readonly VM_Validate _validateViewModel;
 
     private readonly EnvironmentStateProvider _environmentStateProvider;
     private readonly Settings _settings;
@@ -45,6 +46,7 @@ public class VM_MainWindow : ReactiveObject, IDisposable
     [Reactive] public bool IsSummaryTabSelected { get; set; }
     [Reactive] public bool IsSettingsTabSelected { get; set; }
     [Reactive] public bool IsRunTabSelected { get; set; }
+    [Reactive] public bool IsValidateTabSelected { get; set; }
     [Reactive] public bool AreOtherTabsEnabled { get; private set; }
     [Reactive] public bool IsLoadingFolders { get; set; } = false;
     [Reactive] public string TabStyle { get; set; } = "Box";
@@ -56,6 +58,7 @@ public class VM_MainWindow : ReactiveObject, IDisposable
         VM_Summary summaryViewModel,
         VM_Settings settingsViewModel,
         VM_Run runViewModel,
+        VM_Validate validateViewModel,
         EnvironmentStateProvider environmentStateProvider,
         Settings settings)
     {
@@ -65,6 +68,7 @@ public class VM_MainWindow : ReactiveObject, IDisposable
         _summaryViewModel = summaryViewModel;
         _settingsViewModel = settingsViewModel;
         _runViewModel = runViewModel;
+        _validateViewModel = validateViewModel;
         _environmentStateProvider = environmentStateProvider;
         _settings = settings;
 
@@ -101,6 +105,7 @@ public class VM_MainWindow : ReactiveObject, IDisposable
                     IsModsTabSelected = false;
                     IsModIssuesTabSelected = false;
                     IsRunTabSelected = false;
+                    IsValidateTabSelected = false;
                 }
             }).DisposeWith(_disposables);
 
@@ -178,6 +183,13 @@ public class VM_MainWindow : ReactiveObject, IDisposable
             {
                 if (CurrentViewModel != _runViewModel) CurrentViewModel = _runViewModel;
             }).DisposeWith(_disposables);
+
+        this.WhenAnyValue(x => x.IsValidateTabSelected)
+            .Where(isSelected => isSelected && AreOtherTabsEnabled)
+            .Subscribe(_ =>
+            {
+                if (CurrentViewModel != _validateViewModel) CurrentViewModel = _validateViewModel;
+            }).DisposeWith(_disposables);
     }
 
     public void InitializeApplicationState(bool isStartup)
@@ -200,6 +212,7 @@ public class VM_MainWindow : ReactiveObject, IDisposable
                 IsModIssuesTabSelected = false;
                 IsSettingsTabSelected = false;
                 IsRunTabSelected = false;
+                IsValidateTabSelected = false;
             }
             // If not startup and conditions are met:
             // - If current view is Settings, user can now navigate away.
@@ -221,6 +234,7 @@ public class VM_MainWindow : ReactiveObject, IDisposable
             IsModsTabSelected = false;
             IsModIssuesTabSelected = false;
             IsRunTabSelected = false;
+            IsValidateTabSelected = false;
         }
     }
     

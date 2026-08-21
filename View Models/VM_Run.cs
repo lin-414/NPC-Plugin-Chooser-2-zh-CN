@@ -32,6 +32,7 @@ public class VM_Run : ReactiveObject, IDisposable
     private readonly EnvironmentStateProvider _environmentStateProvider;
     private readonly Settings _settings;
     private readonly VM_Settings _vmSettings;
+    private readonly VM_Validate _vmValidate;
     private readonly Lazy<VM_Mods> _lazyVmMods;
     private readonly Patcher _patcher;
     private readonly Validator _validator;
@@ -103,17 +104,14 @@ public class VM_Run : ReactiveObject, IDisposable
     public ReactiveCommand<Unit, Unit> RunCommand { get; }
     public ReactiveCommand<Unit, Unit> GenerateSpawnBatCommand { get; }
     public ReactiveCommand<Unit, Unit> ShowStatusCommand { get; }
-    
-    public ReactiveCommand<Unit, Unit> AnalyzeMastersCommand { get; }
 
-    // Passthrough to the Settings VM so the Run tab can offer the same "Validate Output"
-    // action without duplicating its logic (which lives in VM_Settings).
-    public ReactiveCommand<Unit, Unit> ValidateOutputCommand => _vmSettings.ValidateOutputCommand;
+    public ReactiveCommand<Unit, Unit> AnalyzeMastersCommand { get; }
 
     public VM_Run(
         EnvironmentStateProvider environmentStateProvider,
         Settings settings,
         VM_Settings vmSettings,
+        VM_Validate vmValidate,
         Lazy<VM_Mods> lazyVmMods,
         Patcher patcher,
         Validator validator,
@@ -131,6 +129,7 @@ public class VM_Run : ReactiveObject, IDisposable
         _environmentStateProvider = environmentStateProvider;
         _settings = settings;
         _vmSettings = vmSettings;
+        _vmValidate = vmValidate;
         _lazyVmMods = lazyVmMods;
         _patcher = patcher;
         _validator = validator;
@@ -552,7 +551,7 @@ public class VM_Run : ReactiveObject, IDisposable
                 // Same "this run touched the disk" signal: arm the Validate Output confirmation.
                 // Under a mod manager the VFS this process sees was built at launch, so the
                 // validator can no longer trust the Data folder until N.P.C.2 is relaunched.
-                _vmSettings.NotifyPatchRunCompleted();
+                _vmValidate.NotifyPatchRunCompleted();
 
                 try { _offscreenRenderer.Value.InvalidateCaches(); }
                 catch (Exception ex)

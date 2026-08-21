@@ -107,6 +107,8 @@ public sealed class FrontendVmHarness : IDisposable
         builder.RegisterType<MeshSurveyRunner>().AsSelf().SingleInstance();
         builder.RegisterType<FaceGenAnalysisCache>().AsSelf().SingleInstance();
         builder.RegisterType<FaceGenConsistencyAnalyzer>().AsSelf().SingleInstance();
+        builder.RegisterType<ModIssuesCache>().AsSelf().SingleInstance();
+        builder.RegisterType<ModIssueScanner>().AsSelf().SingleInstance();
 
         if (useRealRenderer)
         {
@@ -133,7 +135,9 @@ public sealed class FrontendVmHarness : IDisposable
         builder.RegisterType<VM_NpcSelectionBar>().AsSelf().SingleInstance();
         builder.RegisterType<VM_Settings>().AsSelf().SingleInstance();
         builder.RegisterType<VM_Run>().AsSelf().SingleInstance();
+        builder.RegisterType<VM_Validate>().AsSelf().SingleInstance();
         builder.RegisterType<VM_Mods>().AsSelf().SingleInstance();
+        builder.RegisterType<VM_ModIssues>().AsSelf().SingleInstance();
         builder.RegisterType<VM_Summary>().AsSelf().SingleInstance();
         builder.RegisterType<VM_FavoriteFaces>().AsSelf();
         builder.RegisterType<VM_FullScreenImage>().AsSelf();

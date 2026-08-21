@@ -898,7 +898,7 @@ The Summary tab is an at-a-glance overview of every NPC you’ve made a selectio
 
 ## Run Menu
 
-This is where you generate output and verify it.
+This is where you generate output. (The verification tools, **Validate Output** and **Analyze Masters**, live in the [Validate tab](#validate-menu).)
 
 ![Run menu / Environment Status](docs/Screenshots/Run/Environment_Status.png)
 
@@ -908,7 +908,6 @@ This is where you generate output and verify it.
 * **Performance Logging**: Prints the per-batch performance report at the end of a run (and the detailed timings on a validation run). On by default. Turning it off skips the report entirely rather than just hiding it. Timing warnings about a specific slow NPC always show, since those point at a real problem.
 * **Verbose Logging**: Produces a detailed log — recommended only for troubleshooting. Both this and Performance Logging are now remembered between sessions.
 * **Environment Status**: Prints your current configuration and full load order into the output pane (pictured). If you’re asking for help, copy this into a PasteBin and share the link.
-* **Analyze Masters** and **Validate Output**: Verification tools, covered below.
 
 The log pane itself is colour-coded by severity — warnings in yellow, errors in red, and successfully written files in green — so problems are findable in a long run without reading every line. Warnings and errors always appear regardless of the Verbose setting. Long lines wrap instead of running off the edge, the view sticks to the bottom as new output arrives but stops fighting you the moment you scroll back, and you can select lines and copy them with **Ctrl+C** or the right-click menu (click and drag to sweep a range). Selection is by whole line rather than by character.
 
@@ -924,9 +923,11 @@ Once you continue, the patcher runs; the output pane reports progress and finish
 
 ![Patching completed](docs/Screenshots/Run/Patching_Completed.png)
 
-### Validate Output
+## Validate Menu
 
-The **Validate Output** tool inspects an *already-generated* output against your selections to confirm the deployed result really matches what you picked — invaluable when something in your load order might be overwriting N.P.C.2’s output.
+This tab holds the two verification tools: **Validate Output** and **Analyze Masters** (covered at the end of this section).
+
+**Validate Output** inspects an *already-generated* output against your selections to confirm the deployed result really matches what you picked — invaluable when something in your load order might be overwriting N.P.C.2’s output.
 
 > **Important — refresh your mod manager first.** Validation reads the output exactly as your mod manager deploys it, so the freshly-generated files must be present in the mod manager’s virtual file system. After generating output you need to: **(1)** close N.P.C.2; **(2)** in your mod manager, enable the output mod and its plugin(s) (if you didn’t already in a previous session); and **(3)** relaunch N.P.C.2 **through your mod manager**, so it rebuilds the virtual file system with the new output included. If you validate immediately after generating without doing this, the check runs against a stale virtual file system that doesn’t contain your latest output, and the results will be misleading. N.P.C.2 enforces this for you: clicking **Validate Output** after running the patcher in the same session pops a confirmation explaining exactly this, so you can’t stumble into a misleading report by accident.
 
@@ -946,7 +947,7 @@ The **Error / Warning / Info** checkboxes beside the filter box control which se
 
 ![Contrived demo load order](docs/Screenshots/Run/Validate_Output_Demo_Situation_Contrived.png)
 
-#### “Not patched” findings
+### “Not patched” findings
 
 The NPC list you validate comes from your *current* selections, but a run doesn’t necessarily patch all of them: a selection can be dropped by the pre-run screening (you’re shown the list and asked whether to continue), and the patcher deliberately leaves an NPC alone when assembling its face would have caused the dark face bug. For those NPCs nothing of N.P.C.2’s is in your game at all, and grading them against your selection would report a mismatch the app didn’t cause and can’t fix.
 
@@ -957,7 +958,7 @@ So the validator checks first whether the last run actually covered each NPC, us
 
 If `NPC_Token.json` is missing or lists no NPCs — an older output, or a run that was interrupted before it finished — the validator says so in the notes and grades everything as before, rather than claiming your whole output is missing.
 
-#### NPCs that inherit someone else’s face
+### NPCs that inherit someone else’s face
 
 Skyrim lets an NPC borrow another NPC’s appearance outright, via the **Traits** template flag — the game never loads that NPC’s own head parts or FaceGen at all. Lots of generic NPCs work this way. The validator follows those chains, so it checks the face the NPC *actually renders* rather than files the game never touches.
 
@@ -965,14 +966,14 @@ Most of the time this is invisible: if the NPC it inherits from carries the same
 
 This all depends on your [Templated NPCs](#output-settings) setting, and the validator respects it. Under *Give each NPC its own copy* the NPC owns its own face, so the redirect doesn’t apply and you won’t be told your selection was ignored — because it wasn’t.
 
-#### “No FaceGen” findings
+### “No FaceGen” findings
 
 Two findings concern an NPC that has no face mesh, and they mean opposite things:
 
 * An **Info** row saying the selected mod ships no FaceGen for this NPC is *not* a problem. It's the patcher's designed behavior: when the chosen mod changes an NPC's face records but ships no mesh of its own, N.P.C.2 forwards a suitable one, and the row names what actually supplied it.
 * A **warning** that there's no FaceGen *anywhere* is a real finding — usually a missing master. It's deliberately narrow, and excludes everything that legitimately has no face of its own: NPCs still inheriting through a template, races without the FaceGen Head flag, and records with no head parts at all.
 
-#### Reading FaceGen findings
+### Reading FaceGen findings
 
 A **FaceGen** finding means the deployed `.nif` and the NPC’s head parts don’t agree, which is what produces the dark face bug in game. The message tries to name the *likely cause* rather than just the symptom, because the fix is completely different depending on which it is: one head part out of step usually means a slightly different version of the appearance mod, whereas a wholesale disagreement almost always means a conflict was lost — either another plugin’s NPC record won, or another mod’s FaceGen file overwrote yours. The remedies given are specific to whichever case it detected.
 
@@ -993,7 +994,6 @@ The screenshots use a deliberately contrived example. Here *Karura's Ordinary Pe
 ![Analyze masters - SSEEdit verification](docs/Screenshots/Run/Analuze_Masters_SSEedit_Verification.png)
 
 > **Tip:** this is exactly why I usually recommend leaving your appearance overhauls **disabled** in your load order. N.P.C.2 can fish all the data and assets it needs out of disabled mods, so a disabled overhaul won't sneak in as a master dependency the way an active conflict-winning override can.
-
 
 # FAQ
 
@@ -1035,7 +1035,7 @@ As a reminder, this is getting in the weeds and for the vast majority of appeara
 
 **Q: How do I check that my output actually came out right?**
 
-A: Use the **Validate Output** button in the Run tab. It compares the deployed result against your selections and flags any NPC whose record or FaceGen mesh doesn’t match what you chose (and tells you which plugin won the conflict). **Analyze Masters** complements it by showing why your output depends on each master.
+A: Use the **Validate** tab. It compares the deployed result against your selections and flags any NPC whose record or FaceGen mesh doesn’t match what you chose (and tells you which plugin won the conflict). **Analyze Masters** complements it by showing why your output depends on each master.
 
 For an in-game spot check, you can also use **Generate Spawn Bat** (Run tab) to spawn a Group of NPCs in front of you and eyeball them. Make a small Group for this — e.g. one NPC of each race + gender — rather than using `<All NPCs>`: a spawn bat for the entire list tries to summon thousands of NPCs at once and will crash anything short of a supercomputer.
 

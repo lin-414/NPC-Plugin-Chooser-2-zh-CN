@@ -316,6 +316,7 @@ namespace NPC_Plugin_Chooser_2
             builder.RegisterType<VM_NpcSelectionBar>().AsSelf().SingleInstance();
             builder.RegisterType<VM_Settings>().AsSelf().SingleInstance(); 
             builder.RegisterType<VM_Run>().AsSelf().SingleInstance();
+            builder.RegisterType<VM_Validate>().AsSelf().SingleInstance();
             builder.RegisterType<VM_Mods>().AsSelf().SingleInstance();
             builder.RegisterType<VM_ModIssues>().AsSelf().SingleInstance();
             builder.RegisterType<VM_Summary>().AsSelf().SingleInstance();
@@ -338,6 +339,7 @@ namespace NPC_Plugin_Chooser_2
             builder.RegisterType<NpcsView>().As<IViewFor<VM_NpcSelectionBar>>();
             builder.RegisterType<SettingsView>().As<IViewFor<VM_Settings>>();
             builder.RegisterType<RunView>().As<IViewFor<VM_Run>>();
+            builder.RegisterType<ValidateView>().As<IViewFor<VM_Validate>>();
             builder.RegisterType<SummaryView>().As<IViewFor<VM_Summary>>();
             builder.RegisterType<ModsView>().As<IViewFor<VM_Mods>>();
             builder.RegisterType<ModIssuesView>().As<IViewFor<VM_ModIssues>>();
@@ -365,6 +367,7 @@ namespace NPC_Plugin_Chooser_2
             Locator.CurrentMutable.Register(() => new NpcsView(), typeof(IViewFor<VM_NpcSelectionBar>));
             Locator.CurrentMutable.Register(() => new SettingsView(), typeof(IViewFor<VM_Settings>));
             Locator.CurrentMutable.Register(() => new RunView(), typeof(IViewFor<VM_Run>));
+            Locator.CurrentMutable.Register(() => new ValidateView(), typeof(IViewFor<VM_Validate>));
             Locator.CurrentMutable.Register(() => new SummaryView(), typeof(IViewFor<VM_Summary>));
             Locator.CurrentMutable.Register(() => new ModsView(), typeof(IViewFor<VM_Mods>));
             Locator.CurrentMutable.Register(() => new ModIssuesView(), typeof(IViewFor<VM_ModIssues>));
