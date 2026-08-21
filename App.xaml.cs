@@ -452,7 +452,13 @@ namespace NPC_Plugin_Chooser_2
             // icon and its staleness exemption are built on — this build
             // compiles against those types, so an older DLL won't load at all;
             // the warning documents the floor for the bundled-DLL swap case.
-            var requiredViewerVersion = new Version(2, 6, 2);
+            // 2.8.0 added engine-order asset resolution
+            // (OffscreenRenderRequest.AllowLoadOrderFallback +
+            // RenderScope.DeprioritizeBelowDataFolder), which the mugshot
+            // generator, 3D previews, and Mod Issues scan all rely on for
+            // out-of-scope BSA assets (e.g. hair textures referencing the
+            // original hair mod's archive).
+            var requiredViewerVersion = new Version(2, 8, 0);
             if (CharacterViewerRendering.Version < requiredViewerVersion)
             {
                 StartupLogger.Log(

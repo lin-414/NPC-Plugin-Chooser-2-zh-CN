@@ -47,4 +47,51 @@ public class NpcToken
     /// output. Without this list an intentional edit reads as a lost conflict.</para>
     /// </summary>
     public HashSet<string> EditedFaceGen { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Assets the output REFERENCES but deliberately did not copy, resolved from the user's live
+    /// data folder at patch time (out-of-scope references, or a mod with "Copy Assets" unchecked).
+    /// The run keeps them working two ways — archive-packed assets pin their loader plugin as an
+    /// output MASTER, loose ones are recorded here — and "Validate Output" re-verifies both
+    /// against the CURRENT setup. Null in tokens written by older versions, which readers must
+    /// treat as "unknown", never as "no dependencies".
+    /// </summary>
+    public AssetDependencyLedger? AssetDependencies { get; set; }
+}
+
+/// <summary>
+/// The runtime-dependency half of <see cref="NpcToken"/>: what the user's mod configuration must
+/// keep supplying for the generated output to render correctly. See
+/// <c>AssetHandler.ResolveRuntimeDependenciesAsync</c> for how it is populated.
+/// </summary>
+public class AssetDependencyLedger
+{
+    /// <summary>
+    /// Plugins added as EXTRA masters of the output plugin because one of their data-folder
+    /// archives supplies referenced assets that were not copied. The game refuses to load the
+    /// output without its masters, which is exactly the guarantee: the archive stays loaded.
+    /// </summary>
+    public List<ArchiveDependency> ArchiveMasters { get; set; } = new();
+
+    /// <summary>
+    /// Regularized data-relative paths of referenced-but-not-copied assets satisfied by LOOSE
+    /// files in the data folder at patch time. Loose files cannot be protected by mastering
+    /// (they belong to no plugin), so "Validate Output" checks each still exists and warns
+    /// when the supplying mod was removed or disabled.
+    /// </summary>
+    public List<string> LooseFiles { get; set; } = new();
+}
+
+/// <summary>One extra-master entry of <see cref="AssetDependencyLedger.ArchiveMasters"/>.</summary>
+public class ArchiveDependency
+{
+    /// <summary>The plugin the output was mastered to.</summary>
+    public ModKey Plugin { get; set; }
+
+    /// <summary>Archive file names (not full paths — the data folder moves between machines)
+    /// that supplied the assets.</summary>
+    public List<string> Archives { get; set; } = new();
+
+    /// <summary>Regularized data-relative paths of the assets this plugin's archives supply.</summary>
+    public List<string> Assets { get; set; } = new();
 }

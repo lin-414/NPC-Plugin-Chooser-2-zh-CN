@@ -459,8 +459,12 @@ public sealed class ModIssueScanner
             bool ghostMasked = HasGhostKeyword(npc);
 
             // FaceGen tint DDS. Only meaningful for NPCs that own FaceGen.
+            // allowLoadOrderFallback true everywhere below (2.8.0): the scan
+            // must agree with the renderer's engine-order mode — an asset an
+            // enabled load-order archive provides is NOT missing in game, so
+            // flagging it here would be a false positive.
             if (shouldHaveFaceGen && !string.IsNullOrWhiteSpace(paths.FaceTintPath) &&
-                ResolveToDisk(paths.FaceTintPath!, allowLoadOrderFallback: false) == null)
+                ResolveToDisk(paths.FaceTintPath!, allowLoadOrderFallback: true) == null)
             {
                 AddIssue(ModIssueType.MissingFaceGenTint, faceGenTintRel,
                     severity: ghostMasked ? ModIssueSeverity.Note : ModIssueSeverity.Issue,
@@ -485,20 +489,20 @@ public sealed class ModIssueScanner
             // Argonian tails and worn hair — from the record chain's TextureSet (the ARMA's,
             // or the race skin's). The paths baked in these NIFs are runtime-superseded,
             // so their misses demote to Note below. Only FaceGen bakes are final.
-            CheckMesh(mod, paths.BodyMeshPath, "Skin ARMA (Body)" + skinVia, false, false, false, nifJobs, AddIssue, isSkin: true);
-            CheckMesh(mod, paths.HandsMeshPath, "Skin ARMA (Hands)" + skinVia, false, false, false, nifJobs, AddIssue, isSkin: true);
-            CheckMesh(mod, paths.FeetMeshPath, "Skin ARMA (Feet)" + skinVia, false, false, false, nifJobs, AddIssue, isSkin: true);
-            CheckMesh(mod, paths.HairMeshPath, "Worn hair ARMA", false, false, false, nifJobs, AddIssue, isSkin: true);
-            CheckMesh(mod, paths.TailMeshPath, "Tail ARMA", false, false, false, nifJobs, AddIssue, isSkin: true);
+            CheckMesh(mod, paths.BodyMeshPath, "Skin ARMA (Body)" + skinVia, true, false, false, nifJobs, AddIssue, isSkin: true);
+            CheckMesh(mod, paths.HandsMeshPath, "Skin ARMA (Hands)" + skinVia, true, false, false, nifJobs, AddIssue, isSkin: true);
+            CheckMesh(mod, paths.FeetMeshPath, "Skin ARMA (Feet)" + skinVia, true, false, false, nifJobs, AddIssue, isSkin: true);
+            CheckMesh(mod, paths.HairMeshPath, "Worn hair ARMA", true, false, false, nifJobs, AddIssue, isSkin: true);
+            CheckMesh(mod, paths.TailMeshPath, "Tail ARMA", true, false, false, nifJobs, AddIssue, isSkin: true);
 
             // FaceGen head: existence already handled above (FaceGenExists knows
             // the renderer's vanilla-loose-skip rule, which plain resolution
             // doesn't), so only queue the texture walk when it resolves.
-            var headSource = ResolveSource(paths.HeadMeshPath, allowLoadOrderFallback: false);
+            var headSource = ResolveSource(paths.HeadMeshPath, allowLoadOrderFallback: true);
             string? headDisk = headSource?.ResolvedDiskPath;
             if (headDisk != null)
             {
-                nifJobs.Add(new NifJob(headDisk, paths.HeadMeshPath!, "FaceGen head", false, IsFaceGen: true,
+                nifJobs.Add(new NifJob(headDisk, paths.HeadMeshPath!, "FaceGen head", true, IsFaceGen: true,
                     SourceDescription: headSource!.LoosePath ??
                         (headSource.BsaPath != null ? $"{headSource.BsaPath} :: {headSource.InternalBsaPath}" : headDisk)));
             }

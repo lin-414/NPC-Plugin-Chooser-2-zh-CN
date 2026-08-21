@@ -147,15 +147,28 @@ public class NpcMeshResolver
         // folder pairs with the same CorrespondingModKeys list — the spec
         // calls for "BSAs at this folder owned by any of the
         // CorrespondingModKeys".
+        //
+        // Copy Assets OFF demotes these scopes below the data folder + the
+        // broadcast archive tier (engine-order mode only): nothing from the
+        // mod's folders will be copied into the output, so at runtime the
+        // game resolves the NPC's assets from the user's live setup — the
+        // preview should rank sources the same way. The scopes stay in the
+        // chain as a last resort so browsing a mod that isn't enabled still
+        // shows content, and FaceGen paths ignore the demotion inside the
+        // resolver because FaceGen is copied regardless of Copy Assets.
         if (modSetting != null && modSetting.CorrespondingFolderPaths.Count > 0)
         {
+            bool demoteBelowDataFolder = !modSetting.CopyAssets;
             var modKeyNames = modSetting.CorrespondingModKeys
                 .Select(mk => mk.FileName.String)
                 .ToList();
             foreach (var folder in modSetting.CorrespondingFolderPaths)
             {
                 if (string.IsNullOrWhiteSpace(folder)) continue;
-                scopes.Add(new RenderScope(folder, modKeyNames));
+                scopes.Add(new RenderScope(folder, modKeyNames)
+                {
+                    DeprioritizeBelowDataFolder = demoteBelowDataFolder
+                });
             }
         }
 
@@ -1374,7 +1387,13 @@ public class NpcMeshResolver
                     sex, npcRaceKey, armorRaceKey, linkCache, context,
                     includeBody: false, includeHeadgear: false,
                     hairCountsAsHeadgear: true, result, seenOverrideKeys,
-                    isAntler ? WigPieceClass.Antler : WigPieceClass.Wig);
+                    isAntler ? WigPieceClass.Antler : WigPieceClass.Wig,
+                    // The wig NIF itself is mod-scoped, but its TEXTURES
+                    // routinely point into a third mod's archive (a wig reusing
+                    // the original hair mod's paths) — the same shape as the
+                    // outfit fallback. Also keeps these pieces in the
+                    // unreachable-sweep probe set.
+                    allowLoadOrderFallback: true);
                 emitted++;
             }
 
@@ -1487,7 +1506,11 @@ public class NpcMeshResolver
                 AppendArmorMeshOverrides(wornArmor, wornSource, sex, npcRaceKey, armorRaceKey, linkCache, context,
                     includeBody: false, includeHeadgear: true,
                     hairCountsAsHeadgear: false, result, seenOverrideKeys,
-                    suppressArmaKeys: suppressAntlerArmas);
+                    suppressArmaKeys: suppressAntlerArmas,
+                    // Worn-armor headgear assets can live outside the mod's
+                    // scope just like outfit armors; let them reach the
+                    // broadcast tier and join the unreachable-sweep probe.
+                    allowLoadOrderFallback: true);
             }
         }
 

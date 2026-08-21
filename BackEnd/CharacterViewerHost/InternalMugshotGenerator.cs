@@ -245,6 +245,14 @@ public sealed class InternalMugshotGenerator
                 // 8-step contract. AdditionalScopes (1.2.0+) supersedes
                 // AdditionalDataFolders.
                 AdditionalScopes = _resolver.BuildResolutionScopes(modSetting, npcFormKey),
+                // Engine-order resolution (2.8.0+): after the scope chain and
+                // data-folder loose, EVERY asset may fall back to the broadcast
+                // archive tier (enabled load-order plugins' data-folder BSAs,
+                // ranked by load order). This is what lets headpart/skin
+                // textures that a mod references from ANOTHER mod's BSA (e.g.
+                // hairs reusing the original hair mod's paths) resolve the way
+                // the game resolves them, instead of rendering as missing.
+                AllowLoadOrderFallback = true,
                 Cancellation = token,
                 MissingMeshPathsOut = missingMeshPathsOut,
                 MissingTexturePathsOut = missingTexturePathsOut,

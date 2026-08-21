@@ -148,6 +148,11 @@ public class OutputValidator
             log.AppendLine($"MODE MISMATCH: {modeMismatch}");
         }
 
+        // Runtime asset dependencies recorded by the last run (assets the output references but
+        // deliberately did not copy): re-verify them against the CURRENT setup before the per-NPC
+        // loop, since they belong to the output as a whole.
+        ValidateAssetDependencies(lastRun?.AssetDependencies, listings, dataFolder, result, log);
+
         if (lastRun != null && lastRun.ProcessedNpcs.Count == 0)
         {
             // A bootstrap marker from a crashed run, or a token written before this field existed.
@@ -525,6 +530,108 @@ public class OutputValidator
                "settings. The checks below grade against the current mode's expectations, so intentional " +
                "differences from the old mode (e.g. wig conversions) will read as errors. Re-run the patcher " +
                "before trusting this report.";
+    }
+
+    /// <summary>
+    /// Re-verifies the last run's runtime asset dependencies (the token's
+    /// <see cref="NpcToken.AssetDependencies"/> ledger) against the CURRENT setup.
+    ///
+    /// <para><b>Archive masters</b>: each listed plugin was added as a MASTER of the output
+    /// because its data-folder archive supplies referenced assets that were not copied. Missing
+    /// or disabled → Error: the game refuses to load a plugin whose master is absent, so the
+    /// whole output silently stops applying — strictly worse than the missing textures the
+    /// master was protecting against.</para>
+    ///
+    /// <para><b>Loose files</b>: recorded because mastering cannot pin a loose file (it belongs
+    /// to no plugin). Each must still exist in the data folder; missing ones mean the supplying
+    /// mod was removed or disabled and those assets now render as missing textures / invisible
+    /// meshes in game → one grouped Warning naming the count and examples (the full list goes
+    /// to the log), keyed per run rather than per file to avoid row spam.</para>
+    ///
+    /// <para>A null ledger is a token from an older app version — nothing to verify, and
+    /// absence of evidence is not a finding. Run-level rows carry no NPC. Internal for tests.</para>
+    /// </summary>
+    internal static void ValidateAssetDependencies(
+        AssetDependencyLedger? ledger,
+        IReadOnlyList<IModListingGetter<ISkyrimModGetter>> listings,
+        string dataFolder,
+        ValidationRunResult result,
+        StringBuilder log)
+    {
+        if (ledger == null) return;
+        if (ledger.ArchiveMasters.Count == 0 && ledger.LooseFiles.Count == 0) return;
+
+        var listed = new HashSet<ModKey>(listings.Select(l => l.ModKey));
+        var enabled = new HashSet<ModKey>(listings.Where(l => l.Enabled).Select(l => l.ModKey));
+
+        foreach (var dep in ledger.ArchiveMasters)
+        {
+            bool isListed = listed.Contains(dep.Plugin);
+            bool isEnabled = enabled.Contains(dep.Plugin);
+            if (isListed && isEnabled)
+            {
+                log.AppendLine($"Asset-dependency master OK: {dep.Plugin.FileName} " +
+                               $"({dep.Assets.Count} asset(s) from {string.Join(", ", dep.Archives)}).");
+                continue;
+            }
+
+            string state = isListed ? "present but DISABLED" : "missing from the load order";
+            var samples = dep.Assets.Take(3).ToList();
+            result.Issues.Add(new ValidationIssue
+            {
+                Severity = ValidationSeverity.Error,
+                Check = ValidationCheckKind.Asset,
+                Issue = $"Required master '{dep.Plugin.FileName}' is {state}. The last run mastered the output " +
+                        "to it because its archives supply referenced assets that were not copied — without it " +
+                        "the output plugin will not load at all.",
+                WinningSource = string.Join(", ", dep.Archives),
+                Details = $"{dep.Assets.Count} dependent asset(s), e.g. {string.Join("; ", samples)}" +
+                          (dep.Assets.Count > samples.Count ? "; ..." : string.Empty) +
+                          " — re-enable the plugin, or add its mod to the appearance mod's Corresponding Folder " +
+                          "Paths and re-run so the assets are copied instead."
+            });
+            log.AppendLine($"ASSET DEPENDENCY: master {dep.Plugin.FileName} {state} " +
+                           $"({dep.Assets.Count} asset(s) from {string.Join(", ", dep.Archives)}).");
+        }
+
+        if (ledger.LooseFiles.Count > 0)
+        {
+            var missing = new List<string>();
+            foreach (var rel in ledger.LooseFiles)
+            {
+                try
+                {
+                    if (!File.Exists(Path.Combine(dataFolder, rel))) missing.Add(rel);
+                }
+                catch
+                {
+                    missing.Add(rel);
+                }
+            }
+
+            if (missing.Count == 0)
+            {
+                log.AppendLine($"All {ledger.LooseFiles.Count} loose asset dependencies still present.");
+            }
+            else
+            {
+                var samples = missing.Take(5).ToList();
+                result.Issues.Add(new ValidationIssue
+                {
+                    Severity = ValidationSeverity.Warning,
+                    Check = ValidationCheckKind.Asset,
+                    Issue = $"{missing.Count} of {ledger.LooseFiles.Count} loose asset(s) the output relies on " +
+                            "are no longer in the data folder — the mod supplying them was removed or disabled, " +
+                            "and affected NPCs will show missing textures or invisible meshes.",
+                    Details = $"e.g. {string.Join("; ", samples)}" +
+                              (missing.Count > samples.Count ? "; ..." : string.Empty) +
+                              " — full list in the validation log. Re-enable the supplying mod(s), or re-run " +
+                              "the patcher against the current setup."
+                });
+                log.AppendLine($"ASSET DEPENDENCY: {missing.Count} recorded loose file(s) no longer present:");
+                foreach (var rel in missing) log.AppendLine($"  {rel}");
+            }
+        }
     }
 
     private static NpcToken? LoadDeployedRunLedger(string dataFolder, StringBuilder log)

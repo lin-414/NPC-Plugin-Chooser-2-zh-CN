@@ -81,6 +81,60 @@ public class AssetHandler : OptionalUIModule
     /// <see cref="MonitorAndWaitForAllTasks"/> has returned.</summary>
     public IReadOnlyCollection<string> RewrittenFaceGenNifPaths => (IReadOnlyCollection<string>)_rewrittenFaceGenNifPaths.Keys;
 
+    // ─── Runtime asset dependencies ─────────────────────────────────────────
+    // Referenced assets this run deliberately does NOT copy: paths no ModSetting-scoped source
+    // could satisfy (the silent NotFound population), plus everything a "Copy Assets"-unchecked
+    // mod references. After all copy tasks settle, ResolveRuntimeDependenciesAsync probes each
+    // against the LIVE data folder — the one legitimate out-of-scope source — and classifies it:
+    // archive-supplied (loader plugin becomes an output master), loose-supplied (recorded in the
+    // token for the output validator to re-verify), or missing (nothing to protect).
+    // Value = the first requesting context + mod, for provenance/log attribution.
+    private readonly ConcurrentDictionary<string, (AssetRequestContext Ctx, string ModName)>
+        _runtimeDependencyCandidates = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Absolute paths of NIFs copied WITHOUT the texture post-scan (a "Copy Assets"-
+    /// unchecked mod's FaceGen) whose embedded texture references still need to become
+    /// runtime-dependency candidates. Drained by <see cref="ResolveRuntimeDependenciesAsync"/>.</summary>
+    private readonly ConcurrentDictionary<string, (AssetRequestContext Ctx, string ModName)>
+        _pendingDependencyNifScans = new(StringComparer.OrdinalIgnoreCase);
+
+    private readonly object _dependencyStateLock = new();
+    private bool _loadOrderArchivesIndexedForRun;
+    private RuntimeDependencyReport _runtimeDependencies = new();
+
+    /// <summary>The run's accumulated runtime-dependency classification. Complete for the NPCs
+    /// processed so far only after <see cref="ResolveRuntimeDependenciesAsync"/> has run for the
+    /// current batch; the Patcher reads it at output-write and token-write time.</summary>
+    public RuntimeDependencyReport RuntimeDependencies => _runtimeDependencies;
+
+    /// <summary>Classification result of <see cref="ResolveRuntimeDependenciesAsync"/>. All
+    /// collections accumulate across batches within one run and are keyed/case-compared like the
+    /// rest of the asset pipeline. Not thread-safe — mutated only under the resolve lock.</summary>
+    public sealed class RuntimeDependencyReport
+    {
+        /// <summary>Loader plugin → the archives + assets that pin it. Every key must become a
+        /// master of the output plugin (see Patcher's WithExtraIncludedMasters call).</summary>
+        public Dictionary<ModKey, ArchiveDependencyInfo> ArchiveMasters { get; } = new();
+
+        /// <summary>Referenced-but-not-copied assets satisfied by loose data-folder files.</summary>
+        public HashSet<string> LooseFiles { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Referenced-but-not-copied assets nothing in the live setup supplies.</summary>
+        public HashSet<string> Unresolved { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        public bool IsEmpty => ArchiveMasters.Count == 0 && LooseFiles.Count == 0 && Unresolved.Count == 0;
+    }
+
+    /// <summary>Per-plugin detail of <see cref="RuntimeDependencyReport.ArchiveMasters"/>.</summary>
+    public sealed class ArchiveDependencyInfo
+    {
+        /// <summary>Archive FILE NAMES (not full paths) of this plugin that supplied assets.</summary>
+        public HashSet<string> ArchiveFileNames { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>The regularized relative asset paths supplied.</summary>
+        public HashSet<string> Assets { get; } = new(StringComparer.OrdinalIgnoreCase);
+    }
+
 
     // ADD THIS FIELD:
     // This semaphore limits how many NIFs we process at the same time.
@@ -111,6 +165,15 @@ public class AssetHandler : OptionalUIModule
         _claimedDestinations.Clear();
         _reportedTextureless.Clear();
         _rewrittenFaceGenNifPaths.Clear();
+        _runtimeDependencyCandidates.Clear();
+        _pendingDependencyNifScans.Clear();
+        lock (_dependencyStateLock)
+        {
+            _runtimeDependencies = new RuntimeDependencyReport();
+            _loadOrderArchivesIndexedForRun = false;
+            // Per-run: the user can change the load order between runs without restarting.
+            _enabledLoadOrderKeysCache = null;
+        }
         NpcWarningReporter.Reset(); // per-run, like the diag resets below
         AssetProvenanceDiag.Reset(); // opt-in per-run asset provenance report (no-op unless enabled)
         FaceGenLadderDiag.Reset();   // opt-in per-run FaceGen ladder report (no-op unless enabled)
@@ -470,6 +533,283 @@ public class AssetHandler : OptionalUIModule
         }
     }
 
+    #region Runtime asset dependencies
+
+    /// <summary>
+    /// Registers a referenced asset this run is NOT copying, for the post-pass to classify
+    /// against the live data folder. FaceGen-reason requests are excluded — FaceGen delivery is
+    /// owned end-to-end by the ladder and re-verified by the output validator's FaceGen checks.
+    /// Cheap and idempotent; safe from the concurrent copy tasks.
+    /// </summary>
+    private void RegisterRuntimeDependencyCandidate(string relativePath, ModSetting modSetting, AssetRequestContext ctx)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath)) return;
+        if (Path.IsPathRooted(relativePath)) return;
+        if (ctx.Reason != null && ctx.Reason.StartsWith("FaceGen", StringComparison.OrdinalIgnoreCase)) return;
+        _runtimeDependencyCandidates.TryAdd(relativePath, (ctx, modSetting.DisplayName));
+    }
+
+    /// <summary>
+    /// Queues a NIF that was copied WITHOUT the texture post-scan (a "Copy Assets"-unchecked
+    /// mod's file, most importantly its always-copied FaceGen) so the post-pass can register its
+    /// embedded texture / physics-XML references as runtime-dependency candidates.
+    /// </summary>
+    private void RegisterPendingDependencyNifScan(string destAbsolutePath, ModSetting modSetting, AssetRequestContext ctx)
+    {
+        if (string.IsNullOrWhiteSpace(destAbsolutePath)) return;
+        if (!destAbsolutePath.EndsWith(".nif", StringComparison.OrdinalIgnoreCase)) return;
+        _pendingDependencyNifScans.TryAdd(destAbsolutePath, (ctx, modSetting.DisplayName));
+    }
+
+    /// <summary>Enabled plugins in ascending load-order position (the ranking input for
+    /// <see cref="BsaHandler.LocateWinningEnabledArchive"/>). Snapshotted once per run —
+    /// the environment does not change mid-patch.</summary>
+    private IReadOnlyList<ModKey> GetEnabledLoadOrderKeysAscending()
+    {
+        var cached = _enabledLoadOrderKeysCache;
+        if (cached != null) return cached;
+        var loadOrder = _environmentStateProvider.LoadOrder;
+        var keys = loadOrder == null
+            ? (IReadOnlyList<ModKey>)Array.Empty<ModKey>()
+            : loadOrder.ListedOrder.Where(l => l.Enabled).Select(l => l.ModKey).ToList();
+        if (keys.Count > 0) _enabledLoadOrderKeysCache = keys;
+        return keys;
+    }
+
+    private volatile IReadOnlyList<ModKey>? _enabledLoadOrderKeysCache;
+
+    /// <summary>
+    /// Once per run, indexes the data-folder archives of every enabled load-order plugin the
+    /// per-ModSetting startup index missed (base game / Creation Club are covered by their
+    /// synthetic entries; already-indexed keys are skipped so no archive gets a duplicate reader
+    /// through its VFS path). This is what makes an out-of-scope mod's BSA visible to
+    /// <see cref="BsaHandler.LocateWinningEnabledArchive"/>. Thread-safe; the first caller pays
+    /// the cost, concurrent callers wait.
+    /// </summary>
+    private void EnsureLoadOrderArchivesIndexedForRun()
+    {
+        if (_loadOrderArchivesIndexedForRun) return;
+        lock (_dependencyStateLock)
+        {
+            if (_loadOrderArchivesIndexedForRun) return;
+            var enabledKeys = GetEnabledLoadOrderKeysAscending();
+            if (enabledKeys.Count == 0) return; // environment unresolved — let a later call retry
+            var toIndex = enabledKeys
+                .Where(k => !_environmentStateProvider.BaseGamePlugins.Contains(k))
+                .Where(k => !_environmentStateProvider.CreationClubPlugins.Contains(k))
+                .Where(k => !_bsaHandler.CacheContainsModKey(k))
+                .ToList();
+            if (toIndex.Count > 0)
+            {
+                RunLog($"  Indexing data-folder archives for {toIndex.Count} load-order plugin(s) outside the mod list (runtime-dependency probe)...", false, false);
+                _bsaHandler.EnsureDataFolderArchivesIndexed(toIndex,
+                    _environmentStateProvider.SkyrimVersion.ToGameRelease());
+            }
+            _loadOrderArchivesIndexedForRun = true;
+        }
+    }
+
+    /// <summary>Whether an ENABLED load-order plugin's archive supplies <paramref name="relativePath"/>
+    /// (the game's own fallback when nothing loose does). Used to keep the textureless-shape warning
+    /// from flagging assets the engine will resolve fine.</summary>
+    private bool ResolvesFromEnabledLoadOrderArchive(string relativePath)
+    {
+        try
+        {
+            EnsureLoadOrderArchivesIndexedForRun();
+            return _bsaHandler.LocateWinningEnabledArchive(relativePath, GetEnabledLoadOrderKeysAscending()) != null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The runtime-dependency post-pass. Call AFTER <see cref="MonitorAndWaitForAllTasks"/> (so
+    /// the candidate pool and destination claims are final for the batch) and BEFORE the output
+    /// plugin is written (so the archive masters can be included in the write).
+    ///
+    /// <para>Each candidate path that no mod actually delivered into the output is resolved the
+    /// way the game will resolve it: loose data-folder file first (engine rule: loose beats BSA),
+    /// then the enabled load order's archives, latest-loading plugin winning. Archive hits pin
+    /// their loader plugin as an output master; loose hits are recorded for the output validator;
+    /// misses are noted for the log. Dependency NIFs (a "Copy Assets"-unchecked mod's meshes, and
+    /// its always-copied FaceGen queued via <see cref="RegisterPendingDependencyNifScan"/>) are
+    /// additionally scanned so their embedded texture / physics-XML references join the pool —
+    /// the same closure the copy pipeline's post-scan gives copied NIFs.</para>
+    ///
+    /// <para>Accumulates across batches; safe to call once per batch. Own prior output copies
+    /// and base-game archives satisfy a path without creating a dependency entry (the former is
+    /// stale self-reference, the latter is always loaded).</para>
+    /// </summary>
+    public async Task<RuntimeDependencyReport> ResolveRuntimeDependenciesAsync(string outputBasePath)
+    {
+        // Drain pending NIF scans first so their embedded references enter the pool.
+        foreach (var key in _pendingDependencyNifScans.Keys.ToList())
+        {
+            if (!_pendingDependencyNifScans.TryRemove(key, out var pending)) continue;
+            RegisterEmbeddedNifReferenceCandidates(key, pending.ModName, pending.Ctx);
+        }
+
+        if (_runtimeDependencyCandidates.IsEmpty) return _runtimeDependencies;
+
+        EnsureLoadOrderArchivesIndexedForRun();
+        var enabledKeys = GetEnabledLoadOrderKeysAscending();
+        string dataFolder = _environmentStateProvider.DataFolderPath;
+        var baseGamePlugins = _environmentStateProvider.BaseGamePlugins;
+        var outputKey = _environmentStateProvider.OutputMod.ModKey;
+
+        string? scanTempDir = null;
+        var report = _runtimeDependencies;
+        var processed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var queue = new Queue<string>(_runtimeDependencyCandidates.Keys);
+
+        try
+        {
+            while (queue.Count > 0)
+            {
+                var rel = queue.Dequeue();
+                if (!processed.Add(rel)) continue;
+                if (!_runtimeDependencyCandidates.TryGetValue(rel, out var candidate)) continue;
+
+                // Some mod DID deliver this exact path into the output after the miss that
+                // registered it (two mods sharing a path) — no dependency.
+                string destAbs = Path.Combine(outputBasePath, rel);
+                if (_claimedDestinations.ContainsKey(destAbs)) continue;
+
+                // Already classified by an earlier batch.
+                if (report.LooseFiles.Contains(rel) || report.Unresolved.Contains(rel)) continue;
+
+                string? scanSourcePath = null;
+
+                bool looseHit = false;
+                string looseAbs = Path.Combine(dataFolder, rel);
+                try
+                {
+                    looseHit = File.Exists(looseAbs) && !IsOurOwnPriorOutput(rel, looseAbs);
+                }
+                catch
+                {
+                    // An unreadable Data path just falls through to the archive check.
+                }
+
+                if (looseHit)
+                {
+                    report.LooseFiles.Add(rel);
+                    AssetProvenanceDiag.RecordSource(rel, candidate.ModName,
+                        AssetProvenanceDiag.RuntimeLooseDependencyKind, looseAbs);
+                    scanSourcePath = looseAbs;
+                }
+                else
+                {
+                    var winner = _bsaHandler.LocateWinningEnabledArchive(rel, enabledKeys);
+                    if (winner == null)
+                    {
+                        report.Unresolved.Add(rel);
+                        AssetProvenanceDiag.RecordSource(rel, candidate.ModName,
+                            AssetProvenanceDiag.RuntimeMissingDependencyKind, null);
+                        continue;
+                    }
+
+                    AssetProvenanceDiag.RecordSource(rel, candidate.ModName,
+                        AssetProvenanceDiag.RuntimeArchiveDependencyKind, winner.Value.BsaPath);
+
+                    // Base game archives are loaded unconditionally (sResourceArchiveList /
+                    // permanent masters) — nothing to pin. Our own output has no archives.
+                    if (!baseGamePlugins.Contains(winner.Value.ModKey) &&
+                        !winner.Value.ModKey.Equals(outputKey))
+                    {
+                        if (!report.ArchiveMasters.TryGetValue(winner.Value.ModKey, out var info))
+                        {
+                            info = new ArchiveDependencyInfo();
+                            report.ArchiveMasters[winner.Value.ModKey] = info;
+                        }
+                        info.ArchiveFileNames.Add(Path.GetFileName(winner.Value.BsaPath));
+                        info.Assets.Add(rel);
+                    }
+
+                    // NIF follow-up needs a readable file; extract to a per-pass temp dir.
+                    if (rel.EndsWith(".nif", StringComparison.OrdinalIgnoreCase))
+                    {
+                        scanTempDir ??= Path.Combine(Path.GetTempPath(), "NPC2", "DepScan-" + Guid.NewGuid().ToString("N"));
+                        try
+                        {
+                            Directory.CreateDirectory(scanTempDir);
+                            string dest = Path.Combine(scanTempDir,
+                                Guid.NewGuid().ToString("N") + ".nif");
+                            var (ok, _) = await _bsaHandler.ExtractFileAsync(winner.Value.BsaPath, rel, dest);
+                            if (ok) scanSourcePath = dest;
+                        }
+                        catch
+                        {
+                            // Scan is best-effort; the NIF's own dependency entry stands.
+                        }
+                    }
+                }
+
+                // Close over embedded references: a dependency NIF's textures and physics XML
+                // are dependencies too. New candidates re-enter the worklist below.
+                if (scanSourcePath != null && rel.EndsWith(".nif", StringComparison.OrdinalIgnoreCase))
+                {
+                    RegisterEmbeddedNifReferenceCandidates(scanSourcePath, candidate.ModName, candidate.Ctx);
+                    foreach (var key in _runtimeDependencyCandidates.Keys)
+                    {
+                        if (!processed.Contains(key)) queue.Enqueue(key);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            if (scanTempDir != null)
+            {
+                try { Directory.Delete(scanTempDir, recursive: true); }
+                catch { /* best-effort temp cleanup */ }
+            }
+        }
+
+        return report;
+    }
+
+    /// <summary>
+    /// Dependency-mode twin of the copy pipeline's NIF post-scan: registers a NIF's embedded
+    /// texture paths and SMP physics-XML links as runtime-dependency candidates instead of
+    /// scheduling copies. Never throws — a diagnostic-grade scan must not fail the run.
+    /// </summary>
+    private void RegisterEmbeddedNifReferenceCandidates(string nifDiskPath, string modName, AssetRequestContext ctx)
+    {
+        try
+        {
+            if (!File.Exists(nifDiskPath)) return;
+
+            var texCtx = ctx.WithReason("NifTexture", Path.GetFileName(nifDiskPath));
+            foreach (var tex in NifHandler.GetExtraTexturesFromNif(nifDiskPath))
+            {
+                if (Auxilliary.TryRegularizePath(tex, out var rel) && !string.IsNullOrWhiteSpace(rel))
+                {
+                    _runtimeDependencyCandidates.TryAdd(rel, (texCtx, modName));
+                }
+            }
+
+            var xmlCtx = ctx.WithReason("SmpXml", Path.GetFileName(nifDiskPath));
+            foreach (var raw in NifHandler.GetPhysicsXmlPathsFromNif(nifDiskPath))
+            {
+                if (TryNormalizePhysicsXmlPath(raw, nifDiskPath, out var xmlRel) &&
+                    !string.IsNullOrWhiteSpace(xmlRel))
+                {
+                    _runtimeDependencyCandidates.TryAdd(xmlRel, (xmlCtx, modName));
+                }
+            }
+        }
+        catch
+        {
+            // Best-effort closure; the NIF's own dependency entry already stands.
+        }
+    }
+
+    #endregion
+
     /// <summary>Best-effort name of the mod folder supplying a loose asset, for log messages.
     /// Only the folder name is needed, so this stops at the first match.</summary>
     private string? DescribeLooseProvider(string relativePath)
@@ -682,6 +1022,11 @@ public class AssetHandler : OptionalUIModule
                                 {
                                     RewriteAndRecordFaceTint(destPath, destRel, faceTintSubPath,
                                         destinationFaceTintSubPath);
+                                    // Copy Assets is off, so the texture post-scan didn't run —
+                                    // queue the copied NIF (in practice the always-copied
+                                    // FaceGen) so its embedded references still get classified
+                                    // as runtime dependencies.
+                                    RegisterPendingDependencyNifScan(destPath, modSetting, ctx);
                                 }
                             }
 
@@ -702,6 +1047,12 @@ public class AssetHandler : OptionalUIModule
                                 {
                                     await PostProcessCopiedFile(destPath, modSetting, outputBasePath, faceTintSubPath, ctx);
                                 }
+                                else
+                                {
+                                    // Copy Assets off: no post-scan ran — queue the extracted NIF
+                                    // so its embedded references become runtime dependencies.
+                                    RegisterPendingDependencyNifScan(destPath, modSetting, ctx);
+                                }
 
                                 // After the destination-side analysis above, so the texture scan
                                 // reads the tint slot as the source mod baked it.
@@ -718,8 +1069,13 @@ public class AssetHandler : OptionalUIModule
                             break;
 
                         default:
-                            // If the asset is not found within this modSetting, the task simply completes,
-                            // doing nothing. Another call with a different modSetting will have its own task.
+                            // Not found within this modSetting. Another call with a different
+                            // modSetting will have its own task; if NO mod ends up delivering
+                            // this path (no destination claim), the runtime-dependency post-pass
+                            // probes the live data folder and either pins the supplying archive's
+                            // plugin as an output master or records the loose file in the token
+                            // (see ResolveRuntimeDependenciesAsync).
+                            RegisterRuntimeDependencyCandidate(relativePath, modSetting, ctx);
                             break;
                     }
                 }
@@ -1012,7 +1368,10 @@ public class AssetHandler : OptionalUIModule
                     }
                     if (FindAssetSource(rel, modSetting).Item1 == AssetSourceType.NotFound)
                     {
-                        continue; // Shared texture: leave the path; the load order supplies it.
+                        // Shared texture: leave the path; the load order supplies it — which
+                        // makes it a runtime dependency to classify and protect.
+                        RegisterRuntimeDependencyCandidate(rel, modSetting, texCtx);
+                        continue;
                     }
 
                     var isolatedRel = InsertIsolationPrefix(rel, isolationModTag);
@@ -1172,7 +1531,12 @@ public class AssetHandler : OptionalUIModule
             {
                 if (FindAssetSource(rel, modSetting).Item1 != AssetSourceType.NotFound ||
                     vanillaAssetPaths.Contains(rel) ||
-                    (!string.IsNullOrWhiteSpace(dataFolder) && File.Exists(Path.Combine(dataFolder, rel))))
+                    (!string.IsNullOrWhiteSpace(dataFolder) && File.Exists(Path.Combine(dataFolder, rel))) ||
+                    // An enabled load-order plugin's archive counts as resolved: the engine
+                    // loads it, and the runtime-dependency post-pass masters the output to
+                    // its loader plugin so it STAYS loaded. Warning here would flag assets
+                    // that render fine in game.
+                    ResolvesFromEnabledLoadOrderArchive(rel))
                 {
                     anyResolved = true;
                     break;
@@ -1245,6 +1609,9 @@ public class AssetHandler : OptionalUIModule
                 {
                     AppendLog($"  SMP physics XML '{xmlRelPath}' referenced by {Path.GetFileName(nifPathToAnalyze)} " +
                               $"was not found in '{modSetting.DisplayName}' (may rely on a global defaultBBPs.xml mapping).", false, false);
+                    // If the live load order supplies it instead, the post-pass records the
+                    // dependency; a genuinely absent XML classifies as unresolved and stays quiet.
+                    RegisterRuntimeDependencyCandidate(xmlRelPath, modSetting, xmlCtx);
                     continue;
                 }
 
@@ -1513,7 +1880,11 @@ public class AssetHandler : OptionalUIModule
             appearanceModSetting, outputBasePath, faceTexRelativePath, destTexRelPath, faceGenCtx,
             npcIdentifier);
 
-        // 2. Non-FaceGen Assets (Only if CopyExtraAssets is true)
+        // 2. Non-FaceGen Assets. Enumerated for EVERY mod: with "Copy Assets" on they are
+        // scheduled for copying; with it off nothing is copied, but the paths still become
+        // runtime-dependency candidates — the user's live setup must keep supplying them, so
+        // the post-pass classifies each (archive-packed → output master, loose → token entry
+        // the output validator re-verifies). See ResolveRuntimeDependenciesAsync.
         // When the AssetProvenance diag is on, assetProv accumulates path -> referencing-record so the
         // report names exactly which record pulled each PluginRef asset in. Null (skipped) when off.
         Dictionary<string, HashSet<string>>? assetProv =
@@ -1522,13 +1893,10 @@ public class AssetHandler : OptionalUIModule
         // textureless-shape warning skips them because the engine draws the face from the FaceGen
         // NIF's baked shapes, not from these — see AssetRequestContext.HeadPartOnly.
         var headPartOnlyMeshPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        if (appearanceModSetting.CopyAssets)
-        {
-            GetAssetPathsReferencedByPlugin(appearanceNpcRecord, appearanceModSetting.CorrespondingModKeys, appearanceModSetting.CorrespondingFolderPaths.ToHashSet(), meshToCopyRelativePaths, textureToCopyRelativePaths, assetProv, headPartOnlyMeshPaths);
-            AddCorrespondingNumericalNifPaths(meshToCopyRelativePaths, new HashSet<string>());
-        }
+        GetAssetPathsReferencedByPlugin(appearanceNpcRecord, appearanceModSetting.CorrespondingModKeys, appearanceModSetting.CorrespondingFolderPaths.ToHashSet(), meshToCopyRelativePaths, textureToCopyRelativePaths, assetProv, headPartOnlyMeshPaths);
+        AddCorrespondingNumericalNifPaths(meshToCopyRelativePaths, new HashSet<string>());
 
-        // 3. Schedule all identified assets for processing
+        // 3. Schedule (or register) all identified assets
         var allAssetPaths = meshToCopyRelativePaths.Concat(textureToCopyRelativePaths).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         AppendLog($"      Identified {allAssetPaths.Count} unique assets to process for {appearanceNpcRecord.EditorID ?? appearanceNpcRecord.FormKey.ToString()}.");
@@ -1539,13 +1907,23 @@ public class AssetHandler : OptionalUIModule
             // FaceGen assets have no referencing record; PluginRef assets carry the record(s) that
             // referenced them (looked up by the raw path, which is what the prov map is keyed on,
             // and what headPartOnlyMeshPaths holds too).
-            AssetRequestContext reqCtx = faceGenRelPaths.Contains(regularizedPath)
+            bool isFaceGenPath = faceGenRelPaths.Contains(regularizedPath);
+            AssetRequestContext reqCtx = isFaceGenPath
                 ? faceGenCtx
                 : pluginRefCtx.WithReferencer(LookupReferencer(assetProv, relPath));
             if (headPartOnlyMeshPaths.Contains(relPath)) reqCtx = reqCtx.AsHeadPartOnly();
-            // This method is fire-and-forget; the task is added to the concurrent dictionary
-            // and runs in the background. It will not re-process assets it has already seen.
-            RequestAssetCopyAsync(regularizedPath, appearanceModSetting, outputBasePath, faceTexRelativePath, reqCtx);
+            if (appearanceModSetting.CopyAssets || isFaceGenPath)
+            {
+                // FaceGen stays on the copy pipeline regardless of Copy Assets (the same rule
+                // ScheduleFaceGenHalf follows); the per-(file|mod) task cache dedupes overlap.
+                // This method is fire-and-forget; the task is added to the concurrent dictionary
+                // and runs in the background. It will not re-process assets it has already seen.
+                RequestAssetCopyAsync(regularizedPath, appearanceModSetting, outputBasePath, faceTexRelativePath, reqCtx);
+            }
+            else
+            {
+                RegisterRuntimeDependencyCandidate(regularizedPath, appearanceModSetting, reqCtx);
+            }
         }
     }
 
@@ -1627,11 +2005,6 @@ public class AssetHandler : OptionalUIModule
     {
         using var _ = ContextualPerformanceTracer.Trace("AssetHandler.ScheduleCopyAssetLinkFiles");
 
-        if (!appearanceModSetting.CopyAssets)
-        {
-            return;
-        }
-
         var assetRelPaths =
             assetLinks
                 .Select(x => x.GivenPath)
@@ -1647,7 +2020,16 @@ public class AssetHandler : OptionalUIModule
         {
             if (relPath != null)
             {
-                RequestAssetCopyAsync(relPath, appearanceModSetting, outputBasePath, faceTexRelativePath, ctx);
+                if (appearanceModSetting.CopyAssets)
+                {
+                    RequestAssetCopyAsync(relPath, appearanceModSetting, outputBasePath, faceTexRelativePath, ctx);
+                }
+                else
+                {
+                    // Copy Assets off: nothing is copied, but the reference still exists at
+                    // runtime — classify it as a runtime dependency instead of dropping it.
+                    RegisterRuntimeDependencyCandidate(relPath, appearanceModSetting, ctx);
+                }
             }
         }
     }

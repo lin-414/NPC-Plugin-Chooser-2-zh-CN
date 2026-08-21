@@ -285,6 +285,29 @@ more, so there is no contention left to arbitrate. Covered by matrix specimen #9
 (the same shape through an appearance swap); negative-controlled — reverting the fix fails that
 check in exactly the three inherit cells and nowhere else.
 
+## Archives no plugin loads are invisible to asset resolution (added 2026-08-21)
+
+The 2.8.0 runtime-dependency work resolves out-of-scope assets from "the data folder as the game
+sees it": loose files, plus **archives owned by an enabled load-order plugin** (name-matched via
+`PluginArchiveIndex` — `Foo.bsa` / `Foo - Textures.bsa` belong to `Foo.esp`). Both the renderer's
+broadcast tier (`NpcChooserBsaProviderAdapter.TryLocateInBsa`) and the patcher's dependency probe
+(`AssetHandler.ResolveRuntimeDependenciesAsync` → `BsaHandler.LocateWinningEnabledArchive`) rank
+candidates by the loader plugin's load-order position and treat an archive with no enabled owner
+as a miss.
+
+That leaves one class of archive invisible on both sides: a BSA loaded by **no plugin at all** —
+registered purely through `sResourceArchiveList`/`sResourceArchiveList2` ini edits (vanilla's own
+ini-listed archives are fine: they belong to the Base Game entry and are excluded from mastering
+precisely because they are always loaded). A texture packed that way renders as missing in the
+preview and classifies as `RuntimeDependency(Missing)` in the probe even though the game loads it.
+No mainstream mod ships this shape (dummy-loader plugins are the norm and ARE handled, e.g.
+TW3Resources.esp), which is why it is deliberate for now.
+
+A fix would have to decide how to read the effective `sResourceArchiveList` (base ini + user ini +
+mod-manager profile ini stacking — Mutagen's `Archive.GetIniListings` reads only one layer) and what
+"protecting" such a dependency even means, since there is no plugin to master — likely just a
+token entry the output validator existence-checks, like loose files.
+
 ---
 
 The first four entries below were fixed on 2026-07-28. Kept here only as a pointer for

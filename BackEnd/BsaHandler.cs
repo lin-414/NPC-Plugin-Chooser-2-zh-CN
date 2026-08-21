@@ -423,6 +423,55 @@ public class BsaHandler : OptionalUIModule
         return matches;
     }
 
+    /// <summary>
+    /// Of every indexed archive containing <paramref name="relativePath"/>, the one whose owning
+    /// plugin loads LATEST among <paramref name="enabledLoadOrderAscending"/> — i.e. the archive
+    /// the GAME would take the file from. Null when no enabled plugin's archive carries it: an
+    /// archive owned by a disabled or absent plugin is not loaded by the engine, so it cannot
+    /// satisfy a runtime dependency however thoroughly it is indexed. Callers wanting the full
+    /// data-folder view should run <see cref="EnsureDataFolderArchivesIndexed"/> over the enabled
+    /// load order first; this method only ranks what is already indexed.
+    ///
+    /// <para>The patcher's runtime-dependency probe uses this to decide which plugin the output
+    /// must be mastered to when a referenced asset is not copied into the output (see
+    /// <c>AssetHandler.ResolveRuntimeDependenciesAsync</c>). Same precedence rule as
+    /// <c>NpcChooserBsaProviderAdapter.SelectByLoadOrder</c> on the renderer side.</para>
+    /// </summary>
+    public (ModKey ModKey, string BsaPath)? LocateWinningEnabledArchive(
+        string relativePath, IReadOnlyList<ModKey> enabledLoadOrderAscending)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath) ||
+            enabledLoadOrderAscending == null || enabledLoadOrderAscending.Count == 0)
+        {
+            return null;
+        }
+
+        var candidates = LocateAllInBsas(relativePath);
+        if (candidates.Count == 0) return null;
+
+        var rank = new Dictionary<ModKey, int>();
+        for (int i = 0; i < enabledLoadOrderAscending.Count; i++)
+        {
+            // First listing wins if a key somehow repeats.
+            rank.TryAdd(enabledLoadOrderAscending[i], i);
+        }
+
+        (ModKey ModKey, string BsaPath)? best = null;
+        int bestRank = -1;
+        foreach (var candidate in candidates)
+        {
+            if (!rank.TryGetValue(candidate.ModKey, out int idx)) continue;
+            // Strictly greater: among archives owned by the SAME plugin the first
+            // enumerated stays the winner — load order cannot separate them.
+            if (best == null || idx > bestRank)
+            {
+                best = candidate;
+                bestRank = idx;
+            }
+        }
+        return best;
+    }
+
     public bool TryGetFileFromReaders(string subpath, HashSet<IArchiveReader> bsaReaders, out IArchiveFile? file)
     {
         file = null;

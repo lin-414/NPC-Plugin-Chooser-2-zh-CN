@@ -1009,6 +1009,14 @@ public class Validator : OptionalUIModule
     /// referencing the absent plugin. A non-merged sibling is NOT acceptable — its records stay as
     /// references, and Mutagen cannot write a master that isn't in the load order, which fails the
     /// entire save at the end of the run rather than just this NPC.
+    ///
+    /// <para>Mirror note (runtime asset dependencies): the EXTRA masters the patcher adds for
+    /// referenced-but-not-copied assets (AssetHandler.ResolveRuntimeDependenciesAsync →
+    /// WithExtraIncludedMasters) are deliberately NOT screened here or in the randomizer
+    /// pre-screen — they are derived from the live data folder during the run and are enabled
+    /// load-order plugins by construction, so there is nothing to pre-reject. The post-run
+    /// mirror is OutputValidator.ValidateAssetDependencies, which re-verifies them (and the
+    /// recorded loose-file dependencies) against the CURRENT setup.</para>
     /// </summary>
     private static bool IsMasterSatisfied(ModKey master, ModSetting appearanceModSetting,
         List<ModKey> loadOrderList, HashSet<ModKey> implicitMasters,

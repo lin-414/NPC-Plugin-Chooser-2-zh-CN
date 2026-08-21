@@ -52,6 +52,20 @@ public static class AssetProvenanceDiag
     /// the claiming mod's row shows where the bytes actually came from.</summary>
     public const string SkippedDuplicateDestinationKind = "SkippedDuplicateDestination";
 
+    /// <summary>SourceKind recorded by the runtime-dependency post-pass for a referenced-but-
+    /// not-copied asset supplied by an enabled load-order plugin's archive: that plugin was
+    /// added as an output master and nothing was written. SourcePath names the archive.</summary>
+    public const string RuntimeArchiveDependencyKind = "RuntimeDependency(Archive)";
+
+    /// <summary>Like <see cref="RuntimeArchiveDependencyKind"/> but supplied by a LOOSE data-
+    /// folder file: recorded in the token for the output validator to re-verify (loose files
+    /// cannot be pinned by mastering). SourcePath is the live data-folder file.</summary>
+    public const string RuntimeLooseDependencyKind = "RuntimeDependency(Loose)";
+
+    /// <summary>Like <see cref="RuntimeArchiveDependencyKind"/> but nothing in the live setup
+    /// supplies the asset at all — it will be missing in game unless the user installs it.</summary>
+    public const string RuntimeMissingDependencyKind = "RuntimeDependency(Missing)";
+
     /// <summary>Effective on/off state. Hot-path call sites check this to skip all
     /// record-keeping when nobody is listening. Driven by the user setting via
     /// <see cref="SetEnabled"/>, and force-on by the dev file trigger.</summary>
@@ -181,6 +195,9 @@ public static class AssetProvenanceDiag
         "BsaFile" => "BSA",
         SkippedBaseGameOverwriteKind => SkippedBaseGameOverwriteKind,
         SkippedDuplicateDestinationKind => SkippedDuplicateDestinationKind,
+        RuntimeArchiveDependencyKind => RuntimeArchiveDependencyKind,
+        RuntimeLooseDependencyKind => RuntimeLooseDependencyKind,
+        RuntimeMissingDependencyKind => RuntimeMissingDependencyKind,
         _ => "NotFound",
     };
 

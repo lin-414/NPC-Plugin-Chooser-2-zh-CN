@@ -20,10 +20,11 @@ namespace NPC_Plugin_Chooser_2.Tests.Unit;
 /// order) rather than of the load order. That is invisible while paths are
 /// mod-unique and silently wrong the moment two archives ship the same path.</para>
 ///
-/// <para>The tier-2 rule matters as much as tier 1: NPC2 indexes archives for mods
-/// the user has NOT enabled, and load order cannot rank those. They must still
-/// resolve — a mugshot of a disabled mod is a normal thing to render — so an
-/// unranked candidate is a fallback, never a reason to report a miss.</para>
+/// <para>An unranked candidate (owner not in the given order) yields null. Since
+/// the 2.8.0 engine-order work the broadcast tier passes ENABLED plugins only and
+/// treats null as a MISS — an archive no enabled plugin loads is invisible to the
+/// game. A mod's own archives resolve through the strict scope chain instead
+/// (TryLocateInScopedBsa), which is how a disabled mod's mugshot still renders.</para>
 /// </summary>
 public class BsaLoadOrderPrecedenceTests
 {
@@ -101,8 +102,9 @@ public class BsaLoadOrderPrecedenceTests
             (NotInLoadOrder, @"S:\mods\Disabled\Disabled.bsa"),
         };
 
-        // Null is the caller's signal to fall back to the first indexed match,
-        // NOT to report the asset missing.
+        // Null = no rankable candidate. The broadcast tier (fed enabled plugins
+        // only) treats this as a miss — the game would not load that archive;
+        // a mod's own archives are the scope chain's job, not the broadcast's.
         NpcChooserBsaProviderAdapter.SelectByLoadOrder(candidates, ListedOrder)
             .Should().BeNull();
     }

@@ -87,19 +87,80 @@ public class AutoSplitOutputTests
         return mod;
     }
 
-    private static async Task WriteWithAutoSplitAsync(SkyrimMod mod, string path, IEnumerable<ModKey> masters)
+    private static async Task WriteWithAutoSplitAsync(SkyrimMod mod, string path, IEnumerable<ModKey> masters,
+        ModKey[]? extraMasters = null)
     {
         // Mirror BackEnd/Patcher.cs's write chain. WithLoadOrder must be given LOADED mods (not bare
         // ModKeys) so the builder knows each master's style without a data folder - matching how the
         // patcher passes the environment's real load order. Empty stand-ins are enough here.
+        // extraMasters mirrors the runtime-asset-dependency masters the patcher unions in via
+        // WithExtraIncludedMasters (an empty array is the patcher's common no-dependency case).
         var loadOrder = masters
             .Select(mk => (ISkyrimModGetter)new SkyrimMod(mk, SkyrimRelease.SkyrimSE))
             .ToArray();
         await mod.BeginWrite
             .ToPath(path)
             .WithLoadOrder(loadOrder)
+            .WithExtraIncludedMasters(extraMasters ?? System.Array.Empty<ModKey>())
             .WithAutoSplit()
             .WriteAsync();
+    }
+
+    [Fact]
+    public async Task WithExtraIncludedMasters_NoRecordReference_MasterStillWritten()
+    {
+        // The runtime-asset-dependency shape: the output references an asset inside
+        // KSHairdos.bsa but no RECORD links into KSHairdos.esp, so master iteration alone
+        // would never include it. WithExtraIncludedMasters must union it in — and must not
+        // disturb the record-referenced master.
+        using var tmp = new TempDir();
+        var archiveOwner = ModKey.FromName("KSHairdos", ModType.Plugin);
+        var recordMaster = ModKey.FromName("Master0", ModType.Plugin);
+
+        var mod = new SkyrimMod(OutputKey, SkyrimRelease.SkyrimSE);
+        var npc = mod.Npcs.AddNew();
+        npc.EditorID = "Solo";
+        npc.Race.SetTo(new FormKey(recordMaster, 0x800));
+
+        var path = Path.Combine(tmp.Path, mod.ModKey.FileName);
+        await WriteWithAutoSplitAsync(mod, path, new[] { recordMaster, archiveOwner },
+            extraMasters: new[] { archiveOwner });
+
+        using var written = SkyrimMod.CreateFromBinaryOverlay(path, SkyrimRelease.SkyrimSE);
+        var writtenMasters = written.ModHeader.MasterReferences.Select(m => m.Master).ToList();
+        writtenMasters.Should().Contain(archiveOwner,
+            "the extra master is the only thing keeping the supplying archive loaded");
+        writtenMasters.Should().Contain(recordMaster,
+            "extra masters must UNION onto the auto-computed list, not replace it");
+    }
+
+    [Fact]
+    public async Task WithExtraIncludedMasters_SurvivesAutoSplit()
+    {
+        // The dependency master must not be lost when the write splits: the guarantee is
+        // "the game refuses to run without the archive's plugin", which requires at least
+        // one written file to master it (all split siblings deploy and enable together).
+        using var tmp = new TempDir();
+        var archiveOwner = ModKey.FromName("KSHairdos", ModType.Plugin);
+        var mod = BuildOverLimitOutput(out var masters);
+        masters.Add(archiveOwner);
+        var path = Path.Combine(tmp.Path, mod.ModKey.FileName);
+
+        await WriteWithAutoSplitAsync(mod, path, masters, extraMasters: new[] { archiveOwner });
+
+        var splitFiles = MultiModFileAnalysis.GetSplitModFiles(new ModPath(mod.ModKey, path));
+        splitFiles.Count.Should().BeGreaterThan(1, "the 300 masters must force a split");
+
+        var filesCarryingExtra = new List<string>();
+        foreach (var fp in splitFiles)
+        {
+            using var cluster = SkyrimMod.CreateFromBinaryOverlay((string)fp, SkyrimRelease.SkyrimSE);
+            if (cluster.ModHeader.MasterReferences.Any(m => m.Master.Equals(archiveOwner)))
+                filesCarryingExtra.Add(Path.GetFileName((string)fp));
+        }
+
+        filesCarryingExtra.Should().NotBeEmpty(
+            "losing the extra master in the split path would silently drop the archive-dependency guarantee");
     }
 
     [Fact]

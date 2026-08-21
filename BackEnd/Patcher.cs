@@ -2177,6 +2177,16 @@ public class Patcher : OptionalUIModule
                         ApplyPendingHeadPartRenames();
                     }, ct);
 
+                    // Referenced-but-NOT-copied assets (out-of-scope references, and everything a
+                    // "Copy Assets"-unchecked mod contributes): probe the live data folder and
+                    // classify each — archive-supplied assets pin their loader plugin as an output
+                    // MASTER (included in the save below), loose ones go into the token for
+                    // "Validate Output" to re-verify. Must run after the task drain above (the
+                    // candidate pool and destination claims are final) and before the save.
+                    var runtimeDependencies =
+                        await _assetHandler.ResolveRuntimeDependenciesAsync(_currentRunOutputAssetPath);
+                    LogRuntimeDependencySummary(runtimeDependencies);
+
                     // Any record minted under a new FormKey that nothing references is dead cargo:
                     // copies are removed, anything this run authored is reported (neutral note, not
                     // a warning) — see PruneAndLogOrphanedDuplicates. Must run after every NPC (and
@@ -2234,6 +2244,15 @@ public class Patcher : OptionalUIModule
 
                         _environmentStateProvider.OutputMod.ModHeader.Description = PluginDescriptionSignature;
 
+                        // Runtime-dependency archive masters (see ResolveRuntimeDependenciesAsync
+                        // above): plugins whose archives supply referenced-but-not-copied assets.
+                        // WithExtraIncludedMasters UNIONS these onto the auto-computed master list
+                        // ("include if not included naturally"), so record-referenced masters are
+                        // untouched and an empty array is a no-op. Sorted for a stable header.
+                        var extraMasterKeys = _assetHandler.RuntimeDependencies.ArchiveMasters.Keys
+                            .OrderBy(k => k.FileName.String, StringComparer.OrdinalIgnoreCase)
+                            .ToArray();
+
                         // WithAutoSplit() first attempts a normal single-file write and only splits
                         // into <name>.esp/<name>_2.esp/... if the output would exceed Skyrim's
                         // 255-master limit, so the common case is unchanged. Skipped when the user
@@ -2243,6 +2262,7 @@ public class Patcher : OptionalUIModule
                             await _environmentStateProvider.OutputMod.BeginWrite
                                 .ToPath(outputPluginPath)
                                 .WithLoadOrder(_environmentStateProvider.LoadOrder)
+                                .WithExtraIncludedMasters(extraMasterKeys)
                                 .WithAutoSplit()
                                 .WriteAsync();
                         }
@@ -2251,6 +2271,7 @@ public class Patcher : OptionalUIModule
                             await _environmentStateProvider.OutputMod.BeginWrite
                                 .ToPath(outputPluginPath)
                                 .WithLoadOrder(_environmentStateProvider.LoadOrder)
+                                .WithExtraIncludedMasters(extraMasterKeys)
                                 .WriteAsync();
                         }
 
@@ -2460,11 +2481,74 @@ public class Patcher : OptionalUIModule
             UseSkyPatcherMode = _settings.UseSkyPatcherMode,
             ProcessedNpcs = _accumulatedTokenData,
             SkippedNpcs = _skippedTokenData,
-            EditedFaceGen = new HashSet<string>(_editedFaceGenPaths.Keys, StringComparer.OrdinalIgnoreCase)
+            EditedFaceGen = new HashSet<string>(_editedFaceGenPaths.Keys, StringComparer.OrdinalIgnoreCase),
+            // Always non-null in new tokens (null = old-version token, "unknown"): an EMPTY
+            // ledger is the positive statement "this run has no runtime dependencies". The
+            // bootstrap marker write naturally carries an empty ledger; the final unified
+            // write carries the run's real classification.
+            AssetDependencies = BuildAssetDependencyLedger(_assetHandler.RuntimeDependencies)
         };
 
         JSONhandler<NpcToken>.SaveJSONFile(tokenData, tokenFilePath, out bool tokenSaved, out exceptionStr);
         return tokenSaved;
+    }
+
+    /// <summary>Serializable form of the run's runtime-dependency classification for the token —
+    /// what "Validate Output" re-verifies against the user's current setup.</summary>
+    private static AssetDependencyLedger BuildAssetDependencyLedger(AssetHandler.RuntimeDependencyReport report)
+    {
+        var ledger = new AssetDependencyLedger();
+        foreach (var kv in report.ArchiveMasters.OrderBy(kv => kv.Key.FileName.String, StringComparer.OrdinalIgnoreCase))
+        {
+            ledger.ArchiveMasters.Add(new ArchiveDependency
+            {
+                Plugin = kv.Key,
+                Archives = kv.Value.ArchiveFileNames.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList(),
+                Assets = kv.Value.Assets.OrderBy(a => a, StringComparer.OrdinalIgnoreCase).ToList()
+            });
+        }
+        ledger.LooseFiles = report.LooseFiles.OrderBy(a => a, StringComparer.OrdinalIgnoreCase).ToList();
+        return ledger;
+    }
+
+    /// <summary>
+    /// End-of-batch summary of <see cref="AssetHandler.ResolveRuntimeDependenciesAsync"/>'s
+    /// classification. Neutral notes, not warnings — everything listed still works in game as
+    /// long as the named plugins/mods stay installed, which is exactly what the extra masters
+    /// enforce and "Validate Output" re-checks.
+    /// </summary>
+    private void LogRuntimeDependencySummary(AssetHandler.RuntimeDependencyReport report)
+    {
+        if (report.IsEmpty) return;
+
+        if (report.ArchiveMasters.Count > 0)
+        {
+            AppendLog($"\nThe output plugin will be mastered to {report.ArchiveMasters.Count} additional plugin(s) " +
+                      "whose archives supply referenced assets that were not copied into the output — do NOT disable them:", false, true);
+            foreach (var kv in report.ArchiveMasters.OrderBy(kv => kv.Key.FileName.String, StringComparer.OrdinalIgnoreCase))
+            {
+                var samples = kv.Value.Assets.OrderBy(a => a, StringComparer.OrdinalIgnoreCase).Take(3).ToList();
+                string sampleText = string.Join("; ", samples) + (kv.Value.Assets.Count > samples.Count ? "; ..." : string.Empty);
+                AppendLog($"  {kv.Key.FileName} — {kv.Value.Assets.Count} asset(s) from " +
+                          $"{string.Join(", ", kv.Value.ArchiveFileNames.OrderBy(n => n, StringComparer.OrdinalIgnoreCase))} " +
+                          $"(e.g. {sampleText})", false, true);
+            }
+        }
+
+        if (report.LooseFiles.Count > 0)
+        {
+            AppendLog($"Note: {report.LooseFiles.Count} referenced asset(s) were not copied and resolve from loose files " +
+                      "in your current setup. Keep the mods supplying them installed; \"Validate Output\" re-checks that " +
+                      "they still exist.", false, true);
+        }
+
+        if (report.Unresolved.Count > 0)
+        {
+            var samples = report.Unresolved.OrderBy(a => a, StringComparer.OrdinalIgnoreCase).Take(3).ToList();
+            AppendLog($"Note: {report.Unresolved.Count} referenced asset(s) could not be found anywhere in your current " +
+                      $"setup (mod folders, loose data files, or enabled archives) — e.g. {string.Join("; ", samples)}" +
+                      (report.Unresolved.Count > samples.Count ? "; ..." : string.Empty), false, true);
+        }
     }
 
     private void ClearDirectory(string path)

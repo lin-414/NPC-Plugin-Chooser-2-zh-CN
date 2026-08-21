@@ -1066,6 +1066,11 @@ public class VM_InternalMugshotPreview : ReactiveObject, IDisposable
         // so they don't need to be re-pushed here.
         Viewer.VanillaLooseOverridesBsa = _settings.InternalMugshot.VanillaLooseOverridesBsa;
         Viewer.VanillaLooseOverridesModLoose = _settings.InternalMugshot.VanillaLooseOverridesModLoose;
+        // Engine-order resolution (CV.R 2.8.0+): always on for NPC2 renders —
+        // the preview simulates what the game will resolve after patching, so
+        // out-of-scope assets fall back to enabled load-order archives instead
+        // of rendering as missing. Not user-toggleable by design.
+        Viewer.AllowLoadOrderFallback = true;
     }
 
     private void ResetSettingsToDefaults()
