@@ -25,7 +25,7 @@
                     Command="{Binding AnalyzeMastersCommand}"
                     Margin="15,0,0,0" Padding="10,5"
                     VerticalAlignment="Center"
-                    ToolTip="Analyze why specific masters are required by a plugin file"/>
+                    ToolTip="Analyze why specific masters are required by a plugin file. Findings are shown in a table you can copy to Excel."/>
         </StackPanel>
     </Grid>
 </reactiveui:ReactiveUserControl>

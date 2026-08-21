@@ -839,8 +839,14 @@ public class VM_Run : ReactiveObject, IDisposable
             return;
         }
 
-        // Step 5: Format and display results
-        string report = _masterAnalyzer.FormatAnalysisReport(result);
+        // Step 5: Display results
+        if (!string.IsNullOrEmpty(result.ErrorMessage))
+        {
+            AppendLog($"ERROR during master analysis: {result.ErrorMessage}", true);
+            Application.Current?.Dispatcher.Invoke(() =>
+                ScrollableMessageBox.ShowWarning(result.ErrorMessage, "Master Analysis"));
+            return;
+        }
 
         // Log summary to the Run view log
         int totalReferences = result.ReferencesByMaster.Values.Sum(list => list.Count);
@@ -848,8 +854,22 @@ public class VM_Run : ReactiveObject, IDisposable
             $"Analysis complete. Found {totalReferences} total reference(s) across {selectedMasters.Count} master(s).",
             forceLog: true);
 
-        // Show detailed results in ScrollableMessageBox
-        Application.Current?.Dispatcher.Invoke(() => { ScrollableMessageBox.Show(report, "Master Analysis Results"); });
+        // Show detailed results in a sortable/filterable table (matching the Validate Output and
+        // pre-run invalid-selections windows); the classic indented text report stays available
+        // behind the window's Copy Text button.
+        string report = _masterAnalyzer.FormatAnalysisReport(result);
+        Application.Current?.Dispatcher.Invoke(() =>
+        {
+            var resultsVm = new VM_MasterAnalysisResultsWindow(result, report);
+            var resultsWindow = new Views.MasterAnalysisResultsWindow { DataContext = resultsVm };
+            resultsWindow.Closed += (_, _) => resultsVm.Dispose(); // modeless: dispose VM subscriptions on close
+            var mainWindow = Application.Current?.MainWindow;
+            if (mainWindow != null && mainWindow != resultsWindow)
+            {
+                resultsWindow.Owner = mainWindow;
+            }
+            resultsWindow.Show();
+        });
     }
 
     private record PatchingBatch(string Suffix, List<KeyValuePair<FormKey, ScreeningResult>> Selections);
