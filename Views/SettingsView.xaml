@@ -1198,8 +1198,12 @@
                                           ToolTip="When on (default), a mugshot rendered with missing meshes/textures (or a detected FaceGen mismatch) shows the missing-asset warning icon, and that state is recorded in the PNG so the icon survives restarts. Unchecking hides the icon and re-renders the affected mugshots once so their recorded state is cleared. Note: while off, newly-rendered mugshots record no missing assets, so the 'Re-render When: Missing Assets' option has nothing to act on for them."/>
                                 <CheckBox Content="Show Missing Outfit Assets Icon"
                                           IsChecked="{Binding InternalShowMissingOutfitAssetsIcon, Mode=TwoWay}"
-                                          VerticalAlignment="Center"
+                                          VerticalAlignment="Center" Margin="0,0,12,0"
                                           ToolTip="When on (default), a mugshot whose outfit/headgear is missing meshes or textures — or references a physics config that doesn't exist (a broken SMP/HDT link inside the mod; the render itself is correct) — shows the outfit-assets warning icon, recorded in the PNG so it survives restarts. The missing meshes/textures re-render when you install the assets (via 'Re-render When: Missing Assets'); the broken physics link is informational. Unchecking hides the icon and re-renders the affected mugshots once so their recorded state is cleared."/>
+                                <CheckBox Content="Show Data Folder Assets Icon"
+                                          IsChecked="{Binding InternalShowDataFolderAssetsIcon, Mode=TwoWay}"
+                                          VerticalAlignment="Center"
+                                          ToolTip="When on (default), a mugshot that pulled non-vanilla assets from your data folder — because they were not found in the mod's Corresponding Mod Folders — shows the data-folder-assets icon, recorded in the PNG so it survives restarts. These assets come from some other installed mod: it must stay activated, or be added to this mod's Corresponding Mod Folders, for the NPC to look right in game. Informational only — the render itself is correct. Unchecking hides the icon and re-renders the affected mugshots once so their recorded state is cleared."/>
                             </WrapPanel>
 
                             <!-- Attire defaults: apply to both the mugshot renderer and

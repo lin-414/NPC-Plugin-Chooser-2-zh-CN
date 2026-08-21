@@ -102,6 +102,12 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
     /// <see cref="HasMissingAssets"/>; see VM_NpcsMenuMugshot.</summary>
     [Reactive] public bool HasMissingOutfitAssets { get; set; } = false;
     [Reactive] public string MissingOutfitAssetsText { get; set; } = string.Empty;
+    /// <summary>Data-folder-asset badge: the render pulled non-vanilla assets
+    /// from the data folder because they weren't in this mod's Corresponding
+    /// Mod Folders (runtime dependencies). Informational only; see
+    /// VM_NpcsMenuMugshot.</summary>
+    [Reactive] public bool HasDataFolderAssets { get; set; } = false;
+    [Reactive] public string DataFolderAssetsText { get; set; } = string.Empty;
     /// <summary>Outfit-conflict badge (Include Outfit overridden at runtime by
     /// SkyPatcher/SPID, or NPC2's SkyPatcher ini not conflict-winning) —
     /// computed live from current configs; see VM_NpcsMenuMugshot.</summary>
@@ -403,6 +409,7 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
                 List<string> textures = new();
                 List<string> physicsNotices = new();
                 List<string> missingOutfitAssets = new();
+                List<string> dataFolderAssets = new();
                 string? faceGenMismatch = null;
                 if (tryReadAssetMeta)
                 {
@@ -413,6 +420,7 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
                         faceGenMismatch = InternalMugshotMetadata.TryReadFaceGenMismatch(json);
                         physicsNotices = InternalMugshotMetadata.TryReadPhysicsConfigNotices(json);
                         missingOutfitAssets = InternalMugshotMetadata.TryReadMissingOutfitAssets(json);
+                        dataFolderAssets = InternalMugshotMetadata.TryReadDataFolderAssets(json);
                     }
                 }
 
@@ -421,7 +429,7 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
                 // the Mods menu).
                 string outfitNotice = ComputeOutfitNoticeSafe();
 
-                return (bmp, dimensions, meshes, textures, physicsNotices, missingOutfitAssets, faceGenMismatch, outfitNotice);
+                return (bmp, dimensions, meshes, textures, physicsNotices, missingOutfitAssets, dataFolderAssets, faceGenMismatch, outfitNotice);
             });
 
             // Always apply (even with empty lists) so a re-load of a tile whose
@@ -431,6 +439,7 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
             {
                 ApplyMissingAssetNotifications(loadResult.meshes, loadResult.textures, loadResult.faceGenMismatch);
                 ApplyOutfitAssetNotices(loadResult.missingOutfitAssets, loadResult.physicsNotices);
+                ApplyDataFolderAssetNotices(loadResult.dataFolderAssets);
             }
 
             OutfitNoticeText = loadResult.outfitNotice;
@@ -927,14 +936,17 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
             var faceGenMismatch = new List<string>();
             var physicsNotices = new List<string>();
             var missingOutfitAssets = new List<string>();
+            var dataFolderAssets = new List<string>();
             generated = await _internalMugshotGenerator.GenerateAsync(
                 NpcFormKey, sourceMod, pngSavePath, _cancellationToken,
                 missingMeshes, missingTextures, faceGenMismatchOut: faceGenMismatch,
                 physicsConfigNoticesOut: physicsNotices,
-                missingOutfitAssetsOut: missingOutfitAssets);
+                missingOutfitAssetsOut: missingOutfitAssets,
+                dataFolderFallbackAssetsOut: dataFolderAssets);
             ApplyMissingAssetNotifications(missingMeshes, missingTextures,
                 faceGenMismatch.Count > 0 ? faceGenMismatch[0] : null);
             ApplyOutfitAssetNotices(missingOutfitAssets, physicsNotices);
+            ApplyDataFolderAssetNotices(dataFolderAssets);
             _ = RefreshOutfitNoticeAsync();
         }
         else if (!string.IsNullOrWhiteSpace(nifPath))
@@ -1151,6 +1163,29 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
         HasMissingOutfitAssets = true;
         MissingOutfitAssetsText = sb.ToString();
         MergeScanOverlayIntoOutfitAssets();
+    }
+
+    /// <summary>Sets the data-folder-asset badge from render output or stamped
+    /// metadata; see VM_NpcsMenuMugshot's twin for semantics. No scan-overlay
+    /// merge — the Mod Issues scan doesn't feed this badge.</summary>
+    private void ApplyDataFolderAssetNotices(IReadOnlyList<string>? dataFolderAssets)
+    {
+        if (dataFolderAssets is not { Count: > 0 }
+            || !_settings.InternalMugshot.ShowDataFolderAssetsIcon)
+        {
+            HasDataFolderAssets = false;
+            DataFolderAssetsText = string.Empty;
+            return;
+        }
+
+        var sb = new System.Text.StringBuilder();
+        sb.Append("The following assets were loaded from your data folder because they were not found in this mod's Corresponding Mod Folders. Whichever mod these assets come from must stay activated, or else that mod needs to be added to ")
+          .Append(_parentVMModSetting.DisplayName)
+          .Append("'s Corresponding Mod Folders:");
+        foreach (var p in dataFolderAssets) sb.Append('\n').Append(p);
+
+        HasDataFolderAssets = true;
+        DataFolderAssetsText = sb.ToString();
     }
 
     /// <summary>Builds the placeholder tooltip body listing where NPC2 looks

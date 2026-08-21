@@ -1111,6 +1111,12 @@ public sealed class InternalMugshotSettings
     // while-off caveat applies to the re-render-eligible outfit assets.
     public bool ShowMissingNpcAssetsIcon { get; set; } = true;
     public bool ShowMissingOutfitAssetsIcon { get; set; } = true;
+    // ShowDataFolderAssetsIcon: the data-folder-asset icon — non-vanilla assets
+    // the render pulled from the data folder because they weren't in the mod's
+    // Corresponding Mod Folders (runtime dependencies; informational,
+    // staleness-neutral "data_folder_assets" stamp). Same gating pattern as
+    // the two icons above: gates the stamp, not the diagnostics.
+    public bool ShowDataFolderAssetsIcon { get; set; } = true;
 
     // Character-preview attire toggles (mesh-override channel; CharacterViewer.Rendering
     // neutral MeshOverride pipeline). Both resolve Mutagen Armor/Outfit/NPC records

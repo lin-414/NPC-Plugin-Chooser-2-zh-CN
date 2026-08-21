@@ -26,6 +26,7 @@ public sealed class InternalMugshotGenerator
     private readonly ICharacterViewerSettings _viewerSettings;
     private readonly EnvironmentStateProvider _env;
     private readonly IBsaArchiveProvider _bsa;
+    private readonly BsaHandler _bsaHandler;
     private readonly GeneratedMugshotTracker _tracker;
     private readonly CharacterViewerLogGate _logGate;
     private readonly Lazy<VM_NpcSelectionBar> _npcSelectionBar;
@@ -50,6 +51,7 @@ public sealed class InternalMugshotGenerator
         ICharacterViewerSettings viewerSettings,
         EnvironmentStateProvider env,
         IBsaArchiveProvider bsa,
+        BsaHandler bsaHandler,
         GeneratedMugshotTracker tracker,
         CharacterViewerLogGate logGate,
         Lazy<VM_NpcSelectionBar> npcSelectionBar,
@@ -61,6 +63,7 @@ public sealed class InternalMugshotGenerator
         _viewerSettings = viewerSettings;
         _env = env;
         _bsa = bsa;
+        _bsaHandler = bsaHandler;
         _tracker = tracker;
         _logGate = logGate;
         _npcSelectionBar = npcSelectionBar;
@@ -104,6 +107,12 @@ public sealed class InternalMugshotGenerator
     /// eligible missing assets. <paramref name="missingMeshPathsOut"/> and
     /// <paramref name="missingTexturePathsOut"/> stay limited to the base NPC's
     /// own head/body/hair meshes and textures.</para>
+    /// <para>Pass <paramref name="dataFolderFallbackAssetsOut"/> to receive the
+    /// game-relative paths of non-vanilla assets that engine-order resolution
+    /// pulled from the data folder instead of this mod's Corresponding Mod
+    /// Folders (runtime dependencies — whichever mod supplies them must stay
+    /// activated). Informational only: they never gate a validated-only render
+    /// and never count as missing assets.</para>
     /// <para>When <paramref name="assetValidatedOnly"/> is true and the
     /// renderer reported any missing meshes or textures, the rendered
     /// bytes are discarded — no PNG is written, no tracker entry is
@@ -123,7 +132,8 @@ public sealed class InternalMugshotGenerator
         List<string>? faceGenMismatchOut = null,
         FormKey? targetNpcFormKey = null,
         List<string>? physicsConfigNoticesOut = null,
-        List<string>? missingOutfitAssetsOut = null)
+        List<string>? missingOutfitAssetsOut = null,
+        List<string>? dataFolderFallbackAssetsOut = null)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         int tid = Environment.CurrentManagedThreadId;
@@ -216,6 +226,13 @@ public sealed class InternalMugshotGenerator
             // The renderer attributes these as the post-override delta of its
             // missing-texture set, keeping them out of the base missingTexturePathsOut.
             var missingOutfitTextures = new List<string>();
+            // Assets engine-order resolution pulled from the data folder rather
+            // than this mod's scopes (Tier 2 loose / Tier 3 broadcast). Always
+            // requested — the stamp below needs them even when the caller
+            // didn't pass an out-list. Filtered against the vanilla asset-path
+            // index after the render so Base Game content doesn't count as a
+            // keep-activated dependency.
+            var dataFolderFallbackRaw = new List<string>();
 
             // Opt-in per-render phase timing (drop a LogRenderTimings.txt file
             // next to the exe). Pure data, no logging — so timings are
@@ -259,6 +276,7 @@ public sealed class InternalMugshotGenerator
                 MissingMeshPathsOut = missingMeshPathsOut,
                 MissingTexturePathsOut = missingTexturePathsOut,
                 MissingOutfitTexturePathsOut = missingOutfitTextures,
+                DataFolderFallbackPathsOut = dataFolderFallbackRaw,
                 // Per-render extraction cache clearing was removed: it raced
                 // with concurrent interactive 3D-preview loads (both share the
                 // resolver's extraction directory), causing the preview to lose
@@ -382,6 +400,29 @@ public sealed class InternalMugshotGenerator
             if (missingOutfitAssets.Count > 0)
                 missingOutfitAssetsOut?.AddRange(missingOutfitAssets);
 
+            // Data-folder-fallback assets, minus anything living at a vanilla
+            // asset path — a fallback hit that the base game itself ships is
+            // not a keep-activated dependency (and this is also what keeps the
+            // Base Game / Creation Club tiles badge-free). Vanilla index paths
+            // use backslash separators (OrdinalIgnoreCase), so normalize
+            // before membership testing.
+            var dataFolderAssets = new List<string>();
+            if (dataFolderFallbackRaw.Count > 0)
+            {
+                var vanillaPaths = await _bsaHandler.GetVanillaAssetPathsAsync().ConfigureAwait(false);
+                foreach (var gamePath in dataFolderFallbackRaw)
+                {
+                    string normalized = gamePath.Replace('/', '\\').TrimStart('\\');
+                    if (!vanillaPaths.Contains(normalized))
+                        dataFolderAssets.Add(gamePath);
+                }
+                if (dataFolderAssets.Count > 0)
+                {
+                    Trace($"  dataFolderFallbackAssets tid={Environment.CurrentManagedThreadId} count={dataFolderAssets.Count} (raw={dataFolderFallbackRaw.Count})");
+                    dataFolderFallbackAssetsOut?.AddRange(dataFolderAssets);
+                }
+            }
+
             // FaceGen-vs-records consistency. CV.R renders the baked FaceGen geometry
             // directly, so a perfectly-rendered mugshot can still hide the in-game
             // dark-face bug (a head part the NPC's records resolve to has no baked
@@ -437,6 +478,7 @@ public sealed class InternalMugshotGenerator
                 // regeneration instead of looping.
                 bool stampNpcAssets = _settings.InternalMugshot.ShowMissingNpcAssetsIcon;
                 bool stampOutfitAssets = _settings.InternalMugshot.ShowMissingOutfitAssetsIcon;
+                bool stampDataFolderAssets = _settings.InternalMugshot.ShowDataFolderAssetsIcon;
                 // The attire identity = effective outfit + the wig-forwarding
                 // contribution (WigHandlingMode) — same composition the
                 // staleness checker's identity providers use, so a mode or
@@ -450,7 +492,8 @@ public sealed class InternalMugshotGenerator
                     stampNpcAssets ? missingTexturePathsOut : null,
                     stampNpcAssets ? faceGenMismatch : null,
                     stampOutfitAssets ? physicsConfigNotices : null,
-                    stampOutfitAssets ? missingOutfitAssets : null);
+                    stampOutfitAssets ? missingOutfitAssets : null,
+                    stampDataFolderAssets ? dataFolderAssets : null);
                 MugshotPngMetadata.InjectParameters(outputPath, parametersJson);
             }
             catch (Exception metaEx)

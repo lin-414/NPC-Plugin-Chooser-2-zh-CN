@@ -471,7 +471,7 @@ namespace NPC_Plugin_Chooser_2
             // generator, 3D previews, and Mod Issues scan all rely on for
             // out-of-scope BSA assets (e.g. hair textures referencing the
             // original hair mod's archive).
-            var requiredViewerVersion = new Version(2, 8, 0);
+            var requiredViewerVersion = new Version(2, 9, 0);
             if (CharacterViewerRendering.Version < requiredViewerVersion)
             {
                 StartupLogger.Log(

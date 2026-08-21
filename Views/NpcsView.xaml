@@ -1060,6 +1060,26 @@
                                              </Viewbox>
                                          </Grid>
 
+                                         <!-- Data-folder-assets indicator: the render pulled
+                                              non-vanilla assets from the data folder because they
+                                              weren't in this mod's Corresponding Mod Folders — a
+                                              keep-activated runtime dependency. Informational
+                                              (the render is correct); the tooltip lists the
+                                              assets. White halo on the Viewbox (never the glyph)
+                                              so the blue folder doesn't camouflage into renders. -->
+                                         <Grid Width="{Binding RelativeSource={RelativeSource AncestorType=Grid}, Path=ActualWidth, Converter={StaticResource PercentageSizingConverter}, ConverterParameter='20'}"
+                                               Height="{Binding RelativeSource={RelativeSource Self}, Path=Width}"
+                                               Visibility="{Binding HasDataFolderAssets, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                               ToolTip="{Binding DataFolderAssetsText}">
+                                             <Viewbox Stretch="Uniform">
+                                                 <Viewbox.Effect>
+                                                     <DropShadowEffect Color="White" ShadowDepth="0"
+                                                                       BlurRadius="6" Opacity="0.9"/>
+                                                 </Viewbox.Effect>
+                                                 <TextBlock Text="&#xE8B7;" FontFamily="Segoe MDL2 Assets" Foreground="DodgerBlue"/>
+                                             </Viewbox>
+                                         </Grid>
+
                                          <!-- Multiple-plugins indicator: NPC is defined in
                                               multiple source plugins; right-click to pick the
                                               correct source. -->

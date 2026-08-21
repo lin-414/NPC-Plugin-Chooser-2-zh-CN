@@ -38,6 +38,7 @@ public class MugshotSettingsHashCoverageTests
         ["ShowMissingNpcAssetsIcon"] = "tile overlay, not render output; MugshotStalenessChecker " +
                                        "has a dedicated stamp-present-while-toggle-off gate",
         ["ShowMissingOutfitAssetsIcon"] = "tile overlay, not render output; same dedicated gate",
+        ["ShowDataFolderAssetsIcon"] = "tile overlay, not render output; same dedicated gate",
         ["WigModeOverride"] = "harness-only; reaches the cache through the wig identity suffix " +
                               "(GetEffectiveRenderWigMode), not the settings hash",
         ["AntlerModeOverride"] = "harness-only; same route via GetEffectiveRenderAntlerMode",

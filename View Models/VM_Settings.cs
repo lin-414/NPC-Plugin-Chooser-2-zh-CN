@@ -169,6 +169,7 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
     /// MugshotStalenessChecker's icon-visibility drift check).</summary>
     [Reactive] public bool InternalShowMissingNpcAssetsIcon { get; set; }
     [Reactive] public bool InternalShowMissingOutfitAssetsIcon { get; set; }
+    [Reactive] public bool InternalShowDataFolderAssetsIcon { get; set; }
     /// <summary>SolidColorBrush wrapping InternalMugshot.BackgroundR/G/B.
     /// Surfaced as a single property so the SettingsView color-picker swatch
     /// + "Change..." button can mirror the legacy Portrait Creator's UI shape
@@ -719,6 +720,7 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
         InternalIncludeHeadgear = _model.InternalMugshot.IncludeHeadgear;
         InternalShowMissingNpcAssetsIcon = _model.InternalMugshot.ShowMissingNpcAssetsIcon;
         InternalShowMissingOutfitAssetsIcon = _model.InternalMugshot.ShowMissingOutfitAssetsIcon;
+        InternalShowDataFolderAssetsIcon = _model.InternalMugshot.ShowDataFolderAssetsIcon;
         InternalBackgroundColor = new SolidColorBrush(Color.FromRgb(
             _model.InternalMugshot.BackgroundR,
             _model.InternalMugshot.BackgroundG,
@@ -1126,6 +1128,8 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
             .Subscribe(b => { _model.InternalMugshot.ShowMissingNpcAssetsIcon = b; RequestThrottledSave(); }).DisposeWith(_disposables);
         this.WhenAnyValue(x => x.InternalShowMissingOutfitAssetsIcon).Skip(1)
             .Subscribe(b => { _model.InternalMugshot.ShowMissingOutfitAssetsIcon = b; RequestThrottledSave(); }).DisposeWith(_disposables);
+        this.WhenAnyValue(x => x.InternalShowDataFolderAssetsIcon).Skip(1)
+            .Subscribe(b => { _model.InternalMugshot.ShowDataFolderAssetsIcon = b; RequestThrottledSave(); }).DisposeWith(_disposables);
 
         // --- FaceGen Analysis persistence ---
         this.WhenAnyValue(x => x.EnableFaceGenAnalysis).Skip(1)

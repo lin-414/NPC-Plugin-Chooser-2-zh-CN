@@ -324,6 +324,12 @@ public sealed class MugshotStalenessChecker
             Trace("  Internal: outfit-assets icon disabled but PNG carries outfit-asset stamps");
             return true;
         }
+        if (!_settings.InternalMugshot.ShowDataFolderAssetsIcon &&
+            InternalMugshotMetadata.TryReadDataFolderAssets(parametersJson).Count > 0)
+        {
+            Trace("  Internal: data-folder-assets icon disabled but PNG carries data-folder-asset stamp");
+            return true;
+        }
 
         // Settings drift (gated on AutoUpdateStaleMugshots). The hash is
         // schema-versioned: each pipeline_schema bump is append-only, so

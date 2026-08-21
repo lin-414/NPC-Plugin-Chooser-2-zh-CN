@@ -167,6 +167,15 @@ public static class InternalMugshotMetadata
     // them), like the base arrays under AutoUpdateMugshotsWithMissingAssets. Not
     // folded into the settings hash (a render output, not an input).
     private const string MissingOutfitAssetsKey = "missing_outfit_assets";
+    // Non-vanilla assets that engine-order resolution pulled from the data
+    // folder because they weren't in the depicted mod's Corresponding Mod
+    // Folders — runtime dependencies (whichever mod supplies them must stay
+    // activated, or be added to the mod's folders). Like
+    // PhysicsConfigNoticesKey this is informational: the render is correct,
+    // so it is NOT read by TryReadMissingAssets, NOT part of
+    // RecordsMissingInstallableAssets, NOT folded into the settings hash, and
+    // never makes a cached mugshot stale.
+    private const string DataFolderAssetsKey = "data_folder_assets";
     public const string PipelineSchemaKey = "pipeline_schema";
     /// <summary>JSON key of the depicted-outfit identity stamp (v12+).</summary>
     public const string EffectiveOutfitKey = "effective_outfit";
@@ -185,7 +194,8 @@ public static class InternalMugshotMetadata
         IReadOnlyList<string>? missingTextures = null,
         string? faceGenMismatch = null,
         IReadOnlyList<string>? physicsConfigNotices = null,
-        IReadOnlyList<string>? missingOutfitAssets = null)
+        IReadOnlyList<string>? missingOutfitAssets = null,
+        IReadOnlyList<string>? dataFolderAssets = null)
     {
         var obj = new JObject
         {
@@ -273,6 +283,10 @@ public static class InternalMugshotMetadata
         {
             obj[MissingOutfitAssetsKey] = new JArray(missingOutfitAssets);
         }
+        if (dataFolderAssets != null && dataFolderAssets.Count > 0)
+        {
+            obj[DataFolderAssetsKey] = new JArray(dataFolderAssets);
+        }
 
         return obj.ToString(Newtonsoft.Json.Formatting.None);
     }
@@ -346,6 +360,29 @@ public static class InternalMugshotMetadata
         catch
         {
             // Malformed JSON — treat as "no missing outfit assets recorded".
+        }
+        return assets;
+    }
+
+    /// <summary>Parses the data-folder-fallback assets out of a
+    /// previously-stamped "Parameters" JSON. Empty when absent (older PNGs, or
+    /// renders whose every asset resolved from the mod's own folders) or on any
+    /// parse error. Like <see cref="TryReadPhysicsConfigNotices"/> these are
+    /// informational (the render is correct — the assets exist, just outside
+    /// the mod's Corresponding Mod Folders) and must never count as missing
+    /// assets for the staleness checker.</summary>
+    public static List<string> TryReadDataFolderAssets(string parametersJson)
+    {
+        var assets = new List<string>();
+        if (string.IsNullOrWhiteSpace(parametersJson)) return assets;
+        try
+        {
+            var obj = JObject.Parse(parametersJson);
+            ReadStringArray(obj, DataFolderAssetsKey, assets);
+        }
+        catch
+        {
+            // Malformed JSON — treat as "no data-folder assets recorded".
         }
         return assets;
     }
