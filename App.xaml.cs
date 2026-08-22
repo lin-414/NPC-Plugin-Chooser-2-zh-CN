@@ -251,6 +251,7 @@ namespace NPC_Plugin_Chooser_2
             builder.RegisterType<Validator>().AsSelf().SingleInstance();
             builder.RegisterType<AssetHandler>().AsSelf().SingleInstance();
             builder.RegisterType<BsaHandler>().AsSelf().SingleInstance();
+            builder.RegisterType<DataFolderAssetAttributor>().AsSelf().SingleInstance();
             builder.RegisterType<RecordHandler>().AsSelf().SingleInstance();
             builder.RegisterType<RecordDeltaPatcher>().AsSelf().SingleInstance();
             builder.RegisterType<WigForwarder>().AsSelf().SingleInstance();

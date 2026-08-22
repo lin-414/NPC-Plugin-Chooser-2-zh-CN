@@ -37,6 +37,7 @@ public sealed class ModIssueScanner
     private readonly NpcMeshResolver _resolver;
     private readonly GameAssetResolver _assetResolver;
     private readonly IBsaArchiveProvider _bsa;
+    private readonly BsaHandler _bsaHandler;
     private readonly FaceGenConsistencyAnalyzer _faceGenConsistency;
     private readonly ModIssuesCache _cache;
 
@@ -47,11 +48,23 @@ public sealed class ModIssueScanner
     /// the report should say so (<see cref="ModIssue.SourceModName"/>).</summary>
     private List<(string Folder, string ModName)> _folderOwners = new();
 
+    /// <summary>Base game + Creation Club asset paths (backslash separators,
+    /// OrdinalIgnoreCase), fetched once per run. A data-folder-fallback hit at
+    /// one of these paths is not a keep-activated dependency — the base game
+    /// always supplies it — mirroring the mugshot badge's vanilla filter.</summary>
+    private IReadOnlySet<string> _vanillaAssetPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Cross-reference into the parent Mods folder, rebuilt per run so
+    /// out-of-scope rows can name the installed mod(s) supplying each asset —
+    /// the attribution the mugshot badge's per-render time budget can't afford.</summary>
+    private ModsFolderAssetLocator _modsLocator = new(null);
+
     public ModIssueScanner(
         Settings settings,
         NpcMeshResolver resolver,
         GameAssetResolver assetResolver,
         IBsaArchiveProvider bsa,
+        BsaHandler bsaHandler,
         FaceGenConsistencyAnalyzer faceGenConsistency,
         ModIssuesCache cache,
         EnvironmentStateProvider env)
@@ -60,6 +73,7 @@ public sealed class ModIssueScanner
         _resolver = resolver;
         _assetResolver = assetResolver;
         _bsa = bsa;
+        _bsaHandler = bsaHandler;
         _faceGenConsistency = faceGenConsistency;
         _cache = cache;
         _env = env;
@@ -167,6 +181,14 @@ public sealed class ModIssueScanner
                 .Select(f => (Folder: f.TrimEnd('\\', '/'), ModName: ms.DisplayName)))
             .OrderByDescending(t => t.Folder.Length)
             .ToList();
+
+        // Out-of-scope reporting inputs: the vanilla-path filter (session-cached in
+        // BsaHandler) and a fresh Mods-folder cross-reference. Both are shared by
+        // every parallel ScanNpc in the run — the vanilla set is read-only and the
+        // locator memoizes per path, so the same KS-hair texture referenced by a
+        // hundred NPCs is attributed once.
+        _modsLocator = new ModsFolderAssetLocator(_settings.ModsFolder);
+        _vanillaAssetPaths = await _bsaHandler.GetVanillaAssetPathsAsync().ConfigureAwait(false);
 
         _headPartsByEditorId = await Task.Run(() =>
         {
@@ -420,6 +442,24 @@ public sealed class ModIssueScanner
             });
         }
 
+        // Out-of-scope hits: assets that RESOLVED, but via the engine-order
+        // data-folder fallback (Tier 2 loose / Tier 3 broadcast archive) rather
+        // than this mod's own folders — the same class the mugshot tiles badge.
+        // Keyed by regularized path so one asset referenced through several body
+        // parts makes one row (the first referencer supplies the row's context);
+        // reported after the NIF walk, filtered against vanilla paths and
+        // attributed via the parent Mods folder.
+        var outOfScope = new Dictionary<string, (AssetSource Source, string Referencer, bool IsOutfit)>(
+            StringComparer.OrdinalIgnoreCase);
+
+        void CollectOutOfScope(string? gamePath, AssetSource? source, string referencer, bool isOutfit)
+        {
+            if (source is not { ViaDataFolderFallback: true }) return;
+            if (string.IsNullOrWhiteSpace(gamePath)) return;
+            if (!Auxilliary.TryRegularizePath(gamePath!, out var rel) || string.IsNullOrWhiteSpace(rel)) return;
+            outOfScope.TryAdd(rel, (source, referencer, isOutfit));
+        }
+
         try
         {
             // Same scope chain the mugshot renderer would use for this (mod, NPC).
@@ -462,15 +502,24 @@ public sealed class ModIssueScanner
             // allowLoadOrderFallback true everywhere below (2.8.0): the scan
             // must agree with the renderer's engine-order mode — an asset an
             // enabled load-order archive provides is NOT missing in game, so
-            // flagging it here would be a false positive.
-            if (shouldHaveFaceGen && !string.IsNullOrWhiteSpace(paths.FaceTintPath) &&
-                ResolveToDisk(paths.FaceTintPath!, allowLoadOrderFallback: true) == null)
+            // flagging it here would be a false positive. A resolved-but-
+            // fallback tint is instead an out-of-scope dependency (broadcast-
+            // resolved FaceGen counts, per the mugshot badge's ruling).
+            if (shouldHaveFaceGen && !string.IsNullOrWhiteSpace(paths.FaceTintPath))
             {
-                AddIssue(ModIssueType.MissingFaceGenTint, faceGenTintRel,
-                    severity: ghostMasked ? ModIssueSeverity.Note : ModIssueSeverity.Issue,
-                    detail: (ghostMasked ? GhostNotePrefix : string.Empty)
-                            + "FaceGen tint texture is missing — faces typically render grey/mismatched without it."
-                            + (templateNote == null ? "" : "\n" + templateNote));
+                var tintSource = ResolveSource(paths.FaceTintPath!, allowLoadOrderFallback: true);
+                if (tintSource == null)
+                {
+                    AddIssue(ModIssueType.MissingFaceGenTint, faceGenTintRel,
+                        severity: ghostMasked ? ModIssueSeverity.Note : ModIssueSeverity.Issue,
+                        detail: (ghostMasked ? GhostNotePrefix : string.Empty)
+                                + "FaceGen tint texture is missing — faces typically render grey/mismatched without it."
+                                + (templateNote == null ? "" : "\n" + templateNote));
+                }
+                else
+                {
+                    CollectOutOfScope(paths.FaceTintPath, tintSource, "FaceGen tint", isOutfit: false);
+                }
             }
 
             // The NPC's own drawn meshes (skin ARMA world models + FaceGen head).
@@ -489,22 +538,27 @@ public sealed class ModIssueScanner
             // Argonian tails and worn hair — from the record chain's TextureSet (the ARMA's,
             // or the race skin's). The paths baked in these NIFs are runtime-superseded,
             // so their misses demote to Note below. Only FaceGen bakes are final.
-            CheckMesh(mod, paths.BodyMeshPath, "Skin ARMA (Body)" + skinVia, true, false, false, nifJobs, AddIssue, isSkin: true);
-            CheckMesh(mod, paths.HandsMeshPath, "Skin ARMA (Hands)" + skinVia, true, false, false, nifJobs, AddIssue, isSkin: true);
-            CheckMesh(mod, paths.FeetMeshPath, "Skin ARMA (Feet)" + skinVia, true, false, false, nifJobs, AddIssue, isSkin: true);
-            CheckMesh(mod, paths.HairMeshPath, "Worn hair ARMA", true, false, false, nifJobs, AddIssue, isSkin: true);
-            CheckMesh(mod, paths.TailMeshPath, "Tail ARMA", true, false, false, nifJobs, AddIssue, isSkin: true);
+            CheckMesh(mod, paths.BodyMeshPath, "Skin ARMA (Body)" + skinVia, true, false, false, nifJobs, AddIssue, CollectOutOfScope, isSkin: true);
+            CheckMesh(mod, paths.HandsMeshPath, "Skin ARMA (Hands)" + skinVia, true, false, false, nifJobs, AddIssue, CollectOutOfScope, isSkin: true);
+            CheckMesh(mod, paths.FeetMeshPath, "Skin ARMA (Feet)" + skinVia, true, false, false, nifJobs, AddIssue, CollectOutOfScope, isSkin: true);
+            CheckMesh(mod, paths.HairMeshPath, "Worn hair ARMA", true, false, false, nifJobs, AddIssue, CollectOutOfScope, isSkin: true);
+            CheckMesh(mod, paths.TailMeshPath, "Tail ARMA", true, false, false, nifJobs, AddIssue, CollectOutOfScope, isSkin: true);
 
             // FaceGen head: existence already handled above (FaceGenExists knows
             // the renderer's vanilla-loose-skip rule, which plain resolution
-            // doesn't), so only queue the texture walk when it resolves.
+            // doesn't), so only queue the texture walk when it resolves. A head
+            // that itself resolved via the data-folder fallback reports ITSELF
+            // as out-of-scope and suppresses its internal references (the
+            // mugshot badge's referencer-scoping rule, mirrored in NifJob.IsOutOfScope).
             var headSource = ResolveSource(paths.HeadMeshPath, allowLoadOrderFallback: true);
             string? headDisk = headSource?.ResolvedDiskPath;
             if (headDisk != null)
             {
+                CollectOutOfScope(paths.HeadMeshPath, headSource, "FaceGen head", isOutfit: false);
                 nifJobs.Add(new NifJob(headDisk, paths.HeadMeshPath!, "FaceGen head", true, IsFaceGen: true,
                     SourceDescription: headSource!.LoosePath ??
-                        (headSource.BsaPath != null ? $"{headSource.BsaPath} :: {headSource.InternalBsaPath}" : headDisk)));
+                        (headSource.BsaPath != null ? $"{headSource.BsaPath} :: {headSource.InternalBsaPath}" : headDisk),
+                    IsOutOfScope: headSource.ViaDataFolderFallback));
             }
 
             // Full effective outfit (incl. headgear): what the renderer would
@@ -526,8 +580,12 @@ public sealed class ModIssueScanner
                 if (string.IsNullOrWhiteSpace(over.MeshPath)) continue;
                 // Weight siblings only when the ARMA's weight slider is on for
                 // this sex — the engine's own signal that a _0/_1 pair exists.
-                CheckMesh(mod, over.MeshPath, over.Key, over.AllowLoadOrderFallback,
-                    isOutfit: true, checkWeightSibling: over.HasWeightVariants, nifJobs, AddIssue);
+                var overrideSource = CheckMesh(mod, over.MeshPath, over.Key, over.AllowLoadOrderFallback,
+                    isOutfit: true, checkWeightSibling: over.HasWeightVariants, nifJobs, AddIssue, CollectOutOfScope);
+                // Referencer scoping for the record-driven textures below: only an
+                // in-scope (or missing — moot) mesh lets its retexture entries
+                // report as out-of-scope hits.
+                bool overrideMeshInScope = overrideSource is not { ViaDataFolderFallback: true };
 
                 // AlternateTextures (MODS): the one record-side texture channel the
                 // engine applies over NIF-baked paths.
@@ -537,7 +595,8 @@ public sealed class ModIssueScanner
                     {
                         foreach (var tex in spec.Textures.Values)
                         {
-                            CheckAltTexture(mod, tex, over, spec.ShapeName, AddIssue);
+                            CheckAltTexture(mod, tex, over, spec.ShapeName, AddIssue,
+                                CollectOutOfScope, overrideMeshInScope);
                         }
                     }
                 }
@@ -547,7 +606,8 @@ public sealed class ModIssueScanner
                     {
                         foreach (var tex in slots.Values)
                         {
-                            CheckAltTexture(mod, tex, over, shapeName, AddIssue);
+                            CheckAltTexture(mod, tex, over, shapeName, AddIssue,
+                                CollectOutOfScope, overrideMeshInScope);
                         }
                     }
                 }
@@ -589,7 +649,24 @@ public sealed class ModIssueScanner
                         var severity = ClassifyNifTextureSlot(slotTex.Slot, job.IsFaceGen,
                             shape.ShaderType, shape.ShaderFlags1, rel);
                         if (severity == null) continue; // slot the engine never reads
-                        if (ResolveToDisk(rel, job.AllowLoadOrderFallback) != null) continue;
+                        var texSource = ResolveSource(rel, job.AllowLoadOrderFallback);
+                        if (texSource != null)
+                        {
+                            // Resolved — not missing. It may still be an out-of-scope
+                            // hit, reportable only when the REFERENCING NIF is itself
+                            // in scope (referencer scoping; see NifJob.IsOutOfScope).
+                            // Worn-skin bakes are excluded outright: the engine textures
+                            // those shapes from the record chain's TextureSet, never the
+                            // baked path (the same ruling that demotes their misses
+                            // below), so a "keep that mod activated" row would assert a
+                            // dependency the engine never reads.
+                            if (!job.IsOutOfScope && !job.IsSkin)
+                            {
+                                CollectOutOfScope(rel, texSource,
+                                    $"{job.Referencer} ({Path.GetFileName(job.GamePath)})", job.IsOutfit);
+                            }
+                            continue;
+                        }
 
                         // Worn-skin shapes never sample their baked paths in game: the engine
                         // applies the record chain's TextureSet (the skin ARMA's, or the race
@@ -644,6 +721,26 @@ public sealed class ModIssueScanner
                             sourceMod: job.SourceModName);
                     }
                 }
+            }
+
+            // Out-of-scope hits collected above: everything that resolved via the
+            // data-folder fallback with an in-scope referencer. Vanilla paths drop
+            // out (the base game always supplies them — also what keeps body
+            // meshes at vanilla paths silent); the rest are attributed to the
+            // installed mod(s) shipping them by cross-referencing the parent Mods
+            // folder. Note severity: nothing is broken today — these are
+            // keep-activated dependencies, the scan-time twin of the mugshot
+            // tiles' data-folder badge.
+            foreach (var (rel, hit) in outOfScope)
+            {
+                if (IsVanillaPath(rel, _vanillaAssetPaths)) continue;
+                var (providerColumn, detail) = DescribeOutOfScopeHit(rel, hit.Source, _modsLocator);
+                AddIssue(ModIssueType.OutOfScopeAsset, rel,
+                    referencer: hit.Referencer,
+                    detail: detail,
+                    isOutfit: hit.IsOutfit,
+                    severity: ModIssueSeverity.Note,
+                    sourceMod: providerColumn);
             }
 
             // Dark-face class: records vs. the baked FaceGen shapes. Resolution is
@@ -800,14 +897,27 @@ public sealed class ModIssueScanner
         }
     }
 
+    /// <summary><paramref name="IsOutOfScope"/>: the NIF itself resolved via the
+    /// data-folder fallback. Its internal texture references then never report as
+    /// out-of-scope (the mugshot badge's referencer-scoping rule): the file that
+    /// carries the reference isn't the scanned mod's to begin with — without this,
+    /// the installed body replacer's internal texture names would flag on every
+    /// NPC of every mod. Missing-texture checks are unaffected.</summary>
     private sealed record NifJob(string DiskPath, string GamePath, string Referencer,
         bool AllowLoadOrderFallback, bool IsFaceGen = false, bool IsOutfit = false,
-        string? SourceModName = null, string? SourceDescription = null, bool IsSkin = false);
+        string? SourceModName = null, string? SourceDescription = null, bool IsSkin = false,
+        bool IsOutOfScope = false);
 
     private delegate void AddIssueDelegate(ModIssueType type, string affectedPath, string? nifPath = null,
         string? shapeName = null, string? referencer = null, string? detail = null, bool isOutfit = false,
         ModIssueSeverity severity = ModIssueSeverity.Issue, string? sourceMod = null, string? recordPlugin = null,
         IReadOnlyList<string>? recordPlugins = null, IReadOnlyList<string>? cleanSiblingPlugins = null);
+
+    /// <summary>Collects a resolved asset as an out-of-scope (data-folder-fallback)
+    /// hit; a no-op for null/in-scope sources, so call sites pass every resolved
+    /// source unconditionally and the flag decides.</summary>
+    private delegate void CollectOutOfScopeDelegate(string? gamePath, AssetSource? source,
+        string referencer, bool isOutfit);
 
     /// <summary>One dark-face grading target: a record and the plugin(s) within the
     /// scanned mod that carry it. Label is null for the single-variant case (a
@@ -937,11 +1047,16 @@ public sealed class ModIssueScanner
                "§" + (KeepsTraitsTemplate(npc) ? 'T' : '-');
     }
 
-    private void CheckMesh(ModSetting scannedMod, string? gamePath, string referencer,
+    /// <summary>Returns the resolved <see cref="AssetSource"/> (null when the mesh
+    /// is missing) so the caller can gate record-driven follow-ups — alt-texture
+    /// out-of-scope reporting is suppressed when the referencing mesh itself came
+    /// from the data folder.</summary>
+    private AssetSource? CheckMesh(ModSetting scannedMod, string? gamePath, string referencer,
         bool allowLoadOrderFallback, bool isOutfit, bool checkWeightSibling,
-        List<NifJob> nifJobs, AddIssueDelegate addIssue, bool isSkin = false)
+        List<NifJob> nifJobs, AddIssueDelegate addIssue, CollectOutOfScopeDelegate collectOutOfScope,
+        bool isSkin = false)
     {
-        if (string.IsNullOrWhiteSpace(gamePath)) return;
+        if (string.IsNullOrWhiteSpace(gamePath)) return null;
 
         var source = ResolveSource(gamePath, allowLoadOrderFallback);
         string? disk = source?.ResolvedDiskPath;
@@ -953,8 +1068,13 @@ public sealed class ModIssueScanner
                 detail: "The mesh could not be found in the mod, vanilla archives, or the Data folder — it will not render.",
                 isOutfit: isOutfit,
                 sourceMod: isOutfit ? AttributeProviderByReferencer(referencer, scannedMod) : null);
-            return;
+            return null;
         }
+
+        // A mesh the mod references but the data folder supplies is a
+        // keep-activated dependency in its own right (it reports itself; its
+        // internal references are then suppressed via NifJob.IsOutOfScope).
+        collectOutOfScope(gamePath, source, referencer, isOutfit);
 
         // Which installed mod supplies this NIF: outfit meshes usually come from
         // an outfit/armor mod rather than the appearance mod under scan, and the
@@ -964,28 +1084,49 @@ public sealed class ModIssueScanner
             ?? (source.BsaPath != null ? $"{source.BsaPath} :: {source.InternalBsaPath}" : disk);
         nifJobs.Add(new NifJob(disk, gamePath!, referencer, allowLoadOrderFallback,
             IsOutfit: isOutfit, SourceModName: sourceMod, SourceDescription: sourceDescription,
-            IsSkin: isSkin));
+            IsSkin: isSkin, IsOutOfScope: source.ViaDataFolderFallback));
 
         // _0/_1 weight sibling: only when the source ARMA's weight slider is
         // enabled — then the engine morphs between both files and a missing
         // counterpart pops or crashes at non-matching weights. With the slider
         // off, a lone weight file is the normal shipping shape.
-        if (!checkWeightSibling) return;
+        if (!checkWeightSibling) return source;
         string? sibling = DeriveWeightSibling(gamePath!);
-        if (sibling != null && ResolveToDisk(sibling, allowLoadOrderFallback) == null)
+        if (sibling != null)
         {
-            addIssue(ModIssueType.MissingWeightSibling, sibling, referencer: referencer,
-                detail: $"The weight counterpart of {Path.GetFileName(gamePath)} is missing.",
-                isOutfit: isOutfit, sourceMod: sourceMod);
+            var siblingSource = ResolveSource(sibling, allowLoadOrderFallback);
+            if (siblingSource?.ResolvedDiskPath == null)
+            {
+                addIssue(ModIssueType.MissingWeightSibling, sibling, referencer: referencer,
+                    detail: $"The weight counterpart of {Path.GetFileName(gamePath)} is missing.",
+                    isOutfit: isOutfit, sourceMod: sourceMod);
+            }
+            else if (!source.ViaDataFolderFallback)
+            {
+                // The sibling of an in-scope mesh living out of scope is the same
+                // keep-activated dependency as any other hit; an out-of-scope
+                // mesh's sibling is suppressed with it (referencer scoping).
+                collectOutOfScope(sibling, siblingSource, referencer, isOutfit);
+            }
         }
+        return source;
     }
 
     private void CheckAltTexture(ModSetting scannedMod, string texPath, MeshOverride over, string shapeName,
-        AddIssueDelegate addIssue)
+        AddIssueDelegate addIssue, CollectOutOfScopeDelegate collectOutOfScope, bool referencingMeshInScope)
     {
         if (string.IsNullOrWhiteSpace(texPath)) return;
         if (!Auxilliary.TryRegularizePath(texPath, out var rel) || string.IsNullOrWhiteSpace(rel)) return;
-        if (ResolveToDisk(rel, over.AllowLoadOrderFallback) != null) return;
+        var source = ResolveSource(rel, over.AllowLoadOrderFallback);
+        if (source != null)
+        {
+            // Resolved, possibly from the data folder. Record-driven TXST textures
+            // applied to an out-of-scope mesh are suppressed with it — the mugshot
+            // badge's documented trade-off, mirrored so scan and badge agree.
+            if (referencingMeshInScope)
+                collectOutOfScope(rel, source, over.Key, isOutfit: true);
+            return;
+        }
 
         addIssue(ModIssueType.MissingAltTexture, rel, over.MeshPath,
             string.IsNullOrWhiteSpace(shapeName) ? "(unnamed shape)" : shapeName, over.Key,
@@ -1047,14 +1188,69 @@ public sealed class ModIssueScanner
         }
     }
 
-    /// <summary>Resolves a game path (or passes through an already-rooted disk
-    /// path) to an on-disk file via the renderer's scope chain. Null = missing.</summary>
-    private string? ResolveToDisk(string? path, bool allowLoadOrderFallback)
-        => ResolveSource(path, allowLoadOrderFallback)?.ResolvedDiskPath;
+    /// <summary>Vanilla filter for out-of-scope reporting: a data-folder-fallback
+    /// hit whose path the base game / Creation Club ships is not a keep-activated
+    /// dependency. The vanilla index stores backslash-separated paths
+    /// (OrdinalIgnoreCase), so normalize before membership testing — same rule as
+    /// the mugshot generator's stamp filter.</summary>
+    internal static bool IsVanillaPath(string regularizedRel, IReadOnlySet<string> vanillaPaths)
+        => vanillaPaths.Contains(regularizedRel.Replace('/', '\\').TrimStart('\\'));
 
-    /// <summary>Like <see cref="ResolveToDisk"/> but keeps the full
+    /// <summary>Composes an out-of-scope row's "Provided by" column and Detail
+    /// text: where the asset actually came from (loose data-folder file or a
+    /// named archive) and which mod folder(s) in the parent Mods folder ship it.
+    /// Internal for tests.</summary>
+    internal static (string ProviderColumn, string Detail) DescribeOutOfScopeHit(
+        string regularizedRel, AssetSource source, ModsFolderAssetLocator locator)
+    {
+        bool fromArchive = !string.IsNullOrEmpty(source.BsaPath);
+        string archiveName = fromArchive ? Path.GetFileName(source.BsaPath!) : string.Empty;
+        var providers = fromArchive
+            ? locator.FindArchiveProviders(archiveName)
+            : locator.FindLooseProviders(regularizedRel);
+
+        string origin = fromArchive
+            ? $"archive '{archiveName}' in your data folder"
+            : "a loose file in your data folder";
+
+        string supplier;
+        if (providers.Count > 0)
+        {
+            string list = ModsFolderAssetLocator.FormatProviderList(providers);
+            supplier = providers.Count == 1
+                ? $", supplied by mod {list} in your Mods folder"
+                : $", supplied by mod {list} in your Mods folder (several ship it; your mod manager's order decides which wins)";
+        }
+        else if (locator.IsAvailable)
+        {
+            supplier = fromArchive
+                ? " (no folder in your Mods folder ships that archive — it may be installed directly in the game's Data folder)"
+                : " (no folder in your Mods folder ships this file — it may be installed directly in the game's Data folder)";
+        }
+        else
+        {
+            // No Mods folder configured/available — nothing to cross-reference.
+            supplier = string.Empty;
+        }
+
+        string detail =
+            "This asset is not in this mod's Corresponding Mod Folders; the game resolves it from " +
+            origin + supplier +
+            ". Nothing is broken today, but it only keeps working while the supplying mod stays " +
+            "activated. To make the asset travel with this mod instead, add the supplying mod's " +
+            "folder to this mod entry's Corresponding Mod Folders.";
+
+        string providerColumn = providers.Count == 0
+            ? string.Empty
+            : string.Join(", ", providers.Take(3)) + (providers.Count > 3 ? ", …" : string.Empty);
+        return (providerColumn, detail);
+    }
+
+    /// <summary>Resolves a game path (or passes through an already-rooted disk
+    /// path) via the renderer's scope chain, keeping the full
     /// <see cref="AssetSource"/> so callers can attribute the winning provider
-    /// (loose folder or BSA) to an installed mod. Null = missing/unresolvable.</summary>
+    /// (loose folder or BSA) to an installed mod and read the
+    /// data-folder-fallback flag. Null = missing/unresolvable.</summary>
     private AssetSource? ResolveSource(string? path, bool allowLoadOrderFallback)
     {
         if (string.IsNullOrWhiteSpace(path)) return null;

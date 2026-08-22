@@ -150,8 +150,11 @@ public class OutputValidator
 
         // Runtime asset dependencies recorded by the last run (assets the output references but
         // deliberately did not copy): re-verify them against the CURRENT setup before the per-NPC
-        // loop, since they belong to the output as a whole.
-        ValidateAssetDependencies(lastRun?.AssetDependencies, listings, dataFolder, result, log);
+        // loop, since they belong to the output as a whole. The Mods-folder locator names which
+        // installed mod(s) supply each dependency — attribution the merged data-folder view
+        // can't provide.
+        ValidateAssetDependencies(lastRun?.AssetDependencies, listings, dataFolder, result, log,
+            new ModsFolderAssetLocator(_settings.ModsFolder));
 
         if (lastRun != null && lastRun.ProcessedNpcs.Count == 0)
         {
@@ -548,6 +551,14 @@ public class OutputValidator
     /// meshes in game → one grouped Warning naming the count and examples (the full list goes
     /// to the log), keyed per run rather than per file to avoid row spam.</para>
     ///
+    /// <para><b>Supplier attribution</b> (<paramref name="modsLocator"/>): under a mod manager
+    /// the data folder is a merged view, so a dependency's resolved path never says which
+    /// installed mod supplies it. Cross-referencing the parent Mods folder does: healthy
+    /// dependencies surface as Info rows naming the mod folder(s) that must stay activated
+    /// (grouped by supplier, not per file), and the Error/Warning rows above gain "re-enable
+    /// THIS mod" attribution. Null/unavailable locator (no Mods folder configured — e.g. a
+    /// manual install) degrades to the unattributed wording.</para>
+    ///
     /// <para>A null ledger is a token from an older app version — nothing to verify, and
     /// absence of evidence is not a finding. Run-level rows carry no NPC. Internal for tests.</para>
     /// </summary>
@@ -556,22 +567,56 @@ public class OutputValidator
         IReadOnlyList<IModListingGetter<ISkyrimModGetter>> listings,
         string dataFolder,
         ValidationRunResult result,
-        StringBuilder log)
+        StringBuilder log,
+        ModsFolderAssetLocator? modsLocator = null)
     {
         if (ledger == null) return;
         if (ledger.ArchiveMasters.Count == 0 && ledger.LooseFiles.Count == 0) return;
 
         var listed = new HashSet<ModKey>(listings.Select(l => l.ModKey));
         var enabled = new HashSet<ModKey>(listings.Where(l => l.Enabled).Select(l => l.ModKey));
+        bool canAttribute = modsLocator?.IsAvailable == true;
 
         foreach (var dep in ledger.ArchiveMasters)
         {
+            // Which installed mod folder(s) ship the archives: the loader plugin's
+            // filename rarely matches the mod's name in the manager, so the report
+            // names the folder the user would actually enable/disable.
+            var providers = canAttribute
+                ? dep.Archives
+                    .SelectMany(a => modsLocator!.FindArchiveProviders(a))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
+                    .ToList()
+                : new List<string>();
+            string providerClause = providers.Count > 0
+                ? $" The archive(s) are shipped by mod {ModsFolderAssetLocator.FormatProviderList(providers)} in your mods folder."
+                : canAttribute
+                    ? " No folder in your mods folder ships the archive(s) — they may be installed directly in the game's Data folder."
+                    : string.Empty;
+            string providerLog = providers.Count > 0 ? $" [mods folder: {string.Join(", ", providers)}]" : string.Empty;
+
             bool isListed = listed.Contains(dep.Plugin);
             bool isEnabled = enabled.Contains(dep.Plugin);
             if (isListed && isEnabled)
             {
+                var okSamples = dep.Assets.Take(3).ToList();
+                result.Issues.Add(new ValidationIssue
+                {
+                    Severity = ValidationSeverity.Info,
+                    Check = ValidationCheckKind.Asset,
+                    Issue = $"Out-of-scope assets: {dep.Assets.Count} referenced asset(s) were not copied into the " +
+                            $"output and are supplied at runtime by archive(s) of '{dep.Plugin.FileName}', which the " +
+                            "output is mastered to (so the game keeps them loaded)." + providerClause,
+                    WinningSource = string.Join(", ", dep.Archives),
+                    Details = $"e.g. {string.Join("; ", okSamples)}" +
+                              (dep.Assets.Count > okSamples.Count ? "; ..." : string.Empty) +
+                              " — nothing to fix; this is how the last run recorded these dependencies. The supplying " +
+                              "mod must stay activated. To carry the assets inside the output instead, add its folder " +
+                              "to the appearance mod's Corresponding Folder Paths and re-run."
+                });
                 log.AppendLine($"Asset-dependency master OK: {dep.Plugin.FileName} " +
-                               $"({dep.Assets.Count} asset(s) from {string.Join(", ", dep.Archives)}).");
+                               $"({dep.Assets.Count} asset(s) from {string.Join(", ", dep.Archives)}).{providerLog}");
                 continue;
             }
 
@@ -583,25 +628,31 @@ public class OutputValidator
                 Check = ValidationCheckKind.Asset,
                 Issue = $"Required master '{dep.Plugin.FileName}' is {state}. The last run mastered the output " +
                         "to it because its archives supply referenced assets that were not copied — without it " +
-                        "the output plugin will not load at all.",
+                        "the output plugin will not load at all." + providerClause,
                 WinningSource = string.Join(", ", dep.Archives),
                 Details = $"{dep.Assets.Count} dependent asset(s), e.g. {string.Join("; ", samples)}" +
                           (dep.Assets.Count > samples.Count ? "; ..." : string.Empty) +
-                          " — re-enable the plugin, or add its mod to the appearance mod's Corresponding Folder " +
+                          " — re-enable the plugin" +
+                          (providers.Count > 0
+                              ? $" (mod {ModsFolderAssetLocator.FormatProviderList(providers)})"
+                              : string.Empty) +
+                          ", or add its mod to the appearance mod's Corresponding Folder " +
                           "Paths and re-run so the assets are copied instead."
             });
             log.AppendLine($"ASSET DEPENDENCY: master {dep.Plugin.FileName} {state} " +
-                           $"({dep.Assets.Count} asset(s) from {string.Join(", ", dep.Archives)}).");
+                           $"({dep.Assets.Count} asset(s) from {string.Join(", ", dep.Archives)}).{providerLog}");
         }
 
         if (ledger.LooseFiles.Count > 0)
         {
             var missing = new List<string>();
+            var present = new List<string>();
             foreach (var rel in ledger.LooseFiles)
             {
                 try
                 {
-                    if (!File.Exists(Path.Combine(dataFolder, rel))) missing.Add(rel);
+                    if (File.Exists(Path.Combine(dataFolder, rel))) present.Add(rel);
+                    else missing.Add(rel);
                 }
                 catch
                 {
@@ -613,8 +664,80 @@ public class OutputValidator
             {
                 log.AppendLine($"All {ledger.LooseFiles.Count} loose asset dependencies still present.");
             }
-            else
+
+            // Healthy loose dependencies: one Info row per supplying mod set, so the
+            // user learns which installed mods the output leans on while everything
+            // still works — a hundred hair textures from one mod make one row.
+            if (present.Count > 0)
             {
+                foreach (var group in GroupLooseFilesByProviders(present, modsLocator))
+                {
+                    var groupSamples = group.Files.Take(3).ToList();
+                    string issueText = group.Providers.Count > 0
+                        ? $"Out-of-scope assets: {group.Files.Count} loose file(s) the output references but did " +
+                          $"not copy are supplied by mod {ModsFolderAssetLocator.FormatProviderList(group.Providers)} " +
+                          "in your mods folder — that mod must stay activated." +
+                          (group.Providers.Count > 1 ? " (Several mod folders ship these files; your mod manager's order decides which wins.)" : string.Empty)
+                        : canAttribute
+                            ? $"Out-of-scope assets: {group.Files.Count} loose file(s) the output references but did " +
+                              "not copy are installed directly in your Data folder (no folder in your mods folder ships them)."
+                            : $"Out-of-scope assets: {group.Files.Count} loose file(s) the output references but did " +
+                              "not copy are supplied by your data folder — whichever mod provides them must stay activated.";
+                    result.Issues.Add(new ValidationIssue
+                    {
+                        Severity = ValidationSeverity.Info,
+                        Check = ValidationCheckKind.Asset,
+                        Issue = issueText,
+                        WinningSource = string.Join(", ", group.Providers),
+                        Details = $"e.g. {string.Join("; ", groupSamples)}" +
+                                  (group.Files.Count > groupSamples.Count ? "; ..." : string.Empty) +
+                                  " — full list in the validation log. Nothing to fix; to carry these assets inside " +
+                                  "the output instead, add the supplying mod's folder to the appearance mod's " +
+                                  "Corresponding Folder Paths and re-run."
+                    });
+                }
+                log.AppendLine($"OUT-OF-SCOPE ASSETS: {present.Count} loose runtime dependency(ies) still present:");
+                foreach (var rel in present)
+                {
+                    var fileProviders = canAttribute ? modsLocator!.FindLooseProviders(rel) : Array.Empty<string>();
+                    log.AppendLine($"  {rel}" +
+                                   (fileProviders.Count > 0 ? $" [mods folder: {string.Join(", ", fileProviders)}]" : string.Empty));
+                }
+            }
+
+            if (missing.Count > 0)
+            {
+                // A missing loose dependency that still exists in some mod folder is
+                // the actionable case: that mod is installed but not active — name it.
+                var inactiveByProvider = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                int unattributed = 0;
+                foreach (var rel in missing)
+                {
+                    var fileProviders = canAttribute ? modsLocator!.FindLooseProviders(rel) : Array.Empty<string>();
+                    if (fileProviders.Count == 0) unattributed++;
+                    foreach (var p in fileProviders)
+                    {
+                        inactiveByProvider[p] = inactiveByProvider.TryGetValue(p, out int n) ? n + 1 : 1;
+                    }
+                }
+                string attribution = string.Empty;
+                if (inactiveByProvider.Count > 0)
+                {
+                    string providerSummary = string.Join(", ", inactiveByProvider
+                        .OrderByDescending(kv => kv.Value)
+                        .ThenBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+                        .Take(4)
+                        .Select(kv => $"'{kv.Key}' ({kv.Value} file(s))"));
+                    if (inactiveByProvider.Count > 4) providerSummary += $", … +{inactiveByProvider.Count - 4} more";
+                    attribution = $" The missing file(s) exist in mod folder(s) {providerSummary} in your mods " +
+                                  "folder, so those mods are installed but not active — re-enable them.";
+                }
+                if (canAttribute && unattributed > 0)
+                {
+                    attribution += $" {unattributed} file(s) were not found in any mod folder — the supplying mod " +
+                                   "may have been uninstalled.";
+                }
+
                 var samples = missing.Take(5).ToList();
                 result.Issues.Add(new ValidationIssue
                 {
@@ -622,16 +745,50 @@ public class OutputValidator
                     Check = ValidationCheckKind.Asset,
                     Issue = $"{missing.Count} of {ledger.LooseFiles.Count} loose asset(s) the output relies on " +
                             "are no longer in the data folder — the mod supplying them was removed or disabled, " +
-                            "and affected NPCs will show missing textures or invisible meshes.",
+                            "and affected NPCs will show missing textures or invisible meshes." + attribution,
+                    WinningSource = string.Join(", ", inactiveByProvider.Keys
+                        .OrderBy(k => k, StringComparer.OrdinalIgnoreCase)),
                     Details = $"e.g. {string.Join("; ", samples)}" +
                               (missing.Count > samples.Count ? "; ..." : string.Empty) +
                               " — full list in the validation log. Re-enable the supplying mod(s), or re-run " +
                               "the patcher against the current setup."
                 });
                 log.AppendLine($"ASSET DEPENDENCY: {missing.Count} recorded loose file(s) no longer present:");
-                foreach (var rel in missing) log.AppendLine($"  {rel}");
+                foreach (var rel in missing)
+                {
+                    var fileProviders = canAttribute ? modsLocator!.FindLooseProviders(rel) : Array.Empty<string>();
+                    log.AppendLine($"  {rel}" +
+                                   (fileProviders.Count > 0 ? $" [inactive in mods folder: {string.Join(", ", fileProviders)}]" : string.Empty));
+                }
             }
         }
+    }
+
+    /// <summary>Buckets loose dependency paths by the set of mod folders supplying
+    /// them (per <see cref="ModsFolderAssetLocator"/>), so the report emits one row
+    /// per supplier rather than per file. Files no folder ships — or everything,
+    /// when no locator is usable — land in a single empty-provider bucket. Ordering
+    /// is deterministic: named suppliers alphabetically, the unattributed bucket
+    /// last. Internal for tests.</summary>
+    internal static List<(IReadOnlyList<string> Providers, List<string> Files)> GroupLooseFilesByProviders(
+        IReadOnlyList<string> files, ModsFolderAssetLocator? locator)
+    {
+        var buckets = new Dictionary<string, (IReadOnlyList<string> Providers, List<string> Files)>(
+            StringComparer.OrdinalIgnoreCase);
+        bool canAttribute = locator?.IsAvailable == true;
+        foreach (var rel in files)
+        {
+            IReadOnlyList<string> providers = canAttribute
+                ? locator!.FindLooseProviders(rel)
+                : Array.Empty<string>();
+            string key = string.Join("|", providers);
+            if (buckets.TryGetValue(key, out var bucket)) bucket.Files.Add(rel);
+            else buckets[key] = (providers, new List<string> { rel });
+        }
+        return buckets.Values
+            .OrderBy(b => b.Providers.Count == 0 ? 1 : 0)
+            .ThenBy(b => string.Join("|", b.Providers), StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private static NpcToken? LoadDeployedRunLedger(string dataFolder, StringBuilder log)

@@ -48,6 +48,7 @@ public class VM_NpcsMenuMugshot : ReactiveObject, IDisposable, IHasMugshotImage,
     private readonly Func<VM_InternalMugshotPreview> _internalPreviewFactory;
     private readonly FaceGenAnalysisCache _faceGenAnalysisCache = null!;
     private readonly BackEnd.OutfitDistribution.OutfitDisplayResolver _outfitDisplayResolver;
+    private readonly DataFolderAssetAttributor _dataFolderAttributor;
     private readonly NpcMeshResolver _npcMeshResolver;
     private readonly CompositeDisposable Disposables = new();
     // Static + frozen so VM instances can be constructed off the UI thread
@@ -329,7 +330,8 @@ public class VM_NpcsMenuMugshot : ReactiveObject, IDisposable, IHasMugshotImage,
         FaceFinderCacheTracker faceFinderTracker,
         FaceGenAnalysisCache faceGenAnalysisCache,
         BackEnd.OutfitDistribution.OutfitDisplayResolver outfitDisplayResolver,
-        NpcMeshResolver npcMeshResolver)
+        NpcMeshResolver npcMeshResolver,
+        DataFolderAssetAttributor dataFolderAttributor)
     {
         ModName = modName;
         _lazyMods = lazyMods;
@@ -356,6 +358,7 @@ public class VM_NpcsMenuMugshot : ReactiveObject, IDisposable, IHasMugshotImage,
         _faceGenAnalysisCache = faceGenAnalysisCache;
         _outfitDisplayResolver = outfitDisplayResolver;
         _npcMeshResolver = npcMeshResolver;
+        _dataFolderAttributor = dataFolderAttributor;
 
         // FaceGen analysis: derived display properties tied to settings + Stats.
         // Reactive subscriptions live in InitFaceGenAnalysis() so the full block
@@ -2334,9 +2337,12 @@ public class VM_NpcsMenuMugshot : ReactiveObject, IDisposable, IHasMugshotImage,
     /// applied (even empty) so regenerating after the user adds the supplying
     /// mod's folder clears a previous notice. Gated on
     /// <see cref="InternalMugshotSettings.ShowDataFolderAssetsIcon"/> like the
-    /// other badge appliers.</summary>
+    /// other badge appliers. The immediate text lists paths only; a background
+    /// pass re-composes it with each asset's supplying mod folder(s)
+    /// (VM_ModsMenuMugshot twin — keep in sync).</summary>
     private void ApplyDataFolderAssetNotices(IReadOnlyList<string>? dataFolderAssets)
     {
+        int version = Interlocked.Increment(ref _dataFolderNoticeVersion);
         if (dataFolderAssets is not { Count: > 0 }
             || !_settings.InternalMugshot.ShowDataFolderAssetsIcon)
         {
@@ -2345,14 +2351,39 @@ public class VM_NpcsMenuMugshot : ReactiveObject, IDisposable, IHasMugshotImage,
             return;
         }
 
-        var sb = new StringBuilder();
-        sb.Append("The following assets were loaded from your data folder because they were not found in this mod's Corresponding Mod Folders. Whichever mod these assets come from must stay activated, or else that mod needs to be added to ")
-          .Append(ModName)
-          .Append("'s Corresponding Mod Folders:");
-        foreach (var p in dataFolderAssets) sb.Append('\n').Append(p);
-
+        DataFolderAssetsText = DataFolderAssetAttributor.ComposeNoticeText(
+            ModName, dataFolderAssets, providersByPath: null);
         HasDataFolderAssets = true;
-        DataFolderAssetsText = sb.ToString();
+        _ = EnrichDataFolderAssetNoticesAsync(dataFolderAssets, version);
+    }
+
+    /// <summary>Guards a stale enrichment from overwriting a newer notice set
+    /// (tiles re-apply notices on regeneration while a lookup may be in flight).</summary>
+    private int _dataFolderNoticeVersion;
+
+    private async Task EnrichDataFolderAssetNoticesAsync(IReadOnlyList<string> paths, int version)
+    {
+        try
+        {
+            var providers = await Task.Run(() =>
+            {
+                var map = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase);
+                foreach (var p in paths)
+                {
+                    if (!map.ContainsKey(p)) map[p] = _dataFolderAttributor.GetProviders(p);
+                }
+                return map;
+            }).ConfigureAwait(false);
+
+            if (providers.Values.All(v => v.Count == 0)) return; // nothing attributable — keep the paths-only text
+            if (Volatile.Read(ref _dataFolderNoticeVersion) != version) return;
+            DataFolderAssetsText = DataFolderAssetAttributor.ComposeNoticeText(ModName, paths, providers);
+        }
+        catch (Exception ex)
+        {
+            // Attribution is a nicety; the paths-only tooltip stands.
+            Debug.WriteLine($"EnrichDataFolderAssetNotices failed for {SourceNpcFormKey}: {ex.Message}");
+        }
     }
 
     /// <summary>Computes the outfit-conflict notice for this tile via the

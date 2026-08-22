@@ -149,7 +149,7 @@ public class RuntimeAssetDependencyTests
     }
 
     [Fact]
-    public void Validate_MasterPresentAndEnabled_ReportsNothing()
+    public void Validate_MasterPresentAndEnabled_IsTransparencyInfoRow()
     {
         var result = new ValidationRunResult();
         var listings = Listings((Skyrim, true), (LateMod, true));
@@ -158,7 +158,14 @@ public class RuntimeAssetDependencyTests
             LedgerWithMaster(LateMod, @"textures\hair\ks.dds"),
             listings, @"C:\nowhere", result, new System.Text.StringBuilder());
 
-        result.Issues.Should().BeEmpty("the dependency contract holds — nothing to report");
+        // The contract holds, but the report still names the out-of-scope dependency:
+        // the user asked "which mods must stay activated", and a healthy dependency is
+        // exactly that answer — Info severity, never a Warning/Error.
+        var issue = result.Issues.Should().ContainSingle().Subject;
+        issue.Severity.Should().Be(ValidationSeverity.Info);
+        issue.Check.Should().Be(ValidationCheckKind.Asset);
+        issue.Issue.Should().Contain("Out-of-scope assets").And.Contain(LateMod.FileName);
+        issue.NpcFormKey.Should().BeEmpty("run-level row");
     }
 
     [Fact]
@@ -195,7 +202,7 @@ public class RuntimeAssetDependencyTests
     }
 
     [Fact]
-    public void Validate_LooseFiles_PresentIsQuiet_MissingIsOneGroupedWarning()
+    public void Validate_LooseFiles_PresentIsInfo_MissingIsOneGroupedWarning()
     {
         using var tmp = new TempDir();
         string presentRel = @"textures\hair\present.dds";
@@ -212,11 +219,92 @@ public class RuntimeAssetDependencyTests
             ledger, Listings((Skyrim, true)), tmp.Path, result, new System.Text.StringBuilder());
 
         // One grouped Warning for the two missing files — never a row per file.
-        var issue = result.Issues.Should().ContainSingle().Subject;
-        issue.Severity.Should().Be(ValidationSeverity.Warning,
-            "vanished loose dependencies mean visible missing textures in game, but the plugin still loads");
-        issue.Check.Should().Be(ValidationCheckKind.Asset);
-        issue.Issue.Should().Contain("2 of 3");
+        var warning = result.Issues.Should().ContainSingle(i => i.Severity == ValidationSeverity.Warning).Subject;
+        warning.Check.Should().Be(ValidationCheckKind.Asset);
+        warning.Issue.Should().Contain("2 of 3");
+
+        // The still-present dependency surfaces as one grouped transparency row.
+        var info = result.Issues.Should().ContainSingle(i => i.Severity == ValidationSeverity.Info).Subject;
+        info.Issue.Should().Contain("Out-of-scope assets").And.Contain("1 loose file");
+        result.Issues.Should().HaveCount(2);
+    }
+
+    // ─── Mods-folder supplier attribution ────────────────────────────────
+
+    [Fact]
+    public void Validate_ArchiveMaster_NamesShippingModFolder_OkAndBroken()
+    {
+        using var mods = new TempDir();
+        // LedgerWithMaster records the archive as "<plugin name>.bsa".
+        File.WriteAllText(mods.Combine("KS Hairdos SSE", "LateMod.bsa"), "x");
+        var locator = new ModsFolderAssetLocator(mods.Path);
+
+        var okResult = new ValidationRunResult();
+        OutputValidator.ValidateAssetDependencies(
+            LedgerWithMaster(LateMod, @"textures\hair\ks.dds"),
+            Listings((Skyrim, true), (LateMod, true)), @"C:\nowhere", okResult,
+            new System.Text.StringBuilder(), locator);
+        okResult.Issues.Should().ContainSingle().Which.Issue.Should().Contain("KS Hairdos SSE",
+            "the healthy Info row is where the user learns which mod must stay activated");
+
+        var brokenResult = new ValidationRunResult();
+        OutputValidator.ValidateAssetDependencies(
+            LedgerWithMaster(LateMod, @"textures\hair\ks.dds"),
+            Listings((Skyrim, true)), @"C:\nowhere", brokenResult,
+            new System.Text.StringBuilder(), locator);
+        var error = brokenResult.Issues.Should().ContainSingle().Subject;
+        error.Severity.Should().Be(ValidationSeverity.Error);
+        error.Issue.Should().Contain("KS Hairdos SSE",
+            "the plugin filename rarely matches the mod's name in the manager — the row must name the folder to re-enable");
+    }
+
+    [Fact]
+    public void Validate_LooseFiles_AttributionNamesSupplyingAndInactiveMods()
+    {
+        using var data = new TempDir();
+        using var mods = new TempDir();
+        string presentRel = @"textures\hair\present.dds";
+        string goneRel = @"textures\hair\gone.dds";
+        File.WriteAllText(data.Combine("textures", "hair", "present.dds"), "x");
+        File.WriteAllText(mods.Combine("Hair Mod A", "textures", "hair", "present.dds"), "x");
+        // The vanished file still exists in a mod folder: installed but not active.
+        File.WriteAllText(mods.Combine("Hair Mod B", "textures", "hair", "gone.dds"), "x");
+        var locator = new ModsFolderAssetLocator(mods.Path);
+
+        var ledger = new AssetDependencyLedger { LooseFiles = { presentRel, goneRel } };
+        var result = new ValidationRunResult();
+        OutputValidator.ValidateAssetDependencies(
+            ledger, Listings((Skyrim, true)), data.Path, result,
+            new System.Text.StringBuilder(), locator);
+
+        var info = result.Issues.Should().ContainSingle(i => i.Severity == ValidationSeverity.Info).Subject;
+        info.Issue.Should().Contain("Hair Mod A").And.Contain("must stay activated");
+
+        var warning = result.Issues.Should().ContainSingle(i => i.Severity == ValidationSeverity.Warning).Subject;
+        warning.Issue.Should().Contain("Hair Mod B",
+            "a missing dependency found in a mod folder is the actionable case: that exact mod needs re-enabling");
+        warning.Issue.Should().Contain("installed but not active");
+    }
+
+    [Fact]
+    public void GroupLooseFiles_BucketsByProviderSet_UnattributedLast()
+    {
+        using var mods = new TempDir();
+        File.WriteAllText(mods.Combine("Mod A", "textures", "one.dds"), "x");
+        File.WriteAllText(mods.Combine("Mod A", "textures", "two.dds"), "x");
+        File.WriteAllText(mods.Combine("Mod B", "textures", "three.dds"), "x");
+        var locator = new ModsFolderAssetLocator(mods.Path);
+
+        var groups = OutputValidator.GroupLooseFilesByProviders(
+            new[] { @"textures\one.dds", @"textures\three.dds", @"textures\two.dds", @"textures\nowhere.dds" },
+            locator);
+
+        groups.Should().HaveCount(3, "one row per supplier, one for the unattributed remainder");
+        groups[0].Providers.Should().Equal("Mod A");
+        groups[0].Files.Should().BeEquivalentTo(@"textures\one.dds", @"textures\two.dds");
+        groups[1].Providers.Should().Equal("Mod B");
+        groups[2].Providers.Should().BeEmpty("files nothing ships sort last");
+        groups[2].Files.Should().Equal(@"textures\nowhere.dds");
     }
 
     // ─── Token ledger round-trip ─────────────────────────────────────────

@@ -55,6 +55,19 @@ namespace NPC_Plugin_Chooser_2.Models
         /// absent plugin produced thousands of DarkFaceMismatch rows (measured:
         /// 2,929 for one mod).</summary>
         MissingHeadPartPlugin,
+
+        /// <summary>A referenced asset resolved fine — but from the data folder
+        /// (engine-order Tier 2 loose / Tier 3 broadcast archive) rather than the
+        /// mod's own Corresponding Mod Folders, and it is not a base-game asset.
+        /// The mod renders correctly only while whichever installed mod supplies
+        /// the file stays activated; Detail names the supplying mod folder(s)
+        /// found in the parent Mods folder. Note severity: nothing is broken
+        /// today, this is a keep-activated dependency. The data-folder badge on
+        /// mugshot tiles reports the same class per render — this row is the
+        /// scan-time equivalent, with the supplier attribution the render's time
+        /// budget can't afford. Appended last: the ignore list persists this enum
+        /// by value in Settings.json, so existing members must never renumber.</summary>
+        OutOfScopeAsset,
     }
 
     /// <summary>
@@ -308,7 +321,15 @@ namespace NPC_Plugin_Chooser_2.Models
         //      resource-only carriers are excluded from CleanSiblingPlugins
         //      (a switch target the Mods tab cannot honor). The Auri
         //      No Antlers Patch case, 2026-08-18.
-        public const int CurrentVersion = 13;
+        // v14: out-of-scope asset detection (OutOfScopeAsset, Note): assets
+        //      that resolve via the engine-order data-folder fallback rather
+        //      than the mod's own folders now produce rows naming the
+        //      supplying mod folder(s) cross-referenced from the parent Mods
+        //      folder. Non-vanilla paths only; references originating in an
+        //      out-of-scope NIF are suppressed (the mugshot badge's
+        //      referencer-scoping rule), so body-baseline internals stay
+        //      silent.
+        public const int CurrentVersion = 14;
 
         public int Version { get; set; } = CurrentVersion;
 

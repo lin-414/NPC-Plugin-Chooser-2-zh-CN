@@ -53,6 +53,7 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
     private readonly ImagePacker _imagePacker;
     private readonly Func<VM_InternalMugshotPreview> _internalPreviewFactory;
     private readonly BackEnd.OutfitDistribution.OutfitDisplayResolver _outfitDisplayResolver;
+    private readonly DataFolderAssetAttributor _dataFolderAttributor;
     private readonly CancellationToken _cancellationToken;
     private readonly CompositeDisposable _disposables = new();
 
@@ -165,7 +166,8 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
         Func<VM_InternalMugshotPreview> internalPreviewFactory,
         GeneratedMugshotTracker tracker,
         FaceFinderCacheTracker faceFinderTracker,
-        BackEnd.OutfitDistribution.OutfitDisplayResolver outfitDisplayResolver
+        BackEnd.OutfitDistribution.OutfitDisplayResolver outfitDisplayResolver,
+        DataFolderAssetAttributor dataFolderAttributor
     )
     {
         _parentVMMaster = parentVMMaster;
@@ -182,6 +184,7 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
         _tracker = tracker;
         _faceFinderTracker = faceFinderTracker;
         _outfitDisplayResolver = outfitDisplayResolver;
+        _dataFolderAttributor = dataFolderAttributor;
         _cancellationToken = cancellationToken;
 
         ImagePath = imagePath; // Store the given path (could be real or placeholder)
@@ -1027,48 +1030,30 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
         IReadOnlyList<string> missingTextures,
         string? faceGenMismatch = null)
     {
-        bool hasMeshes = missingMeshes != null && missingMeshes.Count > 0;
-        bool hasTextures = missingTextures != null && missingTextures.Count > 0;
-        bool hasFaceGen = !string.IsNullOrWhiteSpace(faceGenMismatch);
-        if ((!hasMeshes && !hasTextures && !hasFaceGen)
-            || !_settings.InternalMugshot.ShowMissingNpcAssetsIcon)
-        {
-            HasMissingAssets = false;
-            MissingAssetNotificationText = string.Empty;
-            MergeScanOverlayIntoMissingAssets();
-            return;
-        }
-
-        var sb = new System.Text.StringBuilder();
-        if (hasMeshes)
-        {
-            sb.Append("The following expected mesh paths could not be found:");
-            foreach (var p in missingMeshes) sb.Append('\n').Append(p);
-        }
-        if (hasTextures)
-        {
-            if (hasMeshes) sb.Append("\n\n");
-            sb.Append("The following expected texture paths could not be found:");
-            foreach (var p in missingTextures) sb.Append('\n').Append(p);
-        }
-        if (hasFaceGen)
-        {
-            if (hasMeshes || hasTextures) sb.Append("\n\n");
-            sb.Append(faceGenMismatch);
-        }
-
-        HasMissingAssets = true;
-        MissingAssetNotificationText = sb.ToString();
-        MergeScanOverlayIntoMissingAssets();
+        _metaMissingMeshes = missingMeshes ?? Array.Empty<string>();
+        _metaMissingTextures = missingTextures ?? Array.Empty<string>();
+        _metaFaceGenMismatch = string.IsNullOrWhiteSpace(faceGenMismatch) ? null : faceGenMismatch;
+        RebuildMissingAssetBadge();
     }
 
     // --- Mod Issues scan overlay -------------------------------------------
     // The Mod Issues tab annotates tiles with scan-detected problems. The
     // tile's own async image load re-applies metadata-derived notifications
     // (deliberately, even with empty lists, to clear stale state), which would
-    // silently wipe a value set from outside — so the scan text is stored
-    // separately and re-merged after every rebuild of the notification text.
+    // silently wipe a value set from outside — so both sources are STORED and
+    // the badge text is recomposed from them after either changes. The
+    // recomposition also deduplicates: a path the scan text already lists is
+    // dropped from the metadata section (both detectors find the same missing
+    // files, and pre-dedupe every such file appeared twice in one tooltip —
+    // user-reported 2026-08-21), and the metadata's FaceGen-mismatch paragraph
+    // yields to the scan's richer dark-face rows. Metadata-only signals (decode
+    // failures, stale render state) keep their lines.
+    private IReadOnlyList<string> _metaMissingMeshes = Array.Empty<string>();
+    private IReadOnlyList<string> _metaMissingTextures = Array.Empty<string>();
+    private string? _metaFaceGenMismatch;
     private string? _scanIssueOverlayText;
+    private HashSet<string>? _scanCoveredPaths;
+    private bool _scanCoversDarkFace;
 
     /// <summary>Mod Issues tab only: the scanned mod's plugin(s) whose record
     /// verdicts hit this NPC, shown as the caption's top line (multi-plugin mods;
@@ -1078,52 +1063,165 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
     /// <summary>Overlays scan-detected issue text onto the missing-asset badge.
     /// Persists across the tile's own metadata refreshes and deliberately
     /// ignores the ShowMissingNpcAssetsIcon display gate — on the Mod Issues
-    /// tab the badge IS the content.</summary>
-    public void ApplyScanIssueOverlay(string text)
+    /// tab the badge IS the content.
+    /// <para><paramref name="coveredPaths"/>: the asset paths the scan text
+    /// lists; matching entries drop out of the metadata-derived sections so one
+    /// file is never reported twice in the same tooltip.
+    /// <paramref name="coversDarkFace"/> does the same for the metadata's
+    /// FaceGen-mismatch paragraph when the scan carries dark-face /
+    /// missing-head-part-plugin rows for this NPC.</para></summary>
+    public void ApplyScanIssueOverlay(string text,
+        IEnumerable<string>? coveredPaths = null, bool coversDarkFace = false)
     {
         _scanIssueOverlayText = string.IsNullOrWhiteSpace(text) ? null : text;
-        MergeScanOverlayIntoMissingAssets();
+        _scanCoveredPaths = _scanIssueOverlayText == null
+            ? null
+            : coveredPaths?.Select(NormalizeForCoverMatch).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        _scanCoversDarkFace = _scanIssueOverlayText != null && coversDarkFace;
+        RebuildMissingAssetBadge();
     }
 
-    private void MergeScanOverlayIntoMissingAssets()
+    private void RebuildMissingAssetBadge()
     {
-        if (_scanIssueOverlayText == null) return;
-        HasMissingAssets = true;
-        if (string.IsNullOrEmpty(MissingAssetNotificationText))
-        {
-            MissingAssetNotificationText = _scanIssueOverlayText;
-        }
-        else if (!MissingAssetNotificationText.Contains(_scanIssueOverlayText, StringComparison.Ordinal))
-        {
-            MissingAssetNotificationText += "\n\n" + _scanIssueOverlayText;
-        }
+        MissingAssetNotificationText = ComposeMissingAssetBadgeText(
+            _metaMissingMeshes, _metaMissingTextures, _metaFaceGenMismatch,
+            _settings.InternalMugshot.ShowMissingNpcAssetsIcon,
+            _scanIssueOverlayText, _scanCoveredPaths, _scanCoversDarkFace);
+        HasMissingAssets = MissingAssetNotificationText.Length > 0;
     }
+
+    /// <summary>Pure composition of the missing-asset badge tooltip from its two
+    /// sources: render/PNG metadata (gated by the display toggle) and the Mod
+    /// Issues scan overlay (never gated — on that tab the badge IS the content).
+    /// Metadata mesh/texture lines whose path the scan already lists are dropped,
+    /// and the metadata FaceGen-mismatch paragraph is dropped when the scan's
+    /// dark-face rows cover it. Internal for tests.</summary>
+    internal static string ComposeMissingAssetBadgeText(
+        IReadOnlyList<string> metaMissingMeshes,
+        IReadOnlyList<string> metaMissingTextures,
+        string? metaFaceGenMismatch,
+        bool showMetadataSections,
+        string? scanText,
+        IReadOnlySet<string>? scanCoveredPaths,
+        bool scanCoversDarkFace)
+    {
+        var sb = new System.Text.StringBuilder();
+        if (showMetadataSections)
+        {
+            bool Covered(string p) =>
+                scanCoveredPaths is { Count: > 0 } &&
+                scanCoveredPaths.Contains(NormalizeForCoverMatch(p));
+
+            var meshes = metaMissingMeshes.Where(p => !Covered(p)).ToList();
+            var textures = metaMissingTextures.Where(p => !Covered(p)).ToList();
+            bool hasFaceGen = !string.IsNullOrWhiteSpace(metaFaceGenMismatch) && !scanCoversDarkFace;
+
+            if (meshes.Count > 0)
+            {
+                sb.Append("The following expected mesh paths could not be found:");
+                foreach (var p in meshes) sb.Append('\n').Append(p);
+            }
+            if (textures.Count > 0)
+            {
+                if (sb.Length > 0) sb.Append("\n\n");
+                sb.Append("The following expected texture paths could not be found:");
+                foreach (var p in textures) sb.Append('\n').Append(p);
+            }
+            if (hasFaceGen)
+            {
+                if (sb.Length > 0) sb.Append("\n\n");
+                sb.Append(metaFaceGenMismatch);
+            }
+        }
+        if (scanText != null)
+        {
+            if (sb.Length > 0) sb.Append("\n\n");
+            sb.Append(scanText);
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>Comparison form for scan-vs-metadata path matching: both sides
+    /// are data-relative game paths, but separators/leading slashes can differ
+    /// between the renderer's stamps and the scanner's regularized rows.</summary>
+    private static string NormalizeForCoverMatch(string path)
+        => path.Replace('/', '\\').TrimStart('\\').Trim();
 
     // Outfit twin of the pair above: scan-detected outfit/headgear issues route
-    // to the Missing Outfit Assets badge, and survive ApplyOutfitAssetNotices'
-    // deliberate rebuild-from-metadata the same way.
+    // to the Missing Outfit Assets badge, survive ApplyOutfitAssetNotices'
+    // deliberate rebuild-from-metadata the same way, and dedupe the same way —
+    // except outfit metadata entries are prose lines rather than bare paths, so
+    // a line is dropped when it CONTAINS a scan-listed path. Physics-config
+    // notices are never dropped (the scan has no physics coverage).
+    private IReadOnlyList<string> _metaMissingOutfitAssets = Array.Empty<string>();
+    private IReadOnlyList<string> _metaPhysicsNotices = Array.Empty<string>();
     private string? _scanOutfitOverlayText;
+    private HashSet<string>? _scanOutfitCoveredPaths;
 
     /// <summary>Overlays scan-detected OUTFIT issue text onto the missing-outfit-assets
     /// badge. See <see cref="ApplyScanIssueOverlay"/> for the semantics.</summary>
-    public void ApplyScanOutfitIssueOverlay(string text)
+    public void ApplyScanOutfitIssueOverlay(string text, IEnumerable<string>? coveredPaths = null)
     {
         _scanOutfitOverlayText = string.IsNullOrWhiteSpace(text) ? null : text;
-        MergeScanOverlayIntoOutfitAssets();
+        _scanOutfitCoveredPaths = _scanOutfitOverlayText == null
+            ? null
+            : coveredPaths?.Select(NormalizeForCoverMatch).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        RebuildOutfitAssetBadge();
     }
 
-    private void MergeScanOverlayIntoOutfitAssets()
+    private void RebuildOutfitAssetBadge()
     {
-        if (_scanOutfitOverlayText == null) return;
-        HasMissingOutfitAssets = true;
-        if (string.IsNullOrEmpty(MissingOutfitAssetsText))
+        MissingOutfitAssetsText = ComposeOutfitAssetBadgeText(
+            _metaMissingOutfitAssets, _metaPhysicsNotices,
+            _settings.InternalMugshot.ShowMissingOutfitAssetsIcon,
+            _scanOutfitOverlayText, _scanOutfitCoveredPaths);
+        HasMissingOutfitAssets = MissingOutfitAssetsText.Length > 0;
+    }
+
+    /// <summary>Outfit twin of <see cref="ComposeMissingAssetBadgeText"/>.
+    /// Internal for tests.</summary>
+    internal static string ComposeOutfitAssetBadgeText(
+        IReadOnlyList<string> metaMissingOutfitAssets,
+        IReadOnlyList<string> metaPhysicsNotices,
+        bool showMetadataSections,
+        string? scanText,
+        IReadOnlySet<string>? scanCoveredPaths)
+    {
+        var sb = new System.Text.StringBuilder();
+        if (showMetadataSections)
         {
-            MissingOutfitAssetsText = _scanOutfitOverlayText;
+            bool LineCovered(string line)
+            {
+                if (scanCoveredPaths is not { Count: > 0 }) return false;
+                string normalized = line.Replace('/', '\\');
+                foreach (var covered in scanCoveredPaths)
+                {
+                    if (normalized.Contains(covered, StringComparison.OrdinalIgnoreCase)) return true;
+                }
+                return false;
+            }
+
+            var assets = metaMissingOutfitAssets.Where(l => !LineCovered(l)).ToList();
+            if (assets.Count > 0)
+            {
+                sb.Append("The following outfit assets could not be found:");
+                foreach (var p in assets) sb.Append('\n').Append(p);
+            }
+            if (metaPhysicsNotices.Count > 0)
+            {
+                if (sb.Length > 0) sb.Append("\n\n");
+                sb.Append("An outfit mesh references a physics config that doesn't exist ")
+                  .Append("(a broken link inside the mod). The mugshot is rendered correctly; ")
+                  .Append("in game the piece's physics likely won't load:\n - ")
+                  .Append(string.Join("\n - ", metaPhysicsNotices));
+            }
         }
-        else if (!MissingOutfitAssetsText.Contains(_scanOutfitOverlayText, StringComparison.Ordinal))
+        if (scanText != null)
         {
-            MissingOutfitAssetsText += "\n\n" + _scanOutfitOverlayText;
+            if (sb.Length > 0) sb.Append("\n\n");
+            sb.Append(scanText);
         }
+        return sb.ToString();
     }
 
     /// <summary>Sets the outfit-asset badge from render output or stamped
@@ -1134,42 +1232,22 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
         IReadOnlyList<string>? missingOutfitAssets,
         IReadOnlyList<string>? physicsNotices)
     {
-        bool hasAssets = missingOutfitAssets is { Count: > 0 };
-        bool hasPhysics = physicsNotices is { Count: > 0 };
-        if ((!hasAssets && !hasPhysics)
-            || !_settings.InternalMugshot.ShowMissingOutfitAssetsIcon)
-        {
-            HasMissingOutfitAssets = false;
-            MissingOutfitAssetsText = string.Empty;
-            MergeScanOverlayIntoOutfitAssets();
-            return;
-        }
-
-        var sb = new System.Text.StringBuilder();
-        if (hasAssets)
-        {
-            sb.Append("The following outfit assets could not be found:");
-            foreach (var p in missingOutfitAssets!) sb.Append('\n').Append(p);
-        }
-        if (hasPhysics)
-        {
-            if (hasAssets) sb.Append("\n\n");
-            sb.Append("An outfit mesh references a physics config that doesn't exist ")
-              .Append("(a broken link inside the mod). The mugshot is rendered correctly; ")
-              .Append("in game the piece's physics likely won't load:\n - ")
-              .Append(string.Join("\n - ", physicsNotices!));
-        }
-
-        HasMissingOutfitAssets = true;
-        MissingOutfitAssetsText = sb.ToString();
-        MergeScanOverlayIntoOutfitAssets();
+        _metaMissingOutfitAssets = missingOutfitAssets ?? Array.Empty<string>();
+        _metaPhysicsNotices = physicsNotices ?? Array.Empty<string>();
+        RebuildOutfitAssetBadge();
     }
 
     /// <summary>Sets the data-folder-asset badge from render output or stamped
     /// metadata; see VM_NpcsMenuMugshot's twin for semantics. No scan-overlay
-    /// merge — the Mod Issues scan doesn't feed this badge.</summary>
+    /// merge — the Mod Issues scan doesn't feed this badge. The immediate text
+    /// lists paths only; a background pass then re-composes it with each asset's
+    /// supplying mod folder(s) cross-referenced from the parent Mods folder
+    /// (the stamp itself stays paths-only — provider names would go stale
+    /// inside PNGs, and the tooltip is only read on hover, long after the
+    /// enrichment lands).</summary>
     private void ApplyDataFolderAssetNotices(IReadOnlyList<string>? dataFolderAssets)
     {
+        int version = System.Threading.Interlocked.Increment(ref _dataFolderNoticeVersion);
         if (dataFolderAssets is not { Count: > 0 }
             || !_settings.InternalMugshot.ShowDataFolderAssetsIcon)
         {
@@ -1178,14 +1256,40 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
             return;
         }
 
-        var sb = new System.Text.StringBuilder();
-        sb.Append("The following assets were loaded from your data folder because they were not found in this mod's Corresponding Mod Folders. Whichever mod these assets come from must stay activated, or else that mod needs to be added to ")
-          .Append(_parentVMModSetting.DisplayName)
-          .Append("'s Corresponding Mod Folders:");
-        foreach (var p in dataFolderAssets) sb.Append('\n').Append(p);
-
+        DataFolderAssetsText = DataFolderAssetAttributor.ComposeNoticeText(
+            _parentVMModSetting.DisplayName, dataFolderAssets, providersByPath: null);
         HasDataFolderAssets = true;
-        DataFolderAssetsText = sb.ToString();
+        _ = EnrichDataFolderAssetNoticesAsync(dataFolderAssets, version);
+    }
+
+    /// <summary>Guards a stale enrichment from overwriting a newer notice set
+    /// (tiles re-apply notices on regeneration while a lookup may be in flight).</summary>
+    private int _dataFolderNoticeVersion;
+
+    private async Task EnrichDataFolderAssetNoticesAsync(IReadOnlyList<string> paths, int version)
+    {
+        try
+        {
+            var providers = await Task.Run(() =>
+            {
+                var map = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase);
+                foreach (var p in paths)
+                {
+                    if (!map.ContainsKey(p)) map[p] = _dataFolderAttributor.GetProviders(p);
+                }
+                return map;
+            }).ConfigureAwait(false);
+
+            if (providers.Values.All(v => v.Count == 0)) return; // nothing attributable — keep the paths-only text
+            if (System.Threading.Volatile.Read(ref _dataFolderNoticeVersion) != version) return;
+            DataFolderAssetsText = DataFolderAssetAttributor.ComposeNoticeText(
+                _parentVMModSetting.DisplayName, paths, providers);
+        }
+        catch (Exception ex)
+        {
+            // Attribution is a nicety; the paths-only tooltip stands.
+            Debug.WriteLine($"EnrichDataFolderAssetNotices failed for {NpcFormKey}: {ex.Message}");
+        }
     }
 
     /// <summary>Builds the placeholder tooltip body listing where NPC2 looks

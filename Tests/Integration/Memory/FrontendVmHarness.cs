@@ -60,6 +60,7 @@ public sealed class FrontendVmHarness : IDisposable
         builder.RegisterType<Validator>().AsSelf().SingleInstance();
         builder.RegisterType<AssetHandler>().AsSelf().SingleInstance();
         builder.RegisterType<BsaHandler>().AsSelf().SingleInstance();
+        builder.RegisterType<DataFolderAssetAttributor>().AsSelf().SingleInstance();
         builder.RegisterType<RecordHandler>().AsSelf().SingleInstance();
         builder.RegisterType<RecordDeltaPatcher>().AsSelf().SingleInstance();
         builder.RegisterType<NpcConsistencyProvider>().AsSelf().SingleInstance();

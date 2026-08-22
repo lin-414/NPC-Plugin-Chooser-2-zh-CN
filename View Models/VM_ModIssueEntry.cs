@@ -96,6 +96,7 @@ public class VM_ModIssueEntry : ReactiveObject
         ModIssueType.MissingNifTexture => "Missing texture",
         ModIssueType.ModNotInstalled => "Mod not installed",
         ModIssueType.MissingHeadPartPlugin => "Missing required mod",
+        ModIssueType.OutOfScopeAsset => "Out-of-scope asset",
         _ => type.ToString(),
     };
 
@@ -169,11 +170,30 @@ public class VM_ModIssueEntry : ReactiveObject
         return baseText;
     }
 
+    /// <summary>The subset of an NPC's scan findings the TILE BADGES list. Out-of-
+    /// scope assets are excluded: the blue data-folder badge already reports
+    /// exactly that class per render (stamped mugshot metadata), so repeating
+    /// them in the scan overlay double-flagged every affected tile
+    /// (user-reported 2026-08-21). The results table keeps the rows — that's
+    /// where the Mods-folder supplier attribution lives. The single source of
+    /// this rule: <see cref="BuildNpcIssueText"/> composes from it, and
+    /// VM_ModIssues derives the overlay's metadata-dedupe path set from the SAME
+    /// subset so the paths claimed as "covered by scan text" are exactly the
+    /// paths that text lists.</summary>
+    public static IReadOnlyList<ModIssue> BadgeListedIssues(IReadOnlyList<ModIssue> issues)
+        => issues.Where(i => i.Type != ModIssueType.OutOfScopeAsset).ToList();
+
     public static string BuildNpcIssueText(IReadOnlyList<ModIssue> issues)
     {
+        // Empty return = the overlay setters treat it as "no scan text" and
+        // leave the badge alone, so an NPC whose only findings are out-of-scope
+        // shows just the blue badge.
+        var listed = BadgeListedIssues(issues);
+        if (listed.Count == 0) return string.Empty;
+
         var sb = new System.Text.StringBuilder();
         sb.Append("Issues found by the mod scan:");
-        foreach (var group in issues.GroupBy(i => i.Type).OrderBy(g => g.Key))
+        foreach (var group in listed.GroupBy(i => i.Type).OrderBy(g => g.Key))
         {
             sb.Append('\n').Append(GetIssueTypeDisplayName(group.Key)).Append(':');
             foreach (var issue in group)

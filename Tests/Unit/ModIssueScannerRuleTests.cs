@@ -754,4 +754,199 @@ public class ModIssueScannerRuleTests
         Assert.Contains("cuirass_1.nif", text);
         Assert.Contains(@"meshes\armor\gone.nif", text);
     }
+
+    [Fact]
+    public void BuildNpcIssueText_ExcludesOutOfScopeRows_BlueBadgeOwnsThatClass()
+    {
+        // The mugshot tiles' blue data-folder badge already reports out-of-scope
+        // assets per render; the scan overlay repeating them double-flagged every
+        // affected tile. Only out-of-scope findings → empty text, which the
+        // overlay setters treat as "no badge".
+        var onlyOutOfScope = new List<ModIssue>
+        {
+            Issue(ModIssueType.OutOfScopeAsset, path: @"textures\ks hairdo's\scalp.dds"),
+        };
+        Assert.Equal(string.Empty, VM_ModIssueEntry.BuildNpcIssueText(onlyOutOfScope));
+
+        var mixed = new List<ModIssue>
+        {
+            Issue(ModIssueType.OutOfScopeAsset, path: @"textures\ks hairdo's\scalp.dds"),
+            Issue(ModIssueType.MissingArmaMesh, path: @"meshes\armor\gone.nif"),
+        };
+        var text = VM_ModIssueEntry.BuildNpcIssueText(mixed);
+        Assert.Contains(@"meshes\armor\gone.nif", text);
+        Assert.DoesNotContain(@"textures\ks hairdo's\scalp.dds", text);
+        Assert.DoesNotContain("Out-of-scope", text);
+    }
+
+    [Fact]
+    public void ComposeMissingAssetBadge_DropsMetadataLinesTheScanAlreadyLists()
+    {
+        var covered = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
+        {
+            @"textures\ks hairdo's\joshua_s.dds",
+        };
+
+        // The Gunther field case (2026-08-21): the render's stamped missing-texture
+        // line and the scan's rows named the same file in one tooltip. The covered
+        // path drops out of the metadata section; the unrelated one stays; headers
+        // vanish with their emptied section. Separators must not defeat the match.
+        var text = VM_ModsMenuMugshot.ComposeMissingAssetBadgeText(
+            metaMissingMeshes: new List<string>(),
+            metaMissingTextures: new List<string>
+            {
+                @"textures/ks hairdo's/joshua_s.dds",
+                @"textures\unrelated\decodefail.dds",
+            },
+            metaFaceGenMismatch: null,
+            showMetadataSections: true,
+            scanText: "Issues found by the mod scan:\nMissing texture:\n - textures\\ks hairdo's\\joshua_s.dds (note)",
+            scanCoveredPaths: covered,
+            scanCoversDarkFace: false);
+
+        Assert.Contains(@"textures\unrelated\decodefail.dds", text);
+        Assert.Contains("Issues found by the mod scan:", text);
+        // The file appears exactly once — in the scan section.
+        int first = text.IndexOf("joshua_s.dds", System.StringComparison.OrdinalIgnoreCase);
+        int last = text.LastIndexOf("joshua_s.dds", System.StringComparison.OrdinalIgnoreCase);
+        Assert.True(first >= 0 && first == last, "the covered path must be listed once, by the scan text only");
+
+        // With every metadata texture covered, the whole header disappears.
+        var allCovered = VM_ModsMenuMugshot.ComposeMissingAssetBadgeText(
+            new List<string>(), new List<string> { @"textures\ks hairdo's\joshua_s.dds" },
+            null, true, "Issues found by the mod scan:\n...", covered, false);
+        Assert.DoesNotContain("could not be found", allCovered);
+        Assert.StartsWith("Issues found by the mod scan:", allCovered);
+    }
+
+    [Fact]
+    public void ComposeMissingAssetBadge_FaceGenParagraphYieldsToScanDarkFaceRows()
+    {
+        var withScanDarkFace = VM_ModsMenuMugshot.ComposeMissingAssetBadgeText(
+            new List<string>(), new List<string>(),
+            metaFaceGenMismatch: "Head part 'X' has no baked shape (causes dark-face bug)",
+            showMetadataSections: true,
+            scanText: "Issues found by the mod scan:\nDark-face mismatch:\n - ...",
+            scanCoveredPaths: null,
+            scanCoversDarkFace: true);
+        Assert.DoesNotContain("no baked shape", withScanDarkFace);
+
+        var withoutScanDarkFace = VM_ModsMenuMugshot.ComposeMissingAssetBadgeText(
+            new List<string>(), new List<string>(),
+            metaFaceGenMismatch: "Head part 'X' has no baked shape (causes dark-face bug)",
+            showMetadataSections: true,
+            scanText: "Issues found by the mod scan:\nMissing texture:\n - ...",
+            scanCoveredPaths: null,
+            scanCoversDarkFace: false);
+        Assert.Contains("no baked shape", withoutScanDarkFace);
+    }
+
+    [Fact]
+    public void ComposeOutfitAssetBadge_DropsCoveredProseLines_KeepsPhysicsNotices()
+    {
+        var covered = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
+        {
+            @"meshes\armor\gone.nif",
+        };
+
+        var text = VM_ModsMenuMugshot.ComposeOutfitAssetBadgeText(
+            metaMissingOutfitAssets: new List<string>
+            {
+                @"Override mesh did not resolve: meshes\armor\gone.nif",
+                @"Outfit texture not found: textures\armor\other.dds",
+            },
+            metaPhysicsNotices: new List<string> { @"SMP config missing: physics\x.xml" },
+            showMetadataSections: true,
+            scanText: "Issues found by the mod scan:\nMissing mesh:\n - meshes\\armor\\gone.nif",
+            scanCoveredPaths: covered);
+
+        // Prose lines dedupe by containment; scan-blind signals survive.
+        Assert.DoesNotContain("Override mesh did not resolve", text);
+        Assert.Contains(@"textures\armor\other.dds", text);
+        Assert.Contains(@"physics\x.xml", text, System.StringComparison.Ordinal);
+        Assert.Contains("Issues found by the mod scan:", text);
+    }
+
+    // --- Out-of-scope asset reporting (v14) ---
+
+    [Theory]
+    [InlineData(@"meshes\actors\character\character assets\femalebody_1.nif", true)]
+    [InlineData(@"meshes/actors/character/character assets/femalebody_1.nif", true)] // separator-agnostic
+    [InlineData(@"\meshes\actors\character\character assets\femalebody_1.nif", true)] // leading slash
+    [InlineData(@"textures\ks hairdos\hair01.dds", false)]
+    public void IsVanillaPath_NormalizesBeforeMembership(string rel, bool expected)
+    {
+        var vanilla = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase)
+        {
+            @"meshes\actors\character\character assets\femalebody_1.nif",
+        };
+
+        Assert.Equal(expected, ModIssueScanner.IsVanillaPath(rel, vanilla));
+    }
+
+    private static CharacterViewer.Rendering.AssetSource FallbackSource(string gamePath, string? bsaPath = null)
+        => new(bsaPath == null
+                    ? CharacterViewer.Rendering.AssetOriginKind.Loose
+                    : CharacterViewer.Rendering.AssetOriginKind.Bsa,
+                gamePath,
+                ResolvedDiskPath: @"C:\resolved\file",
+                LoosePath: bsaPath == null ? @"C:\Game\Data\" + gamePath : null,
+                BsaPath: bsaPath,
+                InternalBsaPath: bsaPath == null ? null : gamePath)
+            { ViaDataFolderFallback = true };
+
+    [Fact]
+    public void DescribeOutOfScopeHit_ArchiveSource_NamesArchiveAndShippingMod()
+    {
+        using var mods = new TestSupport.TempDir();
+        System.IO.File.WriteAllText(mods.Combine("KS Hairdos SSE", "KS Hairdo's.bsa"), "x");
+        var locator = new ModsFolderAssetLocator(mods.Path);
+
+        var (providerColumn, detail) = ModIssueScanner.DescribeOutOfScopeHit(
+            @"textures\ks hairdos\hair01.dds",
+            FallbackSource(@"textures\ks hairdos\hair01.dds", bsaPath: @"C:\Game\Data\KS Hairdo's.bsa"),
+            locator);
+
+        Assert.Equal("KS Hairdos SSE", providerColumn);
+        Assert.Contains("archive 'KS Hairdo's.bsa'", detail);
+        Assert.Contains("'KS Hairdos SSE'", detail);
+        Assert.Contains("stays activated", detail);
+    }
+
+    [Fact]
+    public void DescribeOutOfScopeHit_LooseSource_MultipleProviders_SaysOrderDecides()
+    {
+        using var mods = new TestSupport.TempDir();
+        System.IO.File.WriteAllText(mods.Combine("Mod A", "textures", "shared.dds"), "x");
+        System.IO.File.WriteAllText(mods.Combine("Mod B", "textures", "shared.dds"), "x");
+        var locator = new ModsFolderAssetLocator(mods.Path);
+
+        var (providerColumn, detail) = ModIssueScanner.DescribeOutOfScopeHit(
+            @"textures\shared.dds", FallbackSource(@"textures\shared.dds"), locator);
+
+        Assert.Equal("Mod A, Mod B", providerColumn);
+        Assert.Contains("'Mod A' or 'Mod B'", detail);
+        Assert.Contains("order decides which wins", detail);
+    }
+
+    [Fact]
+    public void DescribeOutOfScopeHit_NoProvider_DistinguishesDirectInstallFromNoModsFolder()
+    {
+        using var mods = new TestSupport.TempDir();
+        var available = new ModsFolderAssetLocator(mods.Path);
+        var unavailable = new ModsFolderAssetLocator(null);
+
+        var (column1, detail1) = ModIssueScanner.DescribeOutOfScopeHit(
+            @"textures\orphan.dds", FallbackSource(@"textures\orphan.dds"), available);
+        Assert.Equal(string.Empty, column1);
+        Assert.Contains("installed directly in the game's Data folder", detail1);
+
+        var (column2, detail2) = ModIssueScanner.DescribeOutOfScopeHit(
+            @"textures\orphan.dds", FallbackSource(@"textures\orphan.dds"), unavailable);
+        Assert.Equal(string.Empty, column2);
+        // Without a Mods folder there is nothing to cross-reference — the row must
+        // not claim "no mod ships this".
+        Assert.DoesNotContain("Mods folder", detail2);
+        Assert.Contains("stays activated", detail2);
+    }
 }

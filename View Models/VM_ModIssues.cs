@@ -1247,12 +1247,24 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
                         .Select(i => i.RecordPluginName)
                         .Where(p => !string.IsNullOrEmpty(p))
                         .Distinct(StringComparer.OrdinalIgnoreCase));
-                    var baseIssues = issues.Where(i => !i.IsOutfitIssue).ToList();
-                    var outfitIssues = issues.Where(i => i.IsOutfitIssue).ToList();
+                    // Overlay dedupe inputs come from the SAME badge-listed subset
+                    // the text is built from (BadgeListedIssues), so the paths the
+                    // tile drops from its metadata sections are exactly the paths
+                    // the scan text lists — and dark-face rows suppress the
+                    // metadata's own FaceGen-mismatch paragraph (same analyzer,
+                    // richer scan presentation).
+                    var baseIssues = VM_ModIssueEntry.BadgeListedIssues(
+                        issues.Where(i => !i.IsOutfitIssue).ToList());
+                    var outfitIssues = VM_ModIssueEntry.BadgeListedIssues(
+                        issues.Where(i => i.IsOutfitIssue).ToList());
                     if (baseIssues.Count > 0)
-                        vm.ApplyScanIssueOverlay(VM_ModIssueEntry.BuildNpcIssueText(baseIssues));
+                        vm.ApplyScanIssueOverlay(VM_ModIssueEntry.BuildNpcIssueText(baseIssues),
+                            baseIssues.Select(i => i.AffectedPath),
+                            coversDarkFace: baseIssues.Any(i =>
+                                i.Type is ModIssueType.DarkFaceMismatch or ModIssueType.MissingHeadPartPlugin));
                     if (outfitIssues.Count > 0)
-                        vm.ApplyScanOutfitIssueOverlay(VM_ModIssueEntry.BuildNpcIssueText(outfitIssues));
+                        vm.ApplyScanOutfitIssueOverlay(VM_ModIssueEntry.BuildNpcIssueText(outfitIssues),
+                            outfitIssues.Select(i => i.AffectedPath));
                     vms.Add(vm);
                 }
 
