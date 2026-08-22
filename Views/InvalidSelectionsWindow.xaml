@@ -66,6 +66,7 @@
                   HeadersVisibility="Column"
                   RowHeaderWidth="0"
                   ClipboardCopyMode="ExcludeHeader"
+                  VirtualizingPanel.ScrollUnit="Pixel"
                   Background="{DynamicResource SecondaryBackground}"
                   Foreground="{DynamicResource PrimaryForeground}"
                   BorderBrush="{DynamicResource BorderBrush}"

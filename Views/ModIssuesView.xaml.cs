@@ -225,31 +225,6 @@ namespace NPC_Plugin_Chooser_2.Views
             }
         }
 
-        /// <summary>
-        /// Wheel routing for the Details cell's internal ScrollViewer: let the cell
-        /// scroll while it has somewhere to go in the wheel's direction, otherwise
-        /// mark the event handled and re-raise it from the cell so it bubbles to the
-        /// results DataGrid — a bare ScrollViewer would swallow the wheel even when
-        /// it cannot scroll, freezing table scrolling whenever the cursor rests on a
-        /// Details cell.
-        /// </summary>
-        private void DetailsCell_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
-        {
-            if (sender is not ScrollViewer viewer) return;
-
-            bool cellCanScroll = e.Delta < 0
-                ? viewer.VerticalOffset < viewer.ScrollableHeight
-                : viewer.VerticalOffset > 0;
-            if (cellCanScroll && viewer.ScrollableHeight > 0) return;
-
-            e.Handled = true;
-            viewer.RaiseEvent(new MouseWheelEventArgs(e.MouseDevice, e.Timestamp, e.Delta)
-            {
-                RoutedEvent = UIElement.MouseWheelEvent,
-                Source = viewer,
-            });
-        }
-
         private void ZoomPercentageTextBox_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
         {
             if (ViewModel == null || sender is not TextBox textBox) return;

@@ -1199,7 +1199,10 @@ public sealed class ModIssueScanner
     /// <summary>Composes an out-of-scope row's "Provided by" column and Detail
     /// text: where the asset actually came from (loose data-folder file or a
     /// named archive) and which mod folder(s) in the parent Mods folder ship it.
-    /// Internal for tests.</summary>
+    /// Layout and wording are the user's verbatim template (2026-08-21): the
+    /// supplying mods listed one per line (capped, "(+N more)"), then a plain
+    /// consequence + remedy sentence — not inline clause-prose. Internal for
+    /// tests.</summary>
     internal static (string ProviderColumn, string Detail) DescribeOutOfScopeHit(
         string regularizedRel, AssetSource source, ModsFolderAssetLocator locator)
     {
@@ -1209,41 +1212,52 @@ public sealed class ModIssueScanner
             ? locator.FindArchiveProviders(archiveName)
             : locator.FindLooseProviders(regularizedRel);
 
-        string origin = fromArchive
-            ? $"archive '{archiveName}' in your data folder"
-            : "a loose file in your data folder";
+        var sb = new System.Text.StringBuilder();
+        sb.Append("This asset is not in this mod's Corresponding Mod Folders. The game finds it ")
+          .Append(fromArchive
+              ? $"inside archive '{archiveName}' in your data folder"
+              : "from a loose file in your data folder");
 
-        string supplier;
         if (providers.Count > 0)
         {
-            string list = ModsFolderAssetLocator.FormatProviderList(providers);
-            supplier = providers.Count == 1
-                ? $", supplied by mod {list} in your Mods folder"
-                : $", supplied by mod {list} in your Mods folder (several ship it; your mod manager's order decides which wins)";
+            const int maxListed = 4;
+            sb.Append(providers.Count == 1
+                ? ", which comes from the following mod:"
+                : ", which comes from one of the following:");
+            foreach (var p in providers.Take(maxListed)) sb.Append('\n').Append(p);
+            if (providers.Count > maxListed)
+                sb.Append("\n(+").Append(providers.Count - maxListed).Append(" more)");
+            sb.Append('\n').Append(providers.Count == 1
+                ? "The asset will fail to load in-game if you deactivate this mod. To forward the " +
+                  "asset to the NPC2 output folder, allowing you to deactivate it, add the " +
+                  "supplying mod's folder to this mod entry's Corresponding Mod Folders."
+                : "The asset will fail to load in-game if you deactivate all of these mods. To " +
+                  "forward the asset to the NPC2 output folder, allowing you to deactivate these " +
+                  "mods, add (one of) the supplying mod's folder(s) to this mod entry's " +
+                  "Corresponding Mod Folders.");
         }
         else if (locator.IsAvailable)
         {
-            supplier = fromArchive
-                ? " (no folder in your Mods folder ships that archive — it may be installed directly in the game's Data folder)"
-                : " (no folder in your Mods folder ships this file — it may be installed directly in the game's Data folder)";
+            sb.Append(fromArchive
+                ? ". No folder in your Mods folder ships that archive — it may be installed " +
+                  "directly in the game's Data folder."
+                : ". No folder in your Mods folder ships this file — it may be installed " +
+                  "directly in the game's Data folder.");
+            sb.Append(" The asset will fail to load in-game if its source is removed.");
         }
         else
         {
             // No Mods folder configured/available — nothing to cross-reference.
-            supplier = string.Empty;
+            sb.Append(". The asset will fail to load in-game if the mod supplying it is " +
+                      "deactivated. To forward the asset to the NPC2 output folder, allowing you " +
+                      "to deactivate that mod, add its folder to this mod entry's Corresponding " +
+                      "Mod Folders.");
         }
-
-        string detail =
-            "This asset is not in this mod's Corresponding Mod Folders; the game resolves it from " +
-            origin + supplier +
-            ". Nothing is broken today, but it only keeps working while the supplying mod stays " +
-            "activated. To make the asset travel with this mod instead, add the supplying mod's " +
-            "folder to this mod entry's Corresponding Mod Folders.";
 
         string providerColumn = providers.Count == 0
             ? string.Empty
             : string.Join(", ", providers.Take(3)) + (providers.Count > 3 ? ", …" : string.Empty);
-        return (providerColumn, detail);
+        return (providerColumn, sb.ToString());
     }
 
     /// <summary>Resolves a game path (or passes through an already-rooted disk

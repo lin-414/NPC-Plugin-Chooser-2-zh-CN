@@ -908,13 +908,14 @@ public class ModIssueScannerRuleTests
             locator);
 
         Assert.Equal("KS Hairdos SSE", providerColumn);
-        Assert.Contains("archive 'KS Hairdo's.bsa'", detail);
-        Assert.Contains("'KS Hairdos SSE'", detail);
-        Assert.Contains("stays activated", detail);
+        Assert.Contains("inside archive 'KS Hairdo's.bsa'", detail);
+        // Single supplier: singular phrasing, name on its own line.
+        Assert.Contains("the following mod:\nKS Hairdos SSE\n", detail);
+        Assert.Contains("fail to load in-game if you deactivate this mod", detail);
     }
 
     [Fact]
-    public void DescribeOutOfScopeHit_LooseSource_MultipleProviders_SaysOrderDecides()
+    public void DescribeOutOfScopeHit_LooseSource_MultipleProviders_ListsOnePerLine()
     {
         using var mods = new TestSupport.TempDir();
         System.IO.File.WriteAllText(mods.Combine("Mod A", "textures", "shared.dds"), "x");
@@ -925,8 +926,26 @@ public class ModIssueScannerRuleTests
             @"textures\shared.dds", FallbackSource(@"textures\shared.dds"), locator);
 
         Assert.Equal("Mod A, Mod B", providerColumn);
-        Assert.Contains("'Mod A' or 'Mod B'", detail);
-        Assert.Contains("order decides which wins", detail);
+        // The user's preferred layout (2026-08-21): plain names one per line under
+        // "one of the following:", then consequence + remedy sentences.
+        Assert.Contains("one of the following:\nMod A\nMod B\n", detail);
+        Assert.Contains("fail to load in-game if you deactivate all of these mods", detail);
+        Assert.Contains("forward the asset to the NPC2 output folder", detail);
+    }
+
+    [Fact]
+    public void DescribeOutOfScopeHit_ManyProviders_CapsListAtFourPlusMore()
+    {
+        using var mods = new TestSupport.TempDir();
+        foreach (var name in new[] { "Mod A", "Mod B", "Mod C", "Mod D", "Mod E" })
+            System.IO.File.WriteAllText(mods.Combine(name, "textures", "shared.dds"), "x");
+        var locator = new ModsFolderAssetLocator(mods.Path);
+
+        var (_, detail) = ModIssueScanner.DescribeOutOfScopeHit(
+            @"textures\shared.dds", FallbackSource(@"textures\shared.dds"), locator);
+
+        Assert.Contains("\nMod A\nMod B\nMod C\nMod D\n(+1 more)\n", detail);
+        Assert.DoesNotContain("Mod E", detail);
     }
 
     [Fact]
@@ -947,6 +966,6 @@ public class ModIssueScannerRuleTests
         // Without a Mods folder there is nothing to cross-reference — the row must
         // not claim "no mod ships this".
         Assert.DoesNotContain("Mods folder", detail2);
-        Assert.Contains("stays activated", detail2);
+        Assert.Contains("fail to load in-game", detail2);
     }
 }

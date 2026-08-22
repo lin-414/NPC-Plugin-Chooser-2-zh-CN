@@ -413,7 +413,7 @@
                                                     <DropShadowEffect Color="White" ShadowDepth="0"
                                                                       BlurRadius="6" Opacity="0.9"/>
                                                 </Viewbox.Effect>
-                                                <TextBlock Text="&#xE8B7;" FontFamily="Segoe MDL2 Assets" Foreground="DodgerBlue"/>
+                                                <Image Source="/NPC Plugin Chooser 2;component/Resources/Data Folder Assets.png" />
                                             </Viewbox>
                                         </Grid>
                                     </Grid>
@@ -458,6 +458,12 @@
                     </TextBlock>
                     <!-- Theme resources carry no implicit DataGrid styles, so the
                          grid is themed inline — same recipe as ValidationResultsWindow. -->
+                    <!-- ScrollUnit=Pixel (here and on every results table): the default
+                         item-based scrolling advances by whole rows, which jumps with tall
+                         rows and — worse — cannot reach the bottom of a row taller than
+                         what remains of the viewport (a fully-scrolled Details cell kept
+                         its last line clipped). Pixel scrolling fixes both and keeps row
+                         virtualization. -->
                     <DataGrid Grid.Row="2" ItemsSource="{Binding IssueTableRows}"
                               AutoGenerateColumns="False" IsReadOnly="True"
                               CanUserAddRows="False" CanUserDeleteRows="False"
@@ -468,6 +474,7 @@
                               GridLinesVisibility="All"
                               HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
                               EnableRowVirtualization="True"
+                              VirtualizingPanel.ScrollUnit="Pixel"
                               Background="{DynamicResource SecondaryBackground}"
                               Foreground="{DynamicResource PrimaryForeground}"
                               BorderBrush="{DynamicResource BorderBrush}"
@@ -583,24 +590,21 @@
                             <DataGridTextColumn Header="Provided By" Binding="{Binding ProvidedBy}" Width="*"
                                                 ElementStyle="{StaticResource WrappingCellText}"/>
                             <!-- Details can run to dozens of lines (dark-face reason texts); the
-                                 cell caps its height and scrolls internally instead of growing the
-                                 row past the viewport. ClipboardContentBinding keeps Ctrl+C intact. -->
+                                 row simply grows to fit. Tall rows are fine under ScrollUnit=Pixel,
+                                 which is what retired the old height-capped cell ScrollViewer — its
+                                 two-level wheel handoff (cell scroll, then table scroll) read badly,
+                                 and the cap only ever existed because item-based scrolling could not
+                                 navigate tall rows. ClipboardContentBinding keeps Ctrl+C intact. -->
                             <DataGridTemplateColumn Header="Details" Width="2*"
                                                     ClipboardContentBinding="{Binding DetailWithRemedy}"
                                                     SortMemberPath="Detail">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
-                                        <ScrollViewer MaxHeight="240"
-                                                      VerticalScrollBarVisibility="Auto"
-                                                      HorizontalScrollBarVisibility="Disabled"
-                                                      Focusable="False"
-                                                      PreviewMouseWheel="DetailsCell_PreviewMouseWheel">
-                                            <!-- IssueDetailFormatter splices the green repin-remedy
-                                                 line directly under the verdict's headline. -->
-                                            <TextBlock local:IssueDetailFormatter.DetailText="{Binding Detail}"
-                                                       local:IssueDetailFormatter.RemedyText="{Binding RepinRemedy}"
-                                                       TextWrapping="Wrap" Padding="0,0,4,0"/>
-                                        </ScrollViewer>
+                                        <!-- IssueDetailFormatter splices the green repin-remedy
+                                             line directly under the verdict's headline. -->
+                                        <TextBlock local:IssueDetailFormatter.DetailText="{Binding Detail}"
+                                                   local:IssueDetailFormatter.RemedyText="{Binding RepinRemedy}"
+                                                   TextWrapping="Wrap" Padding="0,0,4,0"/>
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>

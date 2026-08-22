@@ -149,6 +149,7 @@
                       AutoGenerateColumns="False"
                       IsReadOnly="True"
                       CanUserAddRows="False"
+                      VirtualizingPanel.ScrollUnit="Pixel"
                       GridLinesVisibility="All"
                       HeadersVisibility="Column"
                       SelectionMode="Extended"

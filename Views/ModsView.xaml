@@ -1069,7 +1069,7 @@
                                              non-vanilla assets from the data folder because they weren't
                                              in this mod's Corresponding Mod Folders — a keep-activated
                                              runtime dependency. Informational; tooltip lists the assets.
-                                             White halo on the Viewbox so the glyph doesn't camouflage. -->
+                                             White halo on the Viewbox so the icon doesn't camouflage. -->
                                         <Grid HorizontalAlignment="Left" VerticalAlignment="Top" Margin="0 0 0 0"
                                               Visibility="{Binding HasDataFolderAssets, Converter={StaticResource BooleanToVisibilityConverter}}"
                                               ToolTip="{Binding DataFolderAssetsText}"
@@ -1080,7 +1080,7 @@
                                                     <DropShadowEffect Color="White" ShadowDepth="0"
                                                                       BlurRadius="6" Opacity="0.9"/>
                                                 </Viewbox.Effect>
-                                                <TextBlock Text="&#xE8B7;" FontFamily="Segoe MDL2 Assets" Foreground="DodgerBlue"/>
+                                                <Image Source="/NPC Plugin Chooser 2;component/Resources/Data Folder Assets.png" />
                                             </Viewbox>
                                         </Grid>
 
