@@ -52,12 +52,23 @@
                                                 <DataTrigger Binding="{Binding MugshotSource}" Value="{x:Null}">
                                                     <Setter Property="Source" Value="{Binding ImagePath}" />
                                                 </DataTrigger>
+                                                <DataTrigger Binding="{Binding IsLiveTile}" Value="True">
+                                                    <Setter Property="Visibility" Value="Collapsed"/>
+                                                </DataTrigger>
                                             </Style.Triggers>
                                         </Style>
                                     </Image.Style>
                                 </Image>
                                         <!-- Tooltip might need adjustment if ModName isn't directly on IHasMugshotImage -->
-                                
+
+                                <!-- Live Tile analogue: an item whose source tile was live
+                                     compares as an embedded view-only 3D viewport too, opened
+                                     at the tile's current camera angle. FallbackValue keeps
+                                     the (opaque) viewport collapsed for any item type that
+                                     lacks the live-tile properties. -->
+                                <local:UC_LiveTileViewport DataContext="{Binding LiveTilePreview}"
+                                                           Visibility="{Binding DataContext.IsLiveTile, RelativeSource={RelativeSource AncestorType=Border}, Converter={StaticResource BooleanToVisibilityConverter}, FallbackValue=Collapsed}"/>
+
                                 <!-- If IHasMugshotImage comes from VM_NpcsMenuMugshot, you can display ModName -->
                                 <TextBlock Text="{Binding ModName}" VerticalAlignment="Bottom" HorizontalAlignment="Center"
                                            Background="#AAFFFFFF" FontSize="10" Padding="3,1"

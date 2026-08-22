@@ -1439,6 +1439,40 @@ public class VM_NpcsMenuMugshot : ReactiveObject, IDisposable, IHasMugshotImage,
         _vmNpcSelectionBar.NotifyTileImageReady();
     }
 
+    /// <summary>
+    /// Builds an independent live-preview VM for this tile's appearance — used
+    /// by the Compare window so a live tile's analogue there is also live. A
+    /// FRESH VM is required: one viewer VM can never be bound by two
+    /// GLWpfControls at once (each control mints a private GL context and the
+    /// VM tracks one set of GL object IDs). Copies the on-tile viewport's
+    /// current camera pose so the comparison opens at the same angle the user
+    /// is looking at. Fires the load and returns immediately; the CALLER owns
+    /// disposal (RequestViewShutdown, falling back to Dispose).
+    /// </summary>
+    public VM_InternalMugshotPreview? CreateDetachedLivePreview()
+    {
+        if (!CanBeLiveTile) return null;
+        try
+        {
+            var inner = _internalPreviewFactory();
+            inner.PersistAttireToggles = false;
+            if (LiveTilePreview?.Viewer.Camera is { } cam)
+            {
+                inner.InitialCameraPose = (cam.Azimuth, cam.Elevation, cam.Distance,
+                    cam.Target.X, cam.Target.Y, cam.Target.Z);
+            }
+            var modSetting = AssociatedModSetting!.SaveToModel();
+            _ = LoadLiveTileAsync(inner, modSetting);
+            return inner;
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine(
+                $"CreateDetachedLivePreview failed for {ModName}: {ExceptionLogger.GetExceptionStack(ex)}");
+            return null;
+        }
+    }
+
     /// <summary>LiveTile branch of the mugshot-source priority loop. Runs on
     /// the generation worker thread, so the activation itself is marshalled to
     /// the UI thread. Returns true ("handled") when the tile went live.</summary>

@@ -1342,9 +1342,13 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
     {
         if (CurrentNpcAppearanceMods == null) return;
 
+        // Live tiles qualify with no image on disk — their compare analogue is
+        // an embedded viewport, not a bitmap.
         var selectedMugshotVMs = CurrentNpcAppearanceMods
-            .Where(m => m.IsCheckedForCompare && m.HasMugshot && 
-                        (m.MugshotSource != null || (!string.IsNullOrEmpty(m.ImagePath) && File.Exists(m.ImagePath))))
+            .Where(m => m.IsCheckedForCompare &&
+                        (m.IsLiveTile || (m.HasMugshot &&
+                             (m.MugshotSource != null ||
+                              (!string.IsNullOrEmpty(m.ImagePath) && File.Exists(m.ImagePath))))))
             .ToList();
 
         if (selectedMugshotVMs.Count < 2)
@@ -1356,10 +1360,15 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
 
         Debug.WriteLine($"CompareSelected: {selectedMugshotVMs.Count} mugshots selected for comparison.");
 
+        // Wrap each tile in a compare-item snapshot. Live tiles get their own
+        // detached preview VM (fresh GL context) opened at the source tile's
+        // current camera angle; the wrappers also keep the compare packer from
+        // writing into the gallery tiles' ImageWidth/Height.
+        var compareItems = selectedMugshotVMs.Select(m => new VM_CompareMugshot(m)).ToList();
         try
         {
             var multiImageVM =
-                new VM_MultiImageDisplay(selectedMugshotVMs.Cast<IHasMugshotImage>() /*, _settings */);
+                new VM_MultiImageDisplay(compareItems /*, _settings */);
             // It's good practice to ensure the new window has an owner if it's a dialog
             var currentWindow = Application.Current.Windows.OfType<Window>().FirstOrDefault(x => x.IsActive);
 
@@ -1380,6 +1389,15 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         {
             ScrollableMessageBox.ShowError($"Could not open comparison window: {ExceptionLogger.GetExceptionStack(ex)}", "Error Comparing");
             Debug.WriteLine($"Error in ExecuteCompareSelected: {ex}");
+        }
+        finally
+        {
+            // Tear down the detached live viewports (GL context per live item)
+            // whether the dialog closed normally or the open failed.
+            foreach (var item in compareItems)
+            {
+                item.Dispose();
+            }
         }
     }
 

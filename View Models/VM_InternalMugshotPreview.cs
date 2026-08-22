@@ -224,6 +224,17 @@ public class VM_InternalMugshotPreview : ReactiveObject, IDisposable
     public event Action? ViewShutdownRequested;
 
     /// <summary>
+    /// Optional camera pose the hosting <see cref="Views.UC_LiveTileViewport"/>
+    /// applies on scene commit INSTEAD of the mugshot framing. Set by the
+    /// Compare window's launcher so a live tile's analogue opens at the same
+    /// angle the source tile is currently showing (an untouched tile's pose is
+    /// the mugshot framing anyway, so copying is always correct). Null = normal
+    /// mugshot framing.
+    /// </summary>
+    public (float Azimuth, float Elevation, float Distance,
+        float TargetX, float TargetY, float TargetZ)? InitialCameraPose { get; set; }
+
+    /// <summary>
     /// Asks the hosting view (if any) to run its GL teardown, which disposes
     /// this VM as its final step. Returns false when no view ever attached —
     /// the caller must then dispose this VM itself (safe: no view means no GL

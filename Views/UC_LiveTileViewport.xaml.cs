@@ -141,6 +141,18 @@ public partial class UC_LiveTileViewport : UserControl
         if (_userAdjustedCamera) return;
         if (!_viewer.IsSceneReady) return; // Retried on the next SceneCommitted.
 
+        // An explicit pose (Compare window opening a live analogue at the source
+        // tile's current angle) wins over the mugshot framing.
+        if (_vm?.InitialCameraPose is { } pose)
+        {
+            _viewer.Camera.Azimuth = pose.Azimuth;
+            _viewer.Camera.Elevation = pose.Elevation;
+            _viewer.Camera.Distance = pose.Distance;
+            _viewer.Camera.Target = new OpenTK.Mathematics.Vector3(
+                pose.TargetX, pose.TargetY, pose.TargetZ);
+            return;
+        }
+
         var cfg = _settings.InternalMugshot;
         if (cfg.CameraMode == InternalMugshotCameraMode.Manual)
         {
