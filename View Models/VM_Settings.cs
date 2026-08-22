@@ -2933,6 +2933,11 @@ Options:
             return;
         }
 
+        // An explicit batch is the user's "check again now": let stamped
+        // missing-asset mugshots re-render even if their once-per-session
+        // auto-re-render was already spent by a tile load.
+        _batchMugshotGenerator.ResetMissingAssetRerenderClaims();
+
         // Build the work list. We resolve each NPC record once up-front so we
         // can sort by NpcGroupingKey (sex → race → worn-armor → head-parts →
         // hair) inside each mod. This minimizes the number of distinct

@@ -554,6 +554,11 @@ public sealed class BatchMugshotGenerator
     /// is nothing to force: the normal path already treats a missing PNG as stale
     /// and renders it. Only the Internal renderer stamps these arrays, so Legacy
     /// PNGs answer false and keep the plain staleness behavior.</para></summary>
+    /// <summary>Pass-through to <see cref="MugshotStalenessChecker.ResetMissingAssetRerenderClaims"/>
+    /// for the explicit Generate-All batch (VM_Settings has this generator injected,
+    /// not the checker).</summary>
+    public void ResetMissingAssetRerenderClaims() => _stalenessChecker.ResetMissingAssetRerenderClaims();
+
     public bool ExistingAutoGenHasMissingAssets(FormKey npcFormKey, VM_ModSetting modSetting)
     {
         if (modSetting == null) return false;
