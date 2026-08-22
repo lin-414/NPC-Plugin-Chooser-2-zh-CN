@@ -23,6 +23,18 @@ public sealed record RandomizeIssueRow(string Issue, string Npc, string FormKey,
     /// column per entry (the window appends the columns at open, padded across rows so
     /// positional index bindings always resolve).</summary>
     public IReadOnlyList<string> CandidateFailures { get; init; } = Array.Empty<string>();
+
+    /// <summary>True when the NPC copies its appearance from a Traits template. Such rows can
+    /// swamp the table in template-heavy load orders while being the least actionable (an
+    /// unplaced recipient just keeps its template's look), so the window offers a "Show
+    /// templated NPCs" toggle over this flag. Only set on rows for NPCs the run actually
+    /// processed — out-of-load-order rows are governed by <see cref="IsUnloaded"/> alone.</summary>
+    public bool IsTemplated { get; init; }
+
+    /// <summary>True for "Base NPC not found in load order" rows: the defining plugin is
+    /// missing or disabled, so the run skipped the NPC entirely. Toggled by the window's
+    /// "Show unloaded NPCs" checkbox.</summary>
+    public bool IsUnloaded { get; init; }
 }
 
 /// <summary>
@@ -43,9 +55,21 @@ public sealed class VM_RandomizeResultsWindow : ReactiveObject, IDisposable
 
     [Reactive] public string FilterText { get; set; } = string.Empty;
 
+    /// <summary>Admits rows flagged <see cref="RandomizeIssueRow.IsTemplated"/>. On by default;
+    /// unticking hides the templated bulk so the more fixable rows surface.</summary>
+    [Reactive] public bool ShowTemplatedNpcs { get; set; } = true;
+
+    /// <summary>Admits rows flagged <see cref="RandomizeIssueRow.IsUnloaded"/>. On by default;
+    /// unticking hides the NPCs whose defining plugin is missing or disabled.</summary>
+    [Reactive] public bool ShowUnloadedNpcs { get; set; } = true;
+
     public string SummaryText { get; }
     public string NotesText { get; }
     public bool HasNotes { get; }
+
+    // Each toggle only shows when it has work to do.
+    public bool HasTemplatedRows { get; }
+    public bool HasUnloadedRows { get; }
 
     /// <summary>The widest row's candidate-failure count — how many "Candidate N" columns the
     /// window appends to the grid.</summary>
@@ -79,11 +103,20 @@ public sealed class VM_RandomizeResultsWindow : ReactiveObject, IDisposable
             ? string.Join(Environment.NewLine + Environment.NewLine, notes)
             : string.Empty;
         HasNotes = NotesText.Length > 0;
+        HasTemplatedRows = _rows.Any(r => r.IsTemplated);
+        HasUnloadedRows = _rows.Any(r => r.IsUnloaded);
 
         ApplyFilter();
 
         this.WhenAnyValue(x => x.FilterText)
             .Throttle(TimeSpan.FromMilliseconds(150), RxApp.MainThreadScheduler)
+            .Subscribe(_ => ApplyFilter())
+            .DisposeWith(_disposables);
+
+        // The toggles apply immediately (no throttle — they are discrete clicks).
+        this.WhenAnyValue(x => x.ShowTemplatedNpcs, x => x.ShowUnloadedNpcs)
+            .Skip(1)
+            .ObserveOn(RxApp.MainThreadScheduler)
             .Subscribe(_ => ApplyFilter())
             .DisposeWith(_disposables);
 
@@ -94,6 +127,8 @@ public sealed class VM_RandomizeResultsWindow : ReactiveObject, IDisposable
     {
         FilteredRows.Clear();
         IEnumerable<RandomizeIssueRow> query = _rows;
+        if (!ShowTemplatedNpcs) query = query.Where(r => !r.IsTemplated);
+        if (!ShowUnloadedNpcs) query = query.Where(r => !r.IsUnloaded);
         var s = FilterText?.Trim();
         if (!string.IsNullOrEmpty(s))
         {

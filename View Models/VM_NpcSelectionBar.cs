@@ -1930,7 +1930,7 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         var rng = new Random();
         int successCount = 0;
         int totalAffectedCount = 0;
-        var fullyExhausted = new List<(string Npc, string FormKey, string Detail, IReadOnlyList<string> Failures)>();
+        var fullyExhausted = new List<(string Npc, string FormKey, string Detail, IReadOnlyList<string> Failures, bool IsTemplated)>();
         int inheritedTemplateCount = 0;
         int clearedCount = 0;
         var processedNpcs = new HashSet<FormKey>();
@@ -2198,7 +2198,7 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                                     "since no valid appearance could be selected from the options.";
                             }
                             fullyExhausted.Add((npcVM.DisplayName, npcVM.NpcFormKeyString, exhaustedDetail,
-                                candidateFailures));
+                                candidateFailures, npcVM.WinningOverrideHasTemplate));
                         }
                     }
                 }
@@ -2242,11 +2242,12 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         // load-order scale. The Issue strings align with the pre-run Validator's wording where
         // the classes coincide.
         var issueRows = new List<RandomizeIssueRow>();
-        foreach (var (npc, formKey, detail, failures) in fullyExhausted)
+        foreach (var (npc, formKey, detail, failures, isTemplated) in fullyExhausted)
         {
             issueRows.Add(new RandomizeIssueRow("No candidate passed validation", npc, formKey, detail)
             {
                 CandidateFailures = failures,
+                IsTemplated = isTemplated,
             });
         }
         foreach (var skipped in skippedOutOfLoadOrder)
@@ -2256,7 +2257,13 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                 skipped.DisplayName, skipped.NpcFormKeyString,
                 string.IsNullOrEmpty(existingMod)
                     ? string.Empty
-                    : $"keeps its existing selection '{existingMod}'"));
+                    : $"keeps its existing selection '{existingMod}'")
+            {
+                // Not also flagged IsTemplated: these NPCs were never in the run, and an
+                // unresolvable record can't be re-checked anyway — the unloaded toggle
+                // alone governs them.
+                IsUnloaded = true,
+            });
         }
 
         if (issueRows.Count > 0)

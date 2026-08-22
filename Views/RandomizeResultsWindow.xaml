@@ -48,12 +48,25 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0" Text="Filter:" VerticalAlignment="Center" Margin="0,0,6,0"/>
             <TextBox Grid.Column="1"
                      Text="{Binding FilterText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                      VerticalContentAlignment="Center"
                      ToolTip="Filter rows by any column"/>
+            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                <CheckBox Content="Show templated NPCs"
+                          IsChecked="{Binding ShowTemplatedNpcs, Mode=TwoWay}"
+                          VerticalAlignment="Center" Margin="12,0,0,0"
+                          Visibility="{Binding HasTemplatedRows, Converter={StaticResource BooleanToVisibilityConverter}}"
+                          ToolTip="Templated NPCs copy their appearance from another NPC, so an unplaced one simply keeps its template's look. Untick to hide their rows and surface the NPCs with more fixable issues."/>
+                <CheckBox Content="Show unloaded NPCs"
+                          IsChecked="{Binding ShowUnloadedNpcs, Mode=TwoWay}"
+                          VerticalAlignment="Center" Margin="12,0,0,0"
+                          Visibility="{Binding HasUnloadedRows, Converter={StaticResource BooleanToVisibilityConverter}}"
+                          ToolTip="Unloaded NPCs ('Base NPC not found in load order') have their defining plugin missing or disabled, so the run skipped them. Untick to hide their rows."/>
+            </StackPanel>
         </Grid>
 
         <!-- One row per affected NPC, sortable by any column. Cell selection + ExcludeHeader:
