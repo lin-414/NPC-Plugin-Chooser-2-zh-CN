@@ -33,7 +33,14 @@ public class VM_ModIssueEntry : ReactiveObject
     public int TotalIssueCount { get; }
     public int AffectedNpcCount { get; }
     public IReadOnlyDictionary<ModIssueType, int> CountsByType { get; }
-    public IReadOnlyList<string> CountsByTypeDisplay { get; }
+
+    /// <summary>One per-type count chip on the entry's left-panel row. Label is the
+    /// rendered "Display name: N" text; Type is what makes the chip clickable — it
+    /// feeds VM_ModIssues.ToggleIssueTypeFilterCommand and the chip's active-filter
+    /// highlight.</summary>
+    public sealed record IssueTypeCount(ModIssueType Type, string Label);
+
+    public IReadOnlyList<IssueTypeCount> CountsByTypeDisplay { get; }
     public string SummaryText { get; }
     public string ScanTimeText { get; }
 
@@ -70,7 +77,7 @@ public class VM_ModIssueEntry : ReactiveObject
             .ToDictionary(g => g.Key, g => g.Count());
         CountsByTypeDisplay = CountsByType
             .OrderByDescending(kv => kv.Value)
-            .Select(kv => $"{GetIssueTypeDisplayName(kv.Key)}: {kv.Value}")
+            .Select(kv => new IssueTypeCount(kv.Key, $"{GetIssueTypeDisplayName(kv.Key)}: {kv.Value}"))
             .ToList();
 
         SummaryText = ModLevelIssues.Any(i => i.Type == ModIssueType.ModNotInstalled)

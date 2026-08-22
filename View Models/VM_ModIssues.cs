@@ -151,6 +151,12 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
     public ReactiveCommand<Unit, Unit> ExportCsvCommand { get; }
     public ReactiveCommand<Unit, Unit> CancelMugshotLoadCommand { get; }
 
+    /// <summary>Chip-click shortcut for <see cref="SelectedIssueTypeFilter"/>: the
+    /// per-type count chips on each mod entry toggle the SAME filter the Issue Type
+    /// ComboBox drives (clicking the active type's chip clears back to "All"), so
+    /// the two controls can never disagree.</summary>
+    public ReactiveCommand<ModIssueType, Unit> ToggleIssueTypeFilterCommand { get; }
+
     // --- Right panel (mugshots) ---
     public ObservableCollection<VM_ModsMenuMugshot> CurrentModNpcMugshots { get; } = new();
     [Reactive] public bool IsLoadingMugshots { get; private set; }
@@ -259,6 +265,9 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
             .Select(t => new IssueTypeFilterOption(VM_ModIssueEntry.GetIssueTypeDisplayName(t), t)));
         AvailableIssueTypeFilters = filterOptions;
         SelectedIssueTypeFilter = filterOptions[0];
+
+        ToggleIssueTypeFilterCommand = ReactiveCommand.Create<ModIssueType>(type =>
+            SelectedIssueTypeFilter = ResolveToggledFilter(AvailableIssueTypeFilters, SelectedIssueTypeFilter, type));
 
         RefreshScanTargetNames();
         RebuildScanTargetOptions();
@@ -532,6 +541,20 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
     /// mod grades clean.</summary>
     public sealed record PluginSwitchProposal(string ModDisplayName, FormKey NpcFormKey,
         string NpcDisplayName, string CurrentPluginFileName, string TargetPluginFileName);
+
+    /// <summary>The chip-click toggle rule for the issue-type filter: clicking the
+    /// currently-active type clears back to "All issue types" (the list's first
+    /// option); any other type selects its option. Always returns an instance FROM
+    /// <paramref name="available"/> — the ComboBox matches SelectedItem by
+    /// reference, so minting a fresh option here would blank it (the
+    /// null-SelectedValue trap the option list exists to avoid). Internal for tests.</summary>
+    internal static IssueTypeFilterOption ResolveToggledFilter(
+        IReadOnlyList<IssueTypeFilterOption> available,
+        IssueTypeFilterOption? current,
+        ModIssueType clicked)
+        => current?.Value == clicked
+            ? available[0]
+            : available.FirstOrDefault(o => o.Value == clicked) ?? available[0];
 
     /// <summary>Collects switch proposals from one scan run's results. Only
     /// Issue-severity dark-face rows count (traits/ghost-demoted Notes don't nag),

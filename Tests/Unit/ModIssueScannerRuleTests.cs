@@ -780,6 +780,25 @@ public class ModIssueScannerRuleTests
     }
 
     [Fact]
+    public void ResolveToggledFilter_SelectsClickedType_ClearsOnSecondClick()
+    {
+        var all = new VM_ModIssues.IssueTypeFilterOption("All issue types", null);
+        var oos = new VM_ModIssues.IssueTypeFilterOption("Out-of-scope asset", ModIssueType.OutOfScopeAsset);
+        var tex = new VM_ModIssues.IssueTypeFilterOption("Missing texture", ModIssueType.MissingNifTexture);
+        var available = new List<VM_ModIssues.IssueTypeFilterOption> { all, oos, tex };
+
+        // Same INSTANCE from the available list every time — the ComboBox matches
+        // SelectedItem by reference, so a minted equal option would blank it.
+        Assert.Same(oos, VM_ModIssues.ResolveToggledFilter(available, all, ModIssueType.OutOfScopeAsset));
+        // Clicking the active chip again clears back to "All".
+        Assert.Same(all, VM_ModIssues.ResolveToggledFilter(available, oos, ModIssueType.OutOfScopeAsset));
+        // Clicking another chip while one is active switches directly.
+        Assert.Same(tex, VM_ModIssues.ResolveToggledFilter(available, oos, ModIssueType.MissingNifTexture));
+        // Defensive: a type with no matching option falls back to "All".
+        Assert.Same(all, VM_ModIssues.ResolveToggledFilter(available, null, ModIssueType.DarkFaceMismatch));
+    }
+
+    [Fact]
     public void ComposeMissingAssetBadge_DropsMetadataLinesTheScanAlreadyLists()
     {
         var covered = new HashSet<string>(System.StringComparer.OrdinalIgnoreCase)

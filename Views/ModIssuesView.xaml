@@ -18,6 +18,7 @@
         <local:PercentageSizingConverter x:Key="PercentageSizingConverter"/>
         <local:ModKeyToStringConverter x:Key="ModKeyToStringConverter"/>
         <local:AreModKeysEqualMultiConverter x:Key="AreModKeysEqualMultiConverter"/>
+        <local:AreEqualMultiConverter x:Key="AreEqualConverter"/>
     </UserControl.Resources>
 
     <Grid Margin="5">
@@ -182,6 +183,10 @@
                                                 ToolTip="Show this mod in the Mods tab"/>
                                     </Grid>
                                     <TextBlock Text="{Binding SummaryText}" FontSize="11" Margin="0,2,0,0"/>
+                                    <!-- Per-type count chips double as filter toggles: clicking one
+                                         drives the SAME SelectedIssueTypeFilter the Issue Type
+                                         ComboBox binds (click the active chip again to clear), and
+                                         the chip of the active type lights up on every entry. -->
                                     <ItemsControl ItemsSource="{Binding CountsByTypeDisplay}" Margin="0,2,0,0">
                                         <ItemsControl.ItemsPanel>
                                             <ItemsPanelTemplate>
@@ -190,11 +195,40 @@
                                         </ItemsControl.ItemsPanel>
                                         <ItemsControl.ItemTemplate>
                                             <DataTemplate>
-                                                <Border Background="{DynamicResource MugshotCaptionBackground}"
-                                                        CornerRadius="7" Padding="6,1" Margin="0,1,4,1">
-                                                    <TextBlock Text="{Binding}" FontSize="10"
-                                                               Foreground="{DynamicResource MugshotCaptionForeground}"/>
-                                                </Border>
+                                                <Button Command="{Binding DataContext.ToggleIssueTypeFilterCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                                        CommandParameter="{Binding Type}"
+                                                        Cursor="Hand" Margin="0,1,4,1"
+                                                        ToolTip="Show only this issue type (click again to show all)">
+                                                    <Button.Template>
+                                                        <ControlTemplate TargetType="Button">
+                                                            <Border x:Name="Pill" Background="{DynamicResource MugshotCaptionBackground}"
+                                                                    BorderBrush="Transparent" BorderThickness="1"
+                                                                    CornerRadius="7" Padding="6,1">
+                                                                <TextBlock x:Name="PillText" Text="{Binding Label}" FontSize="10"
+                                                                           Foreground="{DynamicResource MugshotCaptionForeground}"/>
+                                                            </Border>
+                                                            <ControlTemplate.Triggers>
+                                                                <Trigger Property="IsMouseOver" Value="True">
+                                                                    <Setter TargetName="Pill" Property="BorderBrush"
+                                                                            Value="{DynamicResource MugshotCaptionForeground}"/>
+                                                                </Trigger>
+                                                                <!-- Active-filter highlight: this chip's type equals the
+                                                                     VM's current filter selection. -->
+                                                                <DataTrigger Value="True">
+                                                                    <DataTrigger.Binding>
+                                                                        <MultiBinding Converter="{StaticResource AreEqualConverter}">
+                                                                            <Binding Path="Type"/>
+                                                                            <Binding Path="DataContext.SelectedIssueTypeFilter.Value"
+                                                                                     RelativeSource="{RelativeSource AncestorType=ListBox}"/>
+                                                                        </MultiBinding>
+                                                                    </DataTrigger.Binding>
+                                                                    <Setter TargetName="Pill" Property="Background" Value="DodgerBlue"/>
+                                                                    <Setter TargetName="PillText" Property="Foreground" Value="White"/>
+                                                                </DataTrigger>
+                                                            </ControlTemplate.Triggers>
+                                                        </ControlTemplate>
+                                                    </Button.Template>
+                                                </Button>
                                             </DataTemplate>
                                         </ItemsControl.ItemTemplate>
                                     </ItemsControl>
