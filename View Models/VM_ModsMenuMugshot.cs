@@ -79,12 +79,53 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
     private readonly SolidColorBrush _selectedBrush = new(Colors.LimeGreen);
     private readonly SolidColorBrush _deselectedBrush = new(Colors.Gray);
 
-    public int OriginalPixelWidth { get; set; }
-    public int OriginalPixelHeight { get; set; }
-    public double OriginalDipWidth { get; set; }
-    public double OriginalDipHeight { get; set; }
-    public double OriginalDipDiagonal { get; set; }
+    // Backed rather than auto so a LIVE tile reports the mugshot OUTPUT
+    // dimensions to the packer regardless of what any bitmap load stored —
+    // mirrors VM_NpcsMenuMugshot; see the comment there.
+    private int _originalPixelWidth;
+    private int _originalPixelHeight;
+    private double _originalDipWidth;
+    private double _originalDipHeight;
+    private double _originalDipDiagonal;
+    private int LiveTileOutputWidth => Math.Max(1, _settings.InternalMugshot.OutputWidth);
+    private int LiveTileOutputHeight => Math.Max(1, _settings.InternalMugshot.OutputHeight);
+    public int OriginalPixelWidth
+    {
+        get => IsLiveTile ? LiveTileOutputWidth : _originalPixelWidth;
+        set => _originalPixelWidth = value;
+    }
+    public int OriginalPixelHeight
+    {
+        get => IsLiveTile ? LiveTileOutputHeight : _originalPixelHeight;
+        set => _originalPixelHeight = value;
+    }
+    public double OriginalDipWidth
+    {
+        get => IsLiveTile ? LiveTileOutputWidth : _originalDipWidth;
+        set => _originalDipWidth = value;
+    }
+    public double OriginalDipHeight
+    {
+        get => IsLiveTile ? LiveTileOutputHeight : _originalDipHeight;
+        set => _originalDipHeight = value;
+    }
+    public double OriginalDipDiagonal
+    {
+        get => IsLiveTile
+            ? Math.Sqrt((double)LiveTileOutputWidth * LiveTileOutputWidth
+                        + (double)LiveTileOutputHeight * LiveTileOutputHeight)
+            : _originalDipDiagonal;
+        set => _originalDipDiagonal = value;
+    }
     [Reactive] public ImageSource? MugshotSource { get; set; }
+
+    // --- Live Tile state (mirrors VM_NpcsMenuMugshot; in the Mods menu the
+    // NPC is its own appearance target, so the persisted key's source NPC
+    // equals NpcFormKey — which makes a tile made live here also live on the
+    // same NPC/mod pair in the NPCs menu, and vice versa). ---
+    [Reactive] public bool IsLiveTile { get; private set; }
+    [Reactive] public VM_InternalMugshotPreview? LiveTilePreview { get; private set; }
+    public bool CanBeLiveTile => !_parentVMModSetting.IsMugshotOnlyEntry && !NpcFormKey.IsNull;
 
     public bool IsAmbiguousSource { get; }
     public ObservableCollection<ModKey> AvailableSourcePlugins { get; } = new();
@@ -129,6 +170,7 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
 
     public ReactiveCommand<Unit, Unit> ToggleFullScreenCommand { get; }
     public ReactiveCommand<Unit, Unit> Show3DPreviewCommand { get; }
+    public ReactiveCommand<Unit, Unit> ToggleLiveTileCommand { get; }
     public ReactiveCommand<Unit, Unit> JumpToNpcCommand { get; }
     public ReactiveCommand<ModKey, Unit> SetNpcSourcePluginCommand { get; }
     public ReactiveCommand<Unit, Unit> SelectSameSourcePluginWherePossibleCommand { get; }
@@ -298,6 +340,13 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
             && !npcFormKey.IsNull);
         Show3DPreviewCommand =
             ReactiveCommand.Create(Show3DPreview, canShow3DPreview).DisposeWith(_disposables);
+
+        // Live tile: same eligibility as the 3D preview.
+        ToggleLiveTileCommand = ReactiveCommand.Create(() =>
+        {
+            if (IsLiveTile) DeactivateLiveTile();
+            else ActivateLiveTile();
+        }, canShow3DPreview).DisposeWith(_disposables);
 
         JumpToNpcCommand = ReactiveCommand.Create(JumpToNpc).DisposeWith(_disposables);
 
@@ -604,6 +653,62 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
             ScrollableMessageBox.ShowError(
                 $"Failed to open 3D preview:\n{ExceptionLogger.GetExceptionStack(ex)}");
         }
+    }
+
+    // -------- Live Tile activation / deactivation (mirrors VM_NpcsMenuMugshot;
+    // see the comments there for the GL-teardown ordering rationale and for why
+    // live-tile state is deliberately transient — no persistence, forgotten on
+    // mod switch and app restart) --------
+
+    public void ActivateLiveTile()
+    {
+        if (LiveTilePreview != null) return;
+        if (!CanBeLiveTile) return;
+        try
+        {
+            var inner = _internalPreviewFactory();
+            inner.PersistAttireToggles = false;
+            var modSetting = _parentVMModSetting.SaveToModel();
+
+            LiveTilePreview = inner;
+            IsLiveTile = true;
+            _parentVMMaster.RequestMugshotResize();
+
+            _ = LoadLiveTileAsync(inner, modSetting);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine(
+                $"ActivateLiveTile failed for {NpcDisplayName}: {ExceptionLogger.GetExceptionStack(ex)}");
+            DeactivateLiveTile();
+        }
+    }
+
+    private async Task LoadLiveTileAsync(VM_InternalMugshotPreview inner, ModSetting modSetting)
+    {
+        try
+        {
+            await inner.LoadAsync(NpcFormKey, modSetting);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine(
+                $"Live tile LoadAsync failed for {NpcDisplayName}: {ExceptionLogger.GetExceptionStack(ex)}");
+        }
+    }
+
+    public void DeactivateLiveTile()
+    {
+        var preview = LiveTilePreview;
+        if (preview == null && !IsLiveTile) return;
+
+        IsLiveTile = false;
+        if (preview != null && !preview.RequestViewShutdown())
+        {
+            preview.Dispose();
+        }
+        LiveTilePreview = null;
+        _parentVMMaster.RequestMugshotResize();
     }
 
     private void ToggleFavorite()
@@ -1451,6 +1556,11 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
 
     public void Dispose()
     {
+        // Tear down a live viewport with its own GL context current (via the
+        // view's ViewShutdownRequested handler) before the tile dies — mods
+        // tiles are disposed on every mod switch. Live-tile state is
+        // transient by design: a fresh tile set starts static.
+        DeactivateLiveTile();
         _disposables.Dispose();
     }
 }

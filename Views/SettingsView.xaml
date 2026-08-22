@@ -763,6 +763,13 @@
                         </ListBox.ItemTemplate>
                     </ListBox>
 
+                    <CheckBox Content="Enable Live Tiles on Selection"
+                              IsChecked="{Binding EnableLiveTilesOnSelection, Mode=TwoWay}"
+                              Margin="0,0,0,2"
+                              ToolTip="Allows the 'Live Tile' mugshot source above: when NPC selection reaches it, the tile becomes an embedded 3D viewport rendered on the spot instead of a static image. Costs a render per tile each time an NPC is selected. Individual tiles can always be switched via right-click &gt; Make Live Tile, regardless of this setting."/>
+                    <TextBlock Text="Un-greys the 'Live Tile' source above. Place it first to always get live 3D tiles, or last as a fallback when no image exists."
+                               FontSize="10" Foreground="{DynamicResource HintForeground}" Margin="0,0,0,10"/>
+
                     <CheckBox Content="Use FaceFinder API for missing mugshots"
                               IsChecked="{Binding UseFaceFinderFallback, Mode=TwoWay}"
                               Margin="0,0,0,5"/>

@@ -243,7 +243,8 @@ That’s why you’ll usually see a **mix of languages** in the list, as in the 
 “Mugshots” are the face preview images you click on in the NPCs tab. N.P.C.2 can draw them from up to three sources, and this section controls all of them.
 
 * **Mugshots Folder**: The folder containing one subfolder of preview images per mod (the same layout EasyNPC uses).
-* **Mugshot Source Priority**: A drag-to-reorder list of the three sources — **Downloaded Mugshots**, **FaceFinder**, and **Auto-Generation**. When more than one source has an image for the same mod/NPC, the one higher in this list wins. Disabled sources are skipped.
+* **Mugshot Source Priority**: A drag-to-reorder list of the four sources — **Downloaded Mugshots**, **FaceFinder**, **Auto-Generation**, and **Live Tile**. When more than one source has an image for the same mod/NPC, the one higher in this list wins. Disabled sources are skipped.
+* **Enable Live Tiles on Selection**: Un-greys the **Live Tile** source above. When NPC selection reaches that source, the tile displays as an embedded miniature 3D viewport (rendered on the spot) instead of a static image — put Live Tile first to always get live 3D tiles, or last as a final fallback when no image exists anywhere. Each live viewport costs a render when the NPC is selected. Independent of this setting, you can always convert individual tiles by right-clicking them and choosing **Make Live Tile** (see [Live Tiles](#live-tiles)).
 * **Use FaceFinder API for missing mugshots** / **Auto-Generate missing mugshots**: Enable the two generated sources (detailed below).
 * **Normalize Image Dimensions**: Shows every mugshot at the same size and aspect ratio (cropping to center if needed). Uncheck it to show images at their raw resolution.
 * **Max # Mugshots To Fit On Screen**: When you select an NPC, N.P.C.2 shrinks the mugshots until up to this many fit on screen. Higher = more on screen but smaller and slower to load. You can always zoom afterward.
@@ -405,7 +406,7 @@ Tools for moving appearance choices between N.P.C.2 and EasyNPC. (EasyNPC select
 
 ![Load Order Import](docs/Screenshots/Settings/Load_Order_Import_Section.png)
 
-* **Import Choices from Load Order Exclusions**: When you use **Get from Load Order** in the NPCs tab to auto-derive your appearance choices, any plugins checked here are skipped as winning overrides — N.P.C.2 picks the next override down the conflict chain instead. (By default the base masters are checked so they aren’t treated as appearance mods.)
+* **Import Choices from Load Order Exclusions**: When you use **Match Load Order** in the NPCs tab to auto-derive your appearance choices, any plugins checked here are skipped as winning overrides — N.P.C.2 picks the next override down the conflict chain instead. (By default the base masters are checked so they aren’t treated as appearance mods.)
 
 
 ### Mod Import Settings
@@ -488,7 +489,7 @@ Visibility toggles for the NPC list:
 
 Bulk actions on your whole set of choices:
 
-* **Get from Load Order**: Scans your load order to figure out which mods you’re currently using as appearance mods, and selects them automatically (respecting the Load Order Import exclusions in Settings).
+* **Match Load Order**: Scans your load order to figure out which mods you’re currently using as appearance mods, and selects them automatically (respecting the Load Order Import exclusions in Settings).
 * **Randomize**: Opens the [Randomize window](#randomizing-appearances) to assign random appearances.
 * **Export** / **Import**: Back up your selections to a `.json` file and restore them later. (This file is N.P.C.2-specific — it is *not* cross-compatible with EasyNPC; use the Settings tab for that.)
 * **Clear**: Removes all selections so you can start fresh.
@@ -506,7 +507,8 @@ These act on the mugshots you’ve check-marked (using the checkbox in each tile
 ![Full-screen comparison](docs/Screenshots/NPCs/Multiple_Mugshot_Fulscreen_Comparison.png)
 
 * **Hide/Unhide**: Hides the check-marked mugshots (or restores them if you’re viewing hidden mods). Hidden mugshots stay out of your way until you want them back.
-* **Deselect all**: Clears all the check marks.
+* **Deselect**: Clears all the check marks.
+* **3D / 2D**: Toggles [Live Tile](#live-tiles) mode for the check-marked mugshots. The label shows the state the button will apply: **3D** when the checked tiles are all (or mostly) static mugshots, **2D** when they are all (or mostly) live tiles; a 50/50 mix defaults to **3D**.
 
 ### Submenus
 
@@ -599,6 +601,7 @@ Right-clicking a mugshot opens a rich context menu:
 * **Jump to Mod** — switch to the Mods tab focused on this mod.
 * **Show Full Image (Ctrl+RClick)** — full-screen view of the mugshot.
 * **Show 3D Preview (Ctrl+Shift+RClick)** — opens the interactive [3D preview](#3d-preview).
+* **Make Live Tile / Make Mugshot** — swaps this tile between a static image and an embedded miniature 3D viewport, right in place (see [Live Tiles](#live-tiles)).
 * **Generate Mugshot** — renders *this one* appearance with the built-in 3D renderer, right now. It works whether or not **Auto-Generate missing mugshots** is switched on, so you don't have to detour through Settings to render a single NPC and then switch it off again. It always re-renders, even if a render already exists, which makes it the right button after you've fixed a mod's folders. (Hidden for mods you don't have installed — there's no data to render.)
 * **Delete Mugshot** — deletes the image the tile is *currently showing*, and says which of the three sources that is (Downloaded / FaceFinder / Auto-Generated) so you can't delete the wrong one by accident. The tile then falls back to whatever ranks next, or to the placeholder. Empty folders left behind are cleaned up, and N.P.C.2 asks first — a **downloaded** mugshot is the one kind it can't recreate for you.
 * **Share with NPC** — make this appearance available to a *different* NPC (see below).
@@ -697,6 +700,19 @@ Two gallery actions work by dragging mugshots around:
 ![Dragging a mugshot onto a placeholder](docs/Screenshots/NPCs/DragDrop_Mugshot_Onto_Placeholder.gif)
 
 **Drag a mugshot onto another mugshot** — for every NPC where the *drop-target* mod is currently selected, swaps the selection to the *dropped* mod (wherever it provides that NPC) — i.e. the dropped mod “gives the old one the boot.”
+
+### Live Tiles
+
+Any mugshot can be turned into a **Live Tile**: a miniature 3D viewport that lives directly inside the tile's frame, in the gallery, instead of a static image. Right-click a mugshot and choose **Make Live Tile**; right-click a live tile and the same entry reads **Make Mugshot** to turn it back. The **3D / 2D** button in the *Selected Mugshots* group does the same for every check-marked tile at once. Live-tile status is deliberately *not* remembered: it survives switching to another tab and back, but selecting a different NPC (or mod) or restarting the program returns every tile to a static mugshot, so you never pay a surprise re-render cost. If you *want* tiles to go live automatically, that's what **Enable Live Tiles on Selection** is for.
+
+A live tile is a deliberately simple viewport — view only:
+
+* **Left-drag** rotates, **middle-drag** moves, and the **mouse wheel** zooms. A plain click still selects the mod, and the right-click context menu still works.
+* Its initial framing matches the auto-generated mugshot exactly (same algorithm and camera parameters, including your Auto/Manual camera settings), so a tile doesn't visibly "jump" when it goes live.
+* The advanced 3D-preview machinery (lighting/render panels, wig/antler selectors, outfit toggles) is not available here — use **Show 3D Preview** for that.
+* Overlay badge icons are hidden while a tile is live, so nothing sits on top of the render; the mod-name caption and compare checkbox remain.
+
+Each live tile keeps its own GL viewport and renders continuously, so treat them as a premium display: a handful is cheap, but turning a large gallery live will cost VRAM and frame time. To have tiles go live automatically when you select an NPC, enable **Enable Live Tiles on Selection** in [Mugshot Settings](#mugshot-settings) and position the **Live Tile** source in the priority list.
 
 ### NPC Description
 

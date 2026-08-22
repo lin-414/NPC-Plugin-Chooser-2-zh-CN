@@ -6,4 +6,5 @@ public enum MugshotSourceType
     DownloadedMugshots,
     FaceFinder,
     AutoGeneration,
+    LiveTile,
 }

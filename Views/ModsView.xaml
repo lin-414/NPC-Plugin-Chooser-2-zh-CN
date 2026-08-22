@@ -973,11 +973,21 @@
                                                         <DataTrigger Binding="{Binding HasMugshot}" Value="False">
                                                             <Setter Property="Opacity" Value="0.3"/>
                                                         </DataTrigger>
+                                                        <DataTrigger Binding="{Binding IsLiveTile}" Value="True">
+                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                        </DataTrigger>
                                                     </Style.Triggers>
                                                 </Style>
                                             </Image.Style>
                                         </Image>
-                                        
+
+                                        <!-- Live Tile: embedded view-only 3D viewport replacing the
+                                             static image (see NpcsView for the twin). DataContext is
+                                             the tile's per-instance preview VM — null while static,
+                                             so the collapsed control never starts GL. -->
+                                        <local:UC_LiveTileViewport DataContext="{Binding LiveTilePreview}"
+                                                                   Visibility="{Binding DataContext.IsLiveTile, RelativeSource={RelativeSource AncestorType=Border}, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+
                                         <Image x:Name="LoadingDragonImage"
                                                Source="/NPC Plugin Chooser 2;component/Resources/RedDragon.png"
                                                Visibility="{Binding IsLoading, Converter={StaticResource BooleanToVisibilityConverter}}"
@@ -1027,6 +1037,13 @@
                                             <TextBlock Text="{Binding NpcDisplayName}" Foreground="{DynamicResource MugshotCaptionForeground}" FontSize="10"
                                                        TextTrimming="CharacterEllipsis" HorizontalAlignment="Center"/>
                                         </Border>
+
+                                        <!-- Badge overlay layer: hidden all at once in Live Tile
+                                             mode (the viewport stays clean; the caption remains).
+                                             The wrapper stretches over the whole tile, so the
+                                             AncestorType=Grid width bindings inside keep resolving
+                                             to the same size as before. -->
+                                        <Grid Visibility="{Binding IsLiveTile, Converter={StaticResource BooleanToVisibilityConverter}, ConverterParameter=Invert}">
 
                                         <Grid HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0 0 0 10"
                                               Visibility="{Binding IsAmbiguousSource, Converter={StaticResource BooleanToVisibilityConverter}}"
@@ -1092,6 +1109,8 @@
                                             </Viewbox>
                                         </Grid>
 
+                                        </Grid> <!-- End badge overlay layer (hidden in Live Tile mode) -->
+
                                     </Grid>
                                     
                                     <Border.ContextMenu>
@@ -1099,6 +1118,19 @@
                                                <MenuItem  Header="Jump to NPC in List" Command="{Binding JumpToNpcCommand}"/> 
                                                <MenuItem Header="View Full Screen (Ctrl+RClick)" Command="{Binding ToggleFullScreenCommand}"/>
                                                <MenuItem Header="Show 3D Preview (Ctrl+Shift+RClick)" Command="{Binding Show3DPreviewCommand}"/>
+                                               <MenuItem Command="{Binding ToggleLiveTileCommand}"
+                                                         ToolTip="Live Tile turns this mugshot into a miniature 3D viewport (left-drag to rotate, middle-drag to move, wheel to zoom), framed like the auto-generated mugshot. Make Mugshot turns it back into a static image.">
+                                                   <MenuItem.Style>
+                                                       <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
+                                                           <Setter Property="Header" Value="Make Live Tile"/>
+                                                           <Style.Triggers>
+                                                               <DataTrigger Binding="{Binding IsLiveTile}" Value="True">
+                                                                   <Setter Property="Header" Value="Make Mugshot"/>
+                                                               </DataTrigger>
+                                                           </Style.Triggers>
+                                                       </Style>
+                                                   </MenuItem.Style>
+                                               </MenuItem>
                                                <Separator />
                                                <MenuItem Command="{Binding AddToFavoritesCommand}"> 
                                                    <MenuItem.Style> 

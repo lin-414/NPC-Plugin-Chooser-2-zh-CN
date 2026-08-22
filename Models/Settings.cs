@@ -711,7 +711,14 @@ public class Settings
     [JsonProperty(DefaultValueHandling = DefaultValueHandling.Populate), DefaultValue(false)]
     public bool UsePortraitCreatorFallback { get; set; } = false;
 
-    // Order in which the three mugshot sources are tried at resolution time.
+    // Gates the LiveTile entry in MugshotSourcePriority: when true, selecting an
+    // NPC may resolve a tile's display to an embedded live 3D viewport (rendered
+    // on demand) instead of a static image. Does NOT gate the per-tile
+    // "Make Live Tile" context-menu toggle, which is always available.
+    [JsonProperty(DefaultValueHandling = DefaultValueHandling.Populate), DefaultValue(false)]
+    public bool EnableLiveTilesOnSelection { get; set; } = false;
+
+    // Order in which the mugshot sources are tried at resolution time.
     // The list is user-rearrangeable via a drag-and-drop widget in the settings
     // menu. Disabled sources (UseFaceFinderFallback off / UsePortraitCreatorFallback
     // off / no curated MugshotsFolder) are skipped in-place rather than reordered,

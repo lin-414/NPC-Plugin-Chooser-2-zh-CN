@@ -209,7 +209,7 @@
                           Padding="{Binding GroupAppearanceSelections.IsExpanded, Converter={StaticResource GroupPaddingConverter}}">
                     <StackPanel Orientation="Horizontal"
                                 Visibility="{Binding GroupAppearanceSelections.IsExpanded, Converter={StaticResource BooleanToVisibilityConverter}}">
-                        <Button Content="Get from Load Order" Margin="0,2,5,2" Padding="5,2" VerticalAlignment="Center"
+                        <Button Content="Match Load Order" Margin="0,2,5,2" Padding="5,2" VerticalAlignment="Center"
                                 Command="{Binding ImportChoicesFromLoadOrderCommand}" ToolTip="Automatically select appearance mods for NPCs based on your current load order and loose file overrides."/>
                         <Button Content="Randomize" Margin="0,2,5,2" Padding="5,2" VerticalAlignment="Center"
                                 Command="{Binding RandomizeChoicesCommand}" ToolTip="Open the Randomize dialog to pick random appearances for the visible or all NPCs, with options for base / shared / favorite faces and which mods are eligible as sources."/>
@@ -236,9 +236,12 @@
                                 Click="HideUnhideButton_Click"
                                 IsEnabled="{Binding CanOpenHideUnhideMenu}"
                                 ToolTip="Hide or unhide mugshots. Right-click or click for options (enabled if at least one mugshot is checked)."/>
-                        <Button Content="Deselect all" Margin="0,2,0,2" Padding="5,2" VerticalAlignment="Center"
+                        <Button Content="Deselect" Margin="0,2,5,2" Padding="5,2" VerticalAlignment="Center"
                                 Command="{Binding DeselectAllCommand}"
                                 ToolTip="Uncheck all mugshots for the current NPC (Requires 1+ selected)."/>
+                        <Button Content="{Binding LiveTileToggleLabel}" Margin="0,2,0,2" Padding="5,2" VerticalAlignment="Center"
+                                Command="{Binding ToggleLiveTilesForCheckedCommand}"
+                                ToolTip="Toggle Live Tile mode for the checked mugshots (Requires 1+ selected). 3D turns them into embedded 3D viewports; 2D turns them back into static mugshots. On a mixed selection the button applies the state shown."/>
                         </StackPanel>
                 </GroupBox>
                 
@@ -764,20 +767,31 @@
                                          <i:InvokeCommandAction Command="{Binding SelectCommand}" />
                                      </i:EventTrigger>
                                  </i:Interaction.Triggers>
-                                 <Grid Background="Black"> <!-- This Grid is the reference for CheckBox width -->
-                                     <Image Source="{Binding MugshotSource}" Stretch="UniformToFill" ToolTip="{Binding ToolTipString}"
-                                            PreviewMouseRightButtonDown="Image_PreviewMouseRightButtonDown">
+                                 <!-- PreviewMouseRightButtonDown sits on the Grid (not the Image)
+                                      so the Ctrl+RClick / Ctrl+Shift+RClick shortcuts keep working
+                                      when the Image is collapsed in Live Tile mode. -->
+                                 <Grid Background="Black"
+                                       PreviewMouseRightButtonDown="Image_PreviewMouseRightButtonDown"> <!-- This Grid is the reference for CheckBox width -->
+                                     <Image Source="{Binding MugshotSource}" Stretch="UniformToFill" ToolTip="{Binding ToolTipString}">
                                          <Image.Style>
                                              <Style TargetType="Image">
                                                  <Setter Property="Opacity" Value="1.0" />
                                                  <Style.Triggers>
                                                      <DataTrigger Binding="{Binding MugshotSource}" Value="{x:Null}"> <Setter Property="Opacity" Value="0.5"/> </DataTrigger>
                                                      <DataTrigger Binding="{Binding MugshotSource}" Value=""> <Setter Property="Opacity" Value="0.5"/> </DataTrigger>
+                                                     <DataTrigger Binding="{Binding IsLiveTile}" Value="True"> <Setter Property="Visibility" Value="Collapsed"/> </DataTrigger>
                                                  </Style.Triggers>
                                              </Style>
                                          </Image.Style>
                                      </Image>
-                                     
+
+                                     <!-- Live Tile: embedded view-only 3D viewport replacing the
+                                          static image. DataContext is the tile's per-instance
+                                          preview VM (null while the tile is a plain mugshot, so
+                                          the collapsed control never starts GL). -->
+                                     <local:UC_LiveTileViewport DataContext="{Binding LiveTilePreview}"
+                                                                Visibility="{Binding DataContext.IsLiveTile, RelativeSource={RelativeSource AncestorType=Border}, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+
                                      <Image x:Name="LoadingDragonImage"
                                         Source="/NPC Plugin Chooser 2;component/Resources/RedDragon.png"
                                         Visibility="{Binding IsLoading, Converter={StaticResource BooleanToVisibilityConverter}}"
@@ -827,6 +841,15 @@
                                                 FontSize="10" Padding="3,1"
                                                 TextTrimming="CharacterEllipsis" ToolTip="{Binding ModName}"/>
                                      
+                                     <!-- Badge overlay layer: every informational badge/indicator
+                                          lives inside this wrapper so Live Tile mode can hide them
+                                          all at once (the viewport should stay clean; the compare
+                                          checkbox and caption deliberately remain outside/visible).
+                                          The wrapper stretches over the whole tile, so the
+                                          AncestorType=Grid width bindings inside resolve to the
+                                          same size as before. -->
+                                     <Grid Visibility="{Binding IsLiveTile, Converter={StaticResource BooleanToVisibilityConverter}, ConverterParameter=Invert}">
+
                                      <!-- Top-left vertical stack: an icon row (issue-notification
                                           "!" and, beside it, the "no antlers" and "has wig" head-
                                           editing badges) on top, with the FaceGen-stats text overlay
@@ -1208,7 +1231,9 @@
                                          </Viewbox>
                                      </Grid>
 
-                                     <CheckBox x:Name="CompareCheckBox" 
+                                     </Grid> <!-- End badge overlay layer (hidden in Live Tile mode) -->
+
+                                     <CheckBox x:Name="CompareCheckBox"
                                                IsChecked="{Binding IsCheckedForCompare, Mode=TwoWay}"
                                                VerticalAlignment="Top" HorizontalAlignment="Right"
                                                Margin="0" Padding="0"
@@ -1306,6 +1331,19 @@
                                          
                                          <MenuItem Header="Show Full Image (Ctrl+RClick)" Command="{Binding ToggleFullScreenCommand}"/>
                                          <MenuItem Header="Show 3D Preview (Ctrl+Shift+RClick)" Command="{Binding Show3DPreviewCommand}"/>
+                                         <MenuItem Command="{Binding ToggleLiveTileCommand}"
+                                                   ToolTip="Live Tile turns this mugshot into a miniature 3D viewport (left-drag to rotate, middle-drag to move, wheel to zoom), framed like the auto-generated mugshot. Make Mugshot turns it back into a static image.">
+                                             <MenuItem.Style>
+                                                 <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
+                                                     <Setter Property="Header" Value="Make Live Tile"/>
+                                                     <Style.Triggers>
+                                                         <DataTrigger Binding="{Binding IsLiveTile}" Value="True">
+                                                             <Setter Property="Header" Value="Make Mugshot"/>
+                                                         </DataTrigger>
+                                                     </Style.Triggers>
+                                                 </Style>
+                                             </MenuItem.Style>
+                                         </MenuItem>
                                          <Separator/>
                                          <MenuItem Header="Generate Mugshot"
                                                    Command="{Binding GenerateMugshotCommand}"

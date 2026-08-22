@@ -102,10 +102,11 @@ public class LoadSettingsMigrationTests
     {
         WithSettingsJson("{\"SchemaVersion\": 7, \"MugshotSourcePriority\": [\"AutoGeneration\"]}", s =>
         {
-            s.MugshotSourcePriority.Should().HaveCount(3);
+            s.MugshotSourcePriority.Should().HaveCount(4);
             s.MugshotSourcePriority[0].Should().Be(MugshotSourceType.AutoGeneration, "the user's chosen first entry is preserved");
             s.MugshotSourcePriority.Should().Contain(MugshotSourceType.DownloadedMugshots)
-                .And.Contain(MugshotSourceType.FaceFinder);
+                .And.Contain(MugshotSourceType.FaceFinder)
+                .And.Contain(MugshotSourceType.LiveTile);
             s.MugshotSourcePriority.Should().NotContain(MugshotSourceType.None);
         });
     }
@@ -118,7 +119,8 @@ public class LoadSettingsMigrationTests
             s.MugshotSourcePriority.Should().Equal(
                 MugshotSourceType.DownloadedMugshots,
                 MugshotSourceType.FaceFinder,
-                MugshotSourceType.AutoGeneration);
+                MugshotSourceType.AutoGeneration,
+                MugshotSourceType.LiveTile);
         });
     }
 

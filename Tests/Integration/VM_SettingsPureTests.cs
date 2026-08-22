@@ -502,6 +502,7 @@ public class VM_SettingsPureTests
     [InlineData(MugshotSourceType.DownloadedMugshots, "Downloaded Mugshots")]
     [InlineData(MugshotSourceType.FaceFinder, "FaceFinder")]
     [InlineData(MugshotSourceType.AutoGeneration, "Auto-Generation")]
+    [InlineData(MugshotSourceType.LiveTile, "Live Tile")]
     [InlineData(MugshotSourceType.None, "None")]
     public void VM_MugshotSourcePriorityItem_DisplayNameMapping(MugshotSourceType source, string expected)
     {

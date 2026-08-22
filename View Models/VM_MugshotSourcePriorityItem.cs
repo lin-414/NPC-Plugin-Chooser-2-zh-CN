@@ -23,6 +23,7 @@ public sealed class VM_MugshotSourcePriorityItem : ReactiveObject
         MugshotSourceType.DownloadedMugshots => "Downloaded Mugshots",
         MugshotSourceType.FaceFinder         => "FaceFinder",
         MugshotSourceType.AutoGeneration     => "Auto-Generation",
+        MugshotSourceType.LiveTile           => "Live Tile",
         _                                    => source.ToString(),
     };
 }

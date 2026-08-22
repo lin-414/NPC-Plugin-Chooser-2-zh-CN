@@ -104,6 +104,10 @@ public class VM_Mods : ReactiveObject, ISearchFilterHost
     // Subject for triggering right panel image refresh
     private readonly Subject<Unit> _refreshMugshotSizesSubject = new Subject<Unit>();
     public IObservable<Unit> RefreshMugshotSizesObservable => _refreshMugshotSizesSubject.AsObservable();
+
+    /// <summary>Lets a tile request a mugshot-panel re-size/re-pack, e.g. when
+    /// it toggles Live Tile mode and its reported source dimensions change.</summary>
+    public void RequestMugshotResize() => _refreshMugshotSizesSubject.OnNext(Unit.Default);
     
     // Record for Refresh All Mods
     private record ModSettingsBackup(
@@ -692,6 +696,8 @@ public class VM_Mods : ReactiveObject, ISearchFilterHost
         var newTiles = new List<VM_ModsMenuMugshot>();
         foreach (var vm in CurrentModNpcMugshots)
         {
+            // Live tiles render themselves — no image generation applies.
+            if (vm.IsLiveTile) continue;
             if (!vm.HasMugshot && batch.Kicked.Add(vm)) newTiles.Add(vm);
         }
         if (newTiles.Count == 0)

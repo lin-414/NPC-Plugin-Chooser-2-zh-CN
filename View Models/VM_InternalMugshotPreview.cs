@@ -212,6 +212,31 @@ public class VM_InternalMugshotPreview : ReactiveObject, IDisposable
     /// </summary>
     public event Action? PreviewLoaded;
 
+    /// <summary>
+    /// Raised by <see cref="RequestViewShutdown"/> so the hosting view (a live
+    /// mugshot tile's <see cref="Views.UC_LiveTileViewport"/>) can tear down its
+    /// GL resources with its own context current before this VM is disposed.
+    /// The tile VM cannot call the view directly (MVVM), and disposing this VM
+    /// without the owning GL context current would issue GL.Delete* into
+    /// whichever sibling context happened to be current — the documented
+    /// cross-context ID-collision hazard.
+    /// </summary>
+    public event Action? ViewShutdownRequested;
+
+    /// <summary>
+    /// Asks the hosting view (if any) to run its GL teardown, which disposes
+    /// this VM as its final step. Returns false when no view ever attached —
+    /// the caller must then dispose this VM itself (safe: no view means no GL
+    /// context, so no GL objects were ever created for it).
+    /// </summary>
+    public bool RequestViewShutdown()
+    {
+        var handler = ViewShutdownRequested;
+        if (handler == null) return false;
+        handler.Invoke();
+        return true;
+    }
+
     public VM_InternalMugshotPreview(
         VM_CharacterViewer viewer,
         Settings settings,

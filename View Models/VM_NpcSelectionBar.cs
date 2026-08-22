@@ -362,12 +362,18 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
     // --- NEW: Compare/Hide/Deselect Functionality ---
     [ObservableAsProperty] public int CheckedMugshotCount { get; }
     [ObservableAsProperty] public bool CanOpenHideUnhideMenu { get; }
+    /// <summary>Label of the bulk live-tile toggle button: the TARGET state it
+    /// would apply to the checked tiles. "3D" (make live) when they are all
+    /// static or the mix is majority-static (ties included); "2D" (make
+    /// static) when the majority is already live.</summary>
+    [ObservableAsProperty] public string LiveTileToggleLabel { get; }
     public ReactiveCommand<Unit, Unit> CompareSelectedCommand { get; }
     public ReactiveCommand<Unit, Unit> HideAllSelectedCommand { get; }
     public ReactiveCommand<Unit, Unit> HideAllButSelectedCommand { get; }
     public ReactiveCommand<Unit, Unit> UnhideAllSelectedCommand { get; }
     public ReactiveCommand<Unit, Unit> UnhideAllButSelectedCommand { get; }
     public ReactiveCommand<Unit, Unit> DeselectAllCommand { get; }
+    public ReactiveCommand<Unit, Unit> ToggleLiveTilesForCheckedCommand { get; }
     // --- End NEW Compare/Hide/Deselect ---
 
     // --- NEW: Import/Export Commands ---
@@ -1226,6 +1232,37 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         DeselectAllCommand.ThrownExceptions
             .Subscribe(ex => ScrollableMessageBox.ShowError($"Error deselecting all: {ExceptionLogger.GetExceptionStack(ex)}"))
             .DisposeWith(_disposables);
+
+        // Bulk live-tile toggle over the checked tiles. The label tracks both
+        // check state and live state per tile (same CombineLatest-over-tiles
+        // shape as the checked count above).
+        this.WhenAnyValue(x => x.CurrentNpcAppearanceMods)
+            .Select(mods =>
+            {
+                if (mods == null || !mods.Any())
+                    return Observable.Return((Checked: 0, Live: 0));
+
+                var itemObservables = mods.Select(m =>
+                    m.WhenAnyValue(x => x.IsCheckedForCompare, x => x.IsLiveTile)
+                ).ToList();
+
+                return Observable.CombineLatest(itemObservables)
+                    .Select(states => (
+                        Checked: states.Count(s => s.Item1),
+                        Live: states.Count(s => s.Item1 && s.Item2)));
+            })
+            .Switch()
+            .StartWith((Checked: 0, Live: 0))
+            .Select(t => t.Live > t.Checked - t.Live ? "2D" : "3D")
+            .ObserveOn(RxApp.MainThreadScheduler)
+            .ToPropertyEx(this, x => x.LiveTileToggleLabel)
+            .DisposeWith(_disposables);
+
+        ToggleLiveTilesForCheckedCommand = ReactiveCommand
+            .Create(ExecuteToggleLiveTilesForChecked, canDeselectAll).DisposeWith(_disposables);
+        ToggleLiveTilesForCheckedCommand.ThrownExceptions
+            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error toggling live tiles: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .DisposeWith(_disposables);
         // --- End NEW Setup ---
 
         // --- NEW: Import/Export Command Setup ---
@@ -1461,6 +1498,28 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         }
 
         Debug.WriteLine("DeselectAll: All mugshot compare checkboxes cleared.");
+    }
+
+    /// <summary>Applies <see cref="LiveTileToggleLabel"/>'s state to every
+    /// checked tile: "3D" makes them all live viewports, "2D" makes them all
+    /// static mugshots. Recomputes the majority here rather than parsing the
+    /// label so the action and the button text can never disagree. Ineligible
+    /// tiles (mugshot-only entries) are skipped by ActivateLiveTile itself.</summary>
+    private void ExecuteToggleLiveTilesForChecked()
+    {
+        if (CurrentNpcAppearanceMods == null) return;
+        var checkedTiles = CurrentNpcAppearanceMods.Where(m => m.IsCheckedForCompare).ToList();
+        if (!checkedTiles.Any()) return;
+
+        int liveCount = checkedTiles.Count(m => m.IsLiveTile);
+        // Majority-live → convert all to 2D; otherwise (including 50/50) → 3D.
+        bool makeLive = liveCount <= checkedTiles.Count - liveCount;
+        foreach (var tile in checkedTiles)
+        {
+            if (makeLive) tile.ActivateLiveTile();
+            else tile.DeactivateLiveTile();
+        }
+        Debug.WriteLine($"ToggleLiveTilesForChecked: set {checkedTiles.Count} checked tiles to {(makeLive ? "3D" : "2D")}.");
     }
 
 
@@ -4389,6 +4448,8 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         foreach (var mugshotVM in CurrentNpcAppearanceMods)
         {
             if (!mugshotVM.IsVisible) { skippedInvisible++; continue; }
+            // Live tiles render themselves — no image generation applies.
+            if (mugshotVM.IsLiveTile) { skippedHasMugshot++; continue; }
             if (mugshotVM.HasMugshot) { skippedHasMugshot++; continue; }
             // Don't stack a second run on a tile whose generation is already
             // queued or executing — same-collection re-triggers only top up

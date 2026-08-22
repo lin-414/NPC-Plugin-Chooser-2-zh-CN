@@ -124,6 +124,7 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
     [Reactive] public bool CacheFaceFinderImages { get; set; } 
     [Reactive] public bool LogFaceFinderRequests { get; set; }
     [Reactive] public bool UsePortraitCreatorFallback { get; set; }
+    [Reactive] public bool EnableLiveTilesOnSelection { get; set; }
     [Reactive] public int MaxParallelPortraitRenders { get; set; }
 
     /// <summary>Ordered, user-rearrangeable list of mugshot sources tried at
@@ -693,6 +694,7 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
         LogFaceFinderRequests = _model.LogFaceFinderRequests;
         SelectedMugshotSearchModeFF = MugshotSearchMode.Fast;
         UsePortraitCreatorFallback = _model.UsePortraitCreatorFallback;
+        EnableLiveTilesOnSelection = _model.EnableLiveTilesOnSelection;
         MaxParallelPortraitRenders = _model.MaxParallelPortraitRenders;
 
         // Seed the priority-list VMs from the persisted order. LoadSettings
@@ -1049,6 +1051,17 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
             .DisposeWith(_disposables);
         this.WhenAnyValue(x => x.UsePortraitCreatorFallback).Skip(1)
             .Subscribe(b => _model.UsePortraitCreatorFallback = b).DisposeWith(_disposables);
+        this.WhenAnyValue(x => x.EnableLiveTilesOnSelection).Skip(1)
+            .Subscribe(b =>
+            {
+                _model.EnableLiveTilesOnSelection = b;
+                // A LiveTile entry in the source priority may now resolve
+                // differently for the currently displayed NPC — rebuild its tiles.
+                if (_lazyNpcSelectionBar.IsValueCreated)
+                {
+                    _lazyNpcSelectionBar.Value.RefreshCurrentNpcAppearanceSources();
+                }
+            }).DisposeWith(_disposables);
         this.WhenAnyValue(x => x.MaxParallelPortraitRenders).Skip(1)
             .Subscribe(value => _model.MaxParallelPortraitRenders = value).DisposeWith(_disposables);
 
@@ -1059,7 +1072,8 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
         this.WhenAnyValue(
                 x => x.MugshotsFolder,
                 x => x.UseFaceFinderFallback,
-                x => x.UsePortraitCreatorFallback)
+                x => x.UsePortraitCreatorFallback,
+                x => x.EnableLiveTilesOnSelection)
             .Subscribe(_ => RefreshMugshotSourceEnabledStates())
             .DisposeWith(_disposables);
 
@@ -1911,23 +1925,16 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
         // Settings.json files lack the field, deserializing as null. Empty or
         // partial lists would silently drop a source, so back-fill missing
         // entries (in default order) at the tail rather than dropping them.
-        if (loadedSettings.MugshotSourcePriority == null || loadedSettings.MugshotSourcePriority.Count == 0)
+        // Null/empty and partial lists share one path: append whatever is
+        // missing in enum (= default) order, so a fresh list comes out as
+        // Downloaded → FaceFinder → AutoGeneration → LiveTile and a partial
+        // one keeps the user's order with the absentees at the tail.
+        loadedSettings.MugshotSourcePriority ??= new List<MugshotSourceType>();
+        foreach (MugshotSourceType src in Enum.GetValues(typeof(MugshotSourceType)))
         {
-            loadedSettings.MugshotSourcePriority = new List<MugshotSourceType>
-            {
-                MugshotSourceType.DownloadedMugshots,
-                MugshotSourceType.FaceFinder,
-                MugshotSourceType.AutoGeneration,
-            };
-        }
-        else
-        {
-            foreach (MugshotSourceType src in Enum.GetValues(typeof(MugshotSourceType)))
-            {
-                if (src == MugshotSourceType.None) continue;
-                if (!loadedSettings.MugshotSourcePriority.Contains(src))
-                    loadedSettings.MugshotSourcePriority.Add(src);
-            }
+            if (src == MugshotSourceType.None) continue;
+            if (!loadedSettings.MugshotSourcePriority.Contains(src))
+                loadedSettings.MugshotSourcePriority.Add(src);
         }
 
         // Schema-version migrations. SchemaVersion's C# initializer is -1
@@ -2073,6 +2080,12 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
                     item.DisabledReason = UsePortraitCreatorFallback
                         ? string.Empty
                         : "Enable 'Auto-Generate missing mugshots' below.";
+                    break;
+                case MugshotSourceType.LiveTile:
+                    item.IsEnabled = EnableLiveTilesOnSelection;
+                    item.DisabledReason = EnableLiveTilesOnSelection
+                        ? string.Empty
+                        : "Enable 'Enable Live Tiles on Selection' below.";
                     break;
             }
         }

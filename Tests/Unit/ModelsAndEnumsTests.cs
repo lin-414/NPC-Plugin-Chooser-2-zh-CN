@@ -43,6 +43,7 @@ public class ModelsAndEnumsTests
         ((int)MugshotSourceType.DownloadedMugshots).Should().Be(1);
         ((int)MugshotSourceType.FaceFinder).Should().Be(2);
         ((int)MugshotSourceType.AutoGeneration).Should().Be(3);
+        ((int)MugshotSourceType.LiveTile).Should().Be(4);
     }
 
     [Fact]
