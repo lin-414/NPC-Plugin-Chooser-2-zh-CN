@@ -452,10 +452,6 @@
                                               Width="{Binding RelativeSource={RelativeSource AncestorType=Grid}, Path=ActualWidth, Converter={StaticResource PercentageSizingConverter}, ConverterParameter='20'}"
                                               Height="{Binding RelativeSource={RelativeSource Self}, Path=Width}">
                                             <Viewbox Stretch="Uniform">
-                                                <Viewbox.Effect>
-                                                    <DropShadowEffect Color="White" ShadowDepth="0"
-                                                                      BlurRadius="6" Opacity="0.9"/>
-                                                </Viewbox.Effect>
                                                 <Image Source="/NPC Plugin Chooser 2;component/Resources/Data Folder Assets.png" />
                                             </Viewbox>
                                         </Grid>

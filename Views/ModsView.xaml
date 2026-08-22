@@ -1068,18 +1068,13 @@
                                         <!-- Data-folder-assets indicator (Top-Left): the render pulled
                                              non-vanilla assets from the data folder because they weren't
                                              in this mod's Corresponding Mod Folders — a keep-activated
-                                             runtime dependency. Informational; tooltip lists the assets.
-                                             White halo on the Viewbox so the icon doesn't camouflage. -->
+                                             runtime dependency. Informational; tooltip lists the assets. -->
                                         <Grid HorizontalAlignment="Left" VerticalAlignment="Top" Margin="0 0 0 0"
                                               Visibility="{Binding HasDataFolderAssets, Converter={StaticResource BooleanToVisibilityConverter}}"
                                               ToolTip="{Binding DataFolderAssetsText}"
                                               Width="{Binding RelativeSource={RelativeSource AncestorType=Grid}, Path=ActualWidth, Converter={StaticResource PercentageSizingConverter}, ConverterParameter='20'}"
                                               Height="{Binding RelativeSource={RelativeSource Self}, Path=Width}">
                                             <Viewbox Stretch="Uniform">
-                                                <Viewbox.Effect>
-                                                    <DropShadowEffect Color="White" ShadowDepth="0"
-                                                                      BlurRadius="6" Opacity="0.9"/>
-                                                </Viewbox.Effect>
                                                 <Image Source="/NPC Plugin Chooser 2;component/Resources/Data Folder Assets.png" />
                                             </Viewbox>
                                         </Grid>

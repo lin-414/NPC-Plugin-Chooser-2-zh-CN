@@ -1065,17 +1065,12 @@
                                               weren't in this mod's Corresponding Mod Folders — a
                                               keep-activated runtime dependency. Informational
                                               (the render is correct); the tooltip lists the
-                                              assets. White halo on the Viewbox (never the Image)
-                                              so the blue chest doesn't camouflage into renders. -->
+                                              assets. -->
                                          <Grid Width="{Binding RelativeSource={RelativeSource AncestorType=Grid}, Path=ActualWidth, Converter={StaticResource PercentageSizingConverter}, ConverterParameter='20'}"
                                                Height="{Binding RelativeSource={RelativeSource Self}, Path=Width}"
                                                Visibility="{Binding HasDataFolderAssets, Converter={StaticResource BooleanToVisibilityConverter}}"
                                                ToolTip="{Binding DataFolderAssetsText}">
                                              <Viewbox Stretch="Uniform">
-                                                 <Viewbox.Effect>
-                                                     <DropShadowEffect Color="White" ShadowDepth="0"
-                                                                       BlurRadius="6" Opacity="0.9"/>
-                                                 </Viewbox.Effect>
                                                  <Image Source="/NPC Plugin Chooser 2;component/Resources/Data Folder Assets.png" />
                                              </Viewbox>
                                          </Grid>
