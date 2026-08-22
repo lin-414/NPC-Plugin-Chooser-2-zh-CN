@@ -70,6 +70,17 @@ public class ModelsAndEnumsTests
     }
 
     [Fact]
+    public void ModIssueSeverity_Order()
+    {
+        // Serialized by value in ModIssuesCache.json and sorted by in the issue
+        // table — renumbering requires a cache-version bump (last done in v15,
+        // when Warning was inserted).
+        ((int)ModIssueSeverity.Issue).Should().Be(0);
+        ((int)ModIssueSeverity.Warning).Should().Be(1);
+        ((int)ModIssueSeverity.Note).Should().Be(2);
+    }
+
+    [Fact]
     public void ValidationCheckKind_ContainsFaceGenAndSkyPatcher()
     {
         var names = Enum.GetNames<ValidationCheckKind>();

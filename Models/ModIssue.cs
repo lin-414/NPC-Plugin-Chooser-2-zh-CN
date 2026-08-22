@@ -61,7 +61,7 @@ namespace NPC_Plugin_Chooser_2.Models
         /// mod's own Corresponding Mod Folders, and it is not a base-game asset.
         /// The mod renders correctly only while whichever installed mod supplies
         /// the file stays activated; Detail names the supplying mod folder(s)
-        /// found in the parent Mods folder. Note severity: nothing is broken
+        /// found in the parent Mods folder. Warning severity: nothing is broken
         /// today, this is a keep-activated dependency. The data-folder badge on
         /// mugshot tiles reports the same class per render — this row is the
         /// scan-time equivalent, with the supplier attribution the render's time
@@ -73,14 +73,24 @@ namespace NPC_Plugin_Chooser_2.Models
     /// <summary>
     /// How visible a detected problem is in game. Mirrors the project's
     /// warning-severity bar: <see cref="Issue"/> is reserved for defects the
-    /// player can actually see (untextured/invisible meshes, dark faces,
-    /// missing dependencies); <see cref="Note"/> covers real-but-subtle
-    /// findings (secondary texture-slot misses that even vanilla assets have),
-    /// hidden by default behind a toggle.
+    /// player can actually see right now, unconditionally (untextured/invisible
+    /// meshes, dark faces, missing dependencies); <see cref="Warning"/> covers
+    /// findings that render fine today but break under realistic conditions —
+    /// a keep-activated dependency deactivating (out-of-scope assets), a mod
+    /// altering the effect that currently masks the defect (ghost-keyword
+    /// NPCs), a weight extreme the shipped file happens to cover; <see
+    /// cref="Note"/> covers engine-inert or imperceptible findings (secondary
+    /// texture-slot misses that even vanilla assets have, records the mod can
+    /// never forward), hidden by default behind a toggle.
+    /// Serialized BY VALUE in the scan cache — inserting <see cref="Warning"/>
+    /// renumbered <see cref="Note"/>, which is safe only because the cache
+    /// version bump (v15) invalidated every stored verdict; the ignore list
+    /// does not persist severity.
     /// </summary>
     public enum ModIssueSeverity
     {
         Issue,
+        Warning,
         Note,
     }
 
@@ -116,9 +126,9 @@ namespace NPC_Plugin_Chooser_2.Models
         /// Missing Asset) and the "include outfit-only issues" filter.</summary>
         public bool IsOutfitIssue { get; set; }
 
-        /// <summary>In-game visibility tier; <see cref="ModIssueSeverity.Note"/>
-        /// rows are hidden by default. Serialized in the cache so the split
-        /// survives sessions.</summary>
+        /// <summary>In-game visibility tier; the Mod Issues tab filters rows per
+        /// tier (<see cref="ModIssueSeverity.Note"/> rows are hidden by default).
+        /// Serialized in the cache so the split survives sessions.</summary>
         public ModIssueSeverity Severity { get; set; } = ModIssueSeverity.Issue;
 
         /// <summary>Display name of the installed mod whose folder/BSA supplied
@@ -329,7 +339,17 @@ namespace NPC_Plugin_Chooser_2.Models
         //      out-of-scope NIF are suppressed (the mugshot badge's
         //      referencer-scoping rule), so body-baseline internals stay
         //      silent.
-        public const int CurrentVersion = 14;
+        // v15: three-tier severity (Issue / Warning / Note). Warning = fine
+        //      today, breaks under realistic conditions: out-of-scope assets
+        //      (keep-activated dependencies, were Note), ghost-masked
+        //      tint-symptom rows (a mod can alter the masking effect, were
+        //      Note), and weight-sibling misses the NPC's own weight does not
+        //      reach (per-NPC grading; a sibling the weight interpolation
+        //      actually needs stays Issue). Engine-inert demotions
+        //      (traits-inert, resource-only carriers, skin bakes, secondary
+        //      slots) remain Note. The severity enum renumbered Note, so every
+        //      cached verdict is invalidated by this bump.
+        public const int CurrentVersion = 15;
 
         public int Version { get; set; } = CurrentVersion;
 

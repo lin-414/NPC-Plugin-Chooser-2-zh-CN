@@ -127,10 +127,19 @@
                                   Content="Include outfit-only issues"
                                   VerticalAlignment="Center" Margin="0,2,15,2"
                                   ToolTip="If unchecked, mods and NPCs whose only problems are outfit/headgear-related are hidden, leaving just face and body defects."/>
+                        <TextBlock Text="Show:" VerticalAlignment="Center" Margin="0,2,6,2"/>
+                        <CheckBox IsChecked="{Binding ShowIssues, Mode=TwoWay}"
+                                  Content="{Binding ShowIssuesLabel}"
+                                  VerticalAlignment="Center" Margin="0,2,10,2"
+                                  ToolTip="Issues are visibly broken in game right now — dark faces, invisible or untextured meshes, missing required mods."/>
+                        <CheckBox IsChecked="{Binding ShowWarnings, Mode=TwoWay}"
+                                  Content="{Binding ShowWarningsLabel}"
+                                  VerticalAlignment="Center" Margin="0,2,10,2"
+                                  ToolTip="Warnings render fine today but can break under realistic conditions — assets supplied by another installed mod that must stay activated, defects the ghost effect currently hides, weight-pair files this NPC's weight happens not to need."/>
                         <CheckBox IsChecked="{Binding ShowNotes, Mode=TwoWay}"
                                   Content="{Binding ShowNotesLabel}"
-                                  VerticalAlignment="Center" Margin="0,2,15,2"
-                                  ToolTip="Notes are real but subtle findings — secondary texture maps (specular, environment, subsurface) that are missing. Even vanilla meshes reference some of these without shipping them, so they rarely matter in game."/>
+                                  VerticalAlignment="Center" Margin="0,2,10,2"
+                                  ToolTip="Notes are engine-inert or imperceptible findings — secondary texture maps (specular, environment, subsurface) that even vanilla meshes reference without shipping, or records this mod can never forward into a patch."/>
                         <CheckBox IsChecked="{Binding ShowIgnored, Mode=TwoWay}"
                                   Content="{Binding ShowIgnoredLabel}"
                                   VerticalAlignment="Center" Margin="0,2,15,2"
@@ -590,6 +599,9 @@
                                     </Setter.Value>
                                 </Setter>
                                 <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsWarning}" Value="True">
+                                        <Setter Property="Foreground" Value="{DynamicResource StatusWarningForeground}"/>
+                                    </DataTrigger>
                                     <DataTrigger Binding="{Binding IsNote}" Value="True">
                                         <Setter Property="Opacity" Value="0.7"/>
                                     </DataTrigger>

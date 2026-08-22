@@ -119,9 +119,21 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
     /// mod, so the headline view stays focused on the mod's own defects.</summary>
     [Reactive] public bool IncludeOutfitOnlyIssues { get; set; }
 
-    /// <summary>Show Note-severity findings — real but subtle in game
+    /// <summary>Show Issue-severity findings — visibly broken in game right
+    /// now, unconditionally (dark faces, invisible/untextured meshes, missing
+    /// dependencies). On by default.</summary>
+    [Reactive] public bool ShowIssues { get; set; } = true;
+
+    /// <summary>Show Warning-severity findings — fine today but break under
+    /// realistic conditions: out-of-scope keep-activated dependencies, defects
+    /// the ghost effect currently masks, weight-pair files the NPC's own weight
+    /// happens not to reach. On by default.</summary>
+    [Reactive] public bool ShowWarnings { get; set; } = true;
+
+    /// <summary>Show Note-severity findings — engine-inert or imperceptible
     /// (secondary texture slots that even vanilla meshes reference without
-    /// shipping). Off by default so the headline view stays actionable.</summary>
+    /// shipping, records the mod can never forward). Off by default so the
+    /// headline view stays actionable.</summary>
     [Reactive] public bool ShowNotes { get; set; }
 
     /// <summary>Show rows the user has ignored (greyed; Unignore available from
@@ -134,8 +146,10 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
     /// that NPC's individual rows.</summary>
     [Reactive] public bool GroupByFile { get; set; } = true;
 
-    [Reactive] public string ShowNotesLabel { get; set; } = "Show notes";
-    [Reactive] public string ShowIgnoredLabel { get; set; } = "Show ignored";
+    [Reactive] public string ShowIssuesLabel { get; set; } = "Issues";
+    [Reactive] public string ShowWarningsLabel { get; set; } = "Warnings";
+    [Reactive] public string ShowNotesLabel { get; set; } = "Notes";
+    [Reactive] public string ShowIgnoredLabel { get; set; } = "Ignored";
 
     // --- Scan state ---
     [Reactive] public bool IsScanning { get; private set; }
@@ -171,8 +185,8 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
     /// otherwise).</summary>
     public sealed record IssueRow(string NpcDisplayName, string NpcFormKey, string Category,
         string TypeDisplay, string Plugin, string AffectedPath, string Location, string Referencer,
-        string ProvidedBy, string Detail, string RepinRemedy, int NpcCount, bool IsNote, bool IsIgnored,
-        IReadOnlyList<ModIssue> Issues)
+        string ProvidedBy, string Detail, string RepinRemedy, int NpcCount, bool IsWarning, bool IsNote,
+        bool IsIgnored, IReadOnlyList<ModIssue> Issues)
     {
         /// <summary>What Ctrl+C copies from the Details cell: the detail text plus the
         /// repin remedy the cell renders as its green second line.</summary>
@@ -309,7 +323,7 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         // Severity / ignore toggles change which issues exist at all, so the
         // entries themselves are rebuilt from the last results (selection is
         // restored by name inside RebuildEntries).
-        this.WhenAnyValue(x => x.ShowNotes, x => x.ShowIgnored)
+        this.WhenAnyValue(x => x.ShowIssues, x => x.ShowWarnings, x => x.ShowNotes, x => x.ShowIgnored)
             .Skip(1)
             .ObserveOn(RxApp.MainThreadScheduler)
             .Subscribe(_ => RebuildEntries(_lastResults))
@@ -557,7 +571,8 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
             : available.FirstOrDefault(o => o.Value == clicked) ?? available[0];
 
     /// <summary>Collects switch proposals from one scan run's results. Only
-    /// Issue-severity dark-face rows count (traits/ghost-demoted Notes don't nag),
+    /// Issue-severity dark-face rows count (traits/resource-only Notes and
+    /// ghost-demoted Warnings don't nag),
     /// only when the NPC's current pin is among the row's broken carriers (an NPC
     /// already pointed at a clean plugin must not be nagged), and the target is the
     /// first clean sibling in the mod's plugin order. A null pin from
@@ -827,8 +842,7 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
 
         _allEntries.Clear();
         int scannedCount = 0;
-        int noteTotal = 0;
-        int ignoredTotal = 0;
+        var totals = new VisibleTotals();
         DateTime? newestScan = null;
         foreach (var (displayName, result) in results)
         {
@@ -840,15 +854,17 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
                 m.DisplayName.Equals(displayName, StringComparison.OrdinalIgnoreCase));
             if (vm == null) continue; // Mod removed since the scan.
 
-            var visible = FilterVisible(displayName, result.Issues, ref noteTotal, ref ignoredTotal);
-            if (visible.Count == 0) continue; // everything filtered out (notes/ignored)
+            var visible = FilterVisible(displayName, result.Issues, ref totals);
+            if (visible.Count == 0) continue; // everything filtered out (severity tiers/ignored)
 
             _allEntries.Add(new VM_ModIssueEntry(displayName, vm, result, visible, _modsViewModel));
         }
         _allEntries.Sort((a, b) => string.Compare(a.DisplayName, b.DisplayName, StringComparison.OrdinalIgnoreCase));
 
-        ShowNotesLabel = noteTotal > 0 || ShowNotes ? $"Show notes ({noteTotal})" : "Show notes";
-        ShowIgnoredLabel = ignoredTotal > 0 || ShowIgnored ? $"Show ignored ({ignoredTotal})" : "Show ignored";
+        ShowIssuesLabel = totals.Issues > 0 || ShowIssues ? $"Issues ({totals.Issues})" : "Issues";
+        ShowWarningsLabel = totals.Warnings > 0 || ShowWarnings ? $"Warnings ({totals.Warnings})" : "Warnings";
+        ShowNotesLabel = totals.Notes > 0 || ShowNotes ? $"Notes ({totals.Notes})" : "Notes";
+        ShowIgnoredLabel = totals.Ignored > 0 || ShowIgnored ? $"Ignored ({totals.Ignored})" : "Ignored";
 
         // Eligible mods absent from the results: absence must not read as clean.
         UnscannedModNames.Clear();
@@ -881,24 +897,43 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         }
     }
 
+    /// <summary>Running totals for the severity/ignore toggle labels.</summary>
+    private struct VisibleTotals
+    {
+        public int Issues, Warnings, Notes, Ignored;
+    }
+
     /// <summary>The severity/ignore display filter: drops ignored issues (unless
-    /// Show ignored) and Note-severity issues (unless Show notes), while
-    /// counting both totals for the toggle labels.</summary>
+    /// Show ignored) and issues whose severity tier is toggled off, while
+    /// counting every tier for the toggle labels.</summary>
     private List<ModIssue> FilterVisible(string modName, List<ModIssue> issues,
-        ref int noteTotal, ref int ignoredTotal)
+        ref VisibleTotals totals)
     {
         var visible = new List<ModIssue>(issues.Count);
         foreach (var issue in issues)
         {
             if (IsIgnored(modName, issue))
             {
-                ignoredTotal++;
+                totals.Ignored++;
                 if (!ShowIgnored) continue;
             }
-            else if (issue.Severity == ModIssueSeverity.Note)
+            else
             {
-                noteTotal++;
-                if (!ShowNotes) continue;
+                switch (issue.Severity)
+                {
+                    case ModIssueSeverity.Issue:
+                        totals.Issues++;
+                        if (!ShowIssues) continue;
+                        break;
+                    case ModIssueSeverity.Warning:
+                        totals.Warnings++;
+                        if (!ShowWarnings) continue;
+                        break;
+                    case ModIssueSeverity.Note:
+                        totals.Notes++;
+                        if (!ShowNotes) continue;
+                        break;
+                }
             }
             visible.Add(issue);
         }
@@ -1053,9 +1088,9 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         {
             var vm = _modsViewModel.AllModSettings.FirstOrDefault(m =>
                 m.DisplayName.Equals(displayName, StringComparison.OrdinalIgnoreCase));
-            int noteTotal = 0, ignoredTotal = 0;
+            var totals = new VisibleTotals(); // per-mod throwaway; labels refresh on the final RebuildEntries
             var visible = vm != null
-                ? FilterVisible(displayName, result.Issues, ref noteTotal, ref ignoredTotal)
+                ? FilterVisible(displayName, result.Issues, ref totals)
                 : new List<ModIssue>();
             if (vm != null && visible.Count > 0)
             {
@@ -1533,6 +1568,7 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
                 detail,
                 repinRemedy,
                 npcCount,
+                issue.Severity == ModIssueSeverity.Warning,
                 issue.Severity == ModIssueSeverity.Note,
                 ignored,
                 groupIssues);
@@ -1644,7 +1680,7 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
                         Csv(issue.NifPath ?? ""),
                         Csv(issue.ReferencingRecord ?? ""),
                         Csv(issue.Detail ?? ""),
-                        issue.Severity == ModIssueSeverity.Note ? "Note" : "Issue",
+                        issue.Severity.ToString(),
                         Csv(issue.SourceModName ?? ""),
                         ignored ? "yes" : "",
                         Csv(issue.RecordPluginName ?? ""),

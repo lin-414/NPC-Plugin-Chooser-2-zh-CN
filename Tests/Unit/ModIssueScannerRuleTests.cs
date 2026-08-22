@@ -569,13 +569,16 @@ public class ModIssueScannerRuleTests
     [Fact]
     public void SwitchProposals_SkipConditions()
     {
-        // Demoted Notes (traits/ghost) don't nag; nothing-clean and pin-not-broken don't fire.
+        // Demoted rows don't nag — Notes (traits/resource-only) and Warnings
+        // (ghost-masked) alike; nothing-clean and pin-not-broken don't fire.
         var result = new ModIssueScanResult
         {
             ScanCompleted = true,
             Issues = new List<ModIssue>
             {
                 SwitchableIssue(severity: ModIssueSeverity.Note,
+                    broken: new[] { "Bad.esp" }, clean: new[] { "Good.esp" }),
+                SwitchableIssue(npc: "000DDD:Test.esp", severity: ModIssueSeverity.Warning,
                     broken: new[] { "Bad.esp" }, clean: new[] { "Good.esp" }),
                 SwitchableIssue(npc: "000BBB:Test.esp", broken: new[] { "Bad.esp" }, clean: null),
                 SwitchableIssue(npc: "000CCC:Test.esp", broken: new[] { "Other.esp" }, clean: new[] { "Good.esp" }),
@@ -714,7 +717,7 @@ public class ModIssueScannerRuleTests
     }
 
     [Fact]
-    public void GhostKeyword_OnNpcRecord_DetectedForNoteDemotion()
+    public void GhostKeyword_OnNpcRecord_DetectedForWarningDemotion()
     {
         var mod = TestSupport.MutagenFixtures.NewMod("Test.esp");
 

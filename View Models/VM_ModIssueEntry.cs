@@ -16,9 +16,10 @@ namespace NPC_Plugin_Chooser_2.View_Models;
 /// <see cref="VM_ModIssues"/> — no DI registration needed.
 ///
 /// <para>Counts and groupings are computed over <see cref="VisibleIssues"/> —
-/// the subset that survives the owner's severity (Show notes) and ignore-list
-/// filters — while <see cref="Result"/> keeps the raw scan output for CSV
-/// export. The owner rebuilds entries whenever those filters change.</para>
+/// the subset that survives the owner's severity-tier (Issues / Warnings /
+/// Notes) and ignore-list filters — while <see cref="Result"/> keeps the raw
+/// scan output for CSV export. The owner rebuilds entries whenever those
+/// filters change.</para>
 /// </summary>
 public class VM_ModIssueEntry : ReactiveObject
 {
@@ -206,7 +207,8 @@ public class VM_ModIssueEntry : ReactiveObject
             foreach (var issue in group)
             {
                 sb.Append("\n - ").Append(issue.AffectedPath);
-                if (issue.Severity == ModIssueSeverity.Note) sb.Append(" (note)");
+                if (issue.Severity == ModIssueSeverity.Warning) sb.Append(" (warning)");
+                else if (issue.Severity == ModIssueSeverity.Note) sb.Append(" (note)");
                 if (!string.IsNullOrEmpty(issue.ShapeName))
                 {
                     sb.Append(" (shape '").Append(issue.ShapeName).Append('\'');

@@ -495,7 +495,8 @@ public sealed class ModIssueScanner
             if (paths == null) return true;
 
             // Tint-symptom rows (missing tint, dark-face mismatch, unreadable FaceGen)
-            // demote to Note on ghost-keyword NPCs — the ghost effect usually hides them.
+            // demote to Warning on ghost-keyword NPCs — the ghost effect usually hides
+            // them, but a mod that alters the effect could expose them.
             bool ghostMasked = HasGhostKeyword(npc);
 
             // FaceGen tint DDS. Only meaningful for NPCs that own FaceGen.
@@ -511,8 +512,8 @@ public sealed class ModIssueScanner
                 if (tintSource == null)
                 {
                     AddIssue(ModIssueType.MissingFaceGenTint, faceGenTintRel,
-                        severity: ghostMasked ? ModIssueSeverity.Note : ModIssueSeverity.Issue,
-                        detail: (ghostMasked ? GhostNotePrefix : string.Empty)
+                        severity: ghostMasked ? ModIssueSeverity.Warning : ModIssueSeverity.Issue,
+                        detail: (ghostMasked ? GhostMaskedPrefix : string.Empty)
                                 + "FaceGen tint texture is missing — faces typically render grey/mismatched without it."
                                 + (templateNote == null ? "" : "\n" + templateNote));
                 }
@@ -581,7 +582,8 @@ public sealed class ModIssueScanner
                 // Weight siblings only when the ARMA's weight slider is on for
                 // this sex — the engine's own signal that a _0/_1 pair exists.
                 var overrideSource = CheckMesh(mod, over.MeshPath, over.Key, over.AllowLoadOrderFallback,
-                    isOutfit: true, checkWeightSibling: over.HasWeightVariants, nifJobs, AddIssue, CollectOutOfScope);
+                    isOutfit: true, checkWeightSibling: over.HasWeightVariants, nifJobs, AddIssue, CollectOutOfScope,
+                    npcWeight: npc.Weight);
                 // Referencer scoping for the record-driven textures below: only an
                 // in-scope (or missing — moot) mesh lets its retexture entries
                 // report as out-of-scope hits.
@@ -728,8 +730,9 @@ public sealed class ModIssueScanner
             // out (the base game always supplies them — also what keeps body
             // meshes at vanilla paths silent); the rest are attributed to the
             // installed mod(s) shipping them by cross-referencing the parent Mods
-            // folder. Note severity: nothing is broken today — these are
-            // keep-activated dependencies, the scan-time twin of the mugshot
+            // folder. Warning severity: nothing is broken today, but the mod only
+            // renders correctly while the supplying mod stays activated — these
+            // are keep-activated dependencies, the scan-time twin of the mugshot
             // tiles' data-folder badge.
             foreach (var (rel, hit) in outOfScope)
             {
@@ -739,7 +742,7 @@ public sealed class ModIssueScanner
                     referencer: hit.Referencer,
                     detail: detail,
                     isOutfit: hit.IsOutfit,
-                    severity: ModIssueSeverity.Note,
+                    severity: ModIssueSeverity.Warning,
                     sourceMod: providerColumn);
             }
 
@@ -777,8 +780,8 @@ public sealed class ModIssueScanner
                         string? nifError = graded[0].Analysis.NifError;
                         AddIssue(ModIssueType.DarkFaceMismatch, faceGenMeshRel,
                             nifPath: paths.HeadMeshPath,
-                            severity: ghostMasked ? ModIssueSeverity.Note : ModIssueSeverity.Issue,
-                            detail: (ghostMasked ? GhostNotePrefix : string.Empty) +
+                            severity: ghostMasked ? ModIssueSeverity.Warning : ModIssueSeverity.Issue,
+                            detail: (ghostMasked ? GhostMaskedPrefix : string.Empty) +
                                     "The FaceGen head mesh exists but could not be parsed" +
                                     (string.IsNullOrEmpty(nifError) ? "" : $" ({nifError})") +
                                     " — a broken/corrupt .nif. If the game engine cannot read it either, " +
@@ -851,9 +854,14 @@ public sealed class ModIssueScanner
                                 cleanSiblingPlugins: variant.Label != null && cleanSiblingPlugins.Count > 0
                                     ? cleanSiblingPlugins
                                     : null,
-                                severity: traitsInert || ghostMasked || resourceOnlyCarriers
+                                // Engine-inert demotions (traits-inert, resource-only
+                                // carriers) are Notes; the ghost demotion is only a
+                                // masking effect, so it grades Warning instead.
+                                severity: traitsInert || resourceOnlyCarriers
                                     ? ModIssueSeverity.Note
-                                    : ModIssueSeverity.Issue,
+                                    : ghostMasked
+                                        ? ModIssueSeverity.Warning
+                                        : ModIssueSeverity.Issue,
                                 detail: (resourceOnlyCarriers
                                             ? "This record only comes from plugin(s) marked resource-only in this mod " +
                                               "entry, which are never offered as an NPC's source plugin — this mod " +
@@ -866,7 +874,7 @@ public sealed class ModIssueScanner
                                               "the mismatch below cannot show in game unless a patch or another plugin " +
                                               "removes the template.\n"
                                             : string.Empty) +
-                                        (ghostMasked ? GhostNotePrefix : string.Empty) +
+                                        (ghostMasked ? GhostMaskedPrefix : string.Empty) +
                                         analysis.BuildReason(
                                             scope: FaceGenConsistencyAnalyzer.ReasonScope.SelectedMod,
                                             subjectSuppliesRecord: variant.SubjectSuppliesRecord));
@@ -968,9 +976,9 @@ public sealed class ModIssueScanner
 
     /// <summary>Prefix for tint-symptom rows (dark-face class, missing tint,
     /// unreadable FaceGen) demoted because of <see cref="HasGhostKeyword"/>.</summary>
-    private const string GhostNotePrefix =
+    private const string GhostMaskedPrefix =
         "This NPC carries the ActorTypeGhost keyword: the ghost visual effect usually hides " +
-        "face-tint problems, so this is reported as a note. A mod that changes the ghost " +
+        "face-tint problems, so this is reported as a warning. A mod that changes the ghost " +
         "effect could still expose it.\n";
 
     private static bool KeepsTraitsTemplate(INpcGetter npc) =>
@@ -1054,7 +1062,7 @@ public sealed class ModIssueScanner
     private AssetSource? CheckMesh(ModSetting scannedMod, string? gamePath, string referencer,
         bool allowLoadOrderFallback, bool isOutfit, bool checkWeightSibling,
         List<NifJob> nifJobs, AddIssueDelegate addIssue, CollectOutOfScopeDelegate collectOutOfScope,
-        bool isSkin = false)
+        bool isSkin = false, float? npcWeight = null)
     {
         if (string.IsNullOrWhiteSpace(gamePath)) return null;
 
@@ -1097,9 +1105,26 @@ public sealed class ModIssueScanner
             var siblingSource = ResolveSource(sibling, allowLoadOrderFallback);
             if (siblingSource?.ResolvedDiskPath == null)
             {
+                // The engine interpolates between the _0 and _1 models at the
+                // NPC's fixed weight, so grade per NPC: an absent file the
+                // weight interpolation reaches into is an Issue; an NPC sitting
+                // exactly at the extreme the present file covers is a Warning
+                // (the pair is still incomplete — a weight edit or another
+                // wearer exposes it). Unknown weight fails conservative (Issue).
+                bool missingHighWeight = sibling.EndsWith("_1.nif", StringComparison.OrdinalIgnoreCase);
+                bool neededAtThisWeight = npcWeight == null ||
+                    (missingHighWeight ? npcWeight.Value > 0f : npcWeight.Value < 100f);
+                string siblingDetail = $"The weight counterpart of {Path.GetFileName(gamePath)} is missing.";
+                if (npcWeight != null)
+                {
+                    siblingDetail += neededAtThisWeight
+                        ? $" This NPC's weight ({npcWeight.Value:0.#}) reaches into the missing file — the shape renders wrong or not at all."
+                        : $" This NPC's weight ({npcWeight.Value:0.#}) sits exactly at the extreme the present file covers, so nothing breaks for this NPC today.";
+                }
                 addIssue(ModIssueType.MissingWeightSibling, sibling, referencer: referencer,
-                    detail: $"The weight counterpart of {Path.GetFileName(gamePath)} is missing.",
-                    isOutfit: isOutfit, sourceMod: sourceMod);
+                    detail: siblingDetail,
+                    isOutfit: isOutfit, sourceMod: sourceMod,
+                    severity: neededAtThisWeight ? ModIssueSeverity.Issue : ModIssueSeverity.Warning);
             }
             else if (!source.ViaDataFolderFallback)
             {
