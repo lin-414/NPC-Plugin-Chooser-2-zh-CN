@@ -797,5 +797,13 @@
   "validNoModPluginsFound": "有效（未找到模组插件）",
   "showPreview": "显示预览",
   "hidePreview": "隐藏预览",
-  "fixEncoding": "修复编码"
+  "fixEncoding": "修复编码",
+  "envStatusValid": "有效",
+  "envStatusInvalid": "无效",
+  "envStatusPending": "待处理",
+  "pluginsInLoadOrderPrefix": "个插件存在于载入顺序（",
+  "pluginsInLoadOrderSuffix": " 个启用）",
+  "ccPluginsDetectedPrefix": "检测到 CC 插件：",
+  "ccPluginsDetectedMiddle": "（其中 ",
+  "ccPluginsDetectedSuffix": " 个在载入顺序中）"
 }

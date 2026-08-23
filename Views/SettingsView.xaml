@@ -151,33 +151,57 @@
                     <TextBlock Text="{l:Loc environment}" FontWeight="Bold" Margin="0,5,0,2"/>
                     <TextBlock>
                         <Run Text="{l:Loc mutagenEnvironmentStatus}"/>
-                        <Run FontWeight="Bold">
-                            <Run.Style>
-                                <Style TargetType="Run">
-                                    <Setter Property="Text" Value="{Binding EnvironmentStatus, Mode=OneWay}"/>
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding EnvironmentStatus}" Value="Valid">
-                                            <Setter Property="Foreground" Value="{DynamicResource StatusValidForeground}"/>
-                                        </DataTrigger>
-                                        <DataTrigger Binding="{Binding EnvironmentStatus}" Value="Invalid">
-                                            <Setter Property="Foreground" Value="{DynamicResource StatusErrorForeground}"/>
-                                        </DataTrigger>
-                                        <DataTrigger Binding="{Binding EnvironmentStatus}" Value="Pending">
-                                            <Setter Property="Foreground" Value="{DynamicResource StatusPendingForeground}"/>
-                                        </DataTrigger>
-                                        <!-- Valid, but the load order holds no mod plugins at all. Declared
-                                             last so it overrides the plain Valid trigger above. -->
-                                        <MultiDataTrigger>
-                                            <MultiDataTrigger.Conditions>
-                                                <Condition Binding="{Binding EnvironmentStatus}" Value="Valid"/>
-                                                <Condition Binding="{Binding EnvironmentLoadOrderIsVanillaOnly}" Value="True"/>
-                                            </MultiDataTrigger.Conditions>
-                                            <Setter Property="Text" Value=""/>
-                                        </MultiDataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </Run.Style>
-                        </Run>
+                        <Run FontWeight="Bold" Text="{l:Loc envStatusValid}" Foreground="{DynamicResource StatusValidForeground}">
+                                <Run.Style>
+                                    <Style TargetType="Run">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding EnvironmentStatus}" Value="Invalid">
+                                                <Setter Property="Text" Value=""/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding EnvironmentStatus}" Value="Pending">
+                                                <Setter Property="Text" Value=""/>
+                                            </DataTrigger>
+                                            <!-- Valid + vanilla-only load order: hide this so the
+                                                 dedicated "no mod plugins" Run below shows instead. -->
+                                            <MultiDataTrigger>
+                                                <MultiDataTrigger.Conditions>
+                                                    <Condition Binding="{Binding EnvironmentStatus}" Value="Valid"/>
+                                                    <Condition Binding="{Binding EnvironmentLoadOrderIsVanillaOnly}" Value="True"/>
+                                                </MultiDataTrigger.Conditions>
+                                                <Setter Property="Text" Value=""/>
+                                            </MultiDataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Run.Style>
+                            </Run>
+                            <Run FontWeight="Bold" Text="{l:Loc envStatusInvalid}" Foreground="{DynamicResource StatusErrorForeground}">
+                                <Run.Style>
+                                    <Style TargetType="Run">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding EnvironmentStatus}" Value="Valid">
+                                                <Setter Property="Text" Value=""/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding EnvironmentStatus}" Value="Pending">
+                                                <Setter Property="Text" Value=""/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Run.Style>
+                            </Run>
+                            <Run FontWeight="Bold" Text="{l:Loc envStatusPending}" Foreground="{DynamicResource StatusPendingForeground}">
+                                <Run.Style>
+                                    <Style TargetType="Run">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding EnvironmentStatus}" Value="Valid">
+                                                <Setter Property="Text" Value=""/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding EnvironmentStatus}" Value="Invalid">
+                                                <Setter Property="Text" Value=""/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Run.Style>
+                            </Run>
                         <Run Text="{l:Loc validNoModPluginsFound}" Foreground="{DynamicResource StatusWarningForeground}">
                             <Run.Style>
                                 <Style TargetType="Run">
@@ -196,14 +220,10 @@
                             </Run.Style>
                         </Run>
                         <Run Text=" - "/>
-                        <Run FontSize="10">
-                            <Run.Text>
-                                <MultiBinding StringFormat="{}{0} Plugins in Load Order ({1} Active)">
-                                    <Binding Path="NumPluginsInEnvironment" Mode="OneWay" />
-                                    <Binding Path="NumActivePluginsInEnvironment" Mode="OneWay" />
-                                </MultiBinding>
-                            </Run.Text>
-                        </Run>
+                        <Run Text="{l:Loc pluginsInLoadOrderPrefix}" FontSize="10"/>
+                        <Run Text="{Binding NumPluginsInEnvironment, Mode=OneWay}" FontSize="10"/>
+                        <Run Text="{l:Loc pluginsInLoadOrderSuffix}" FontSize="10"/>
+                        <Run Text="{Binding NumActivePluginsInEnvironment, Mode=OneWay}" FontSize="10"/>
                     </TextBlock>
                     <!-- Advisory (not an error - the environment is usable): the resolved load order
                          contains only base-game / Creation Club plugins. Nearly always means N.P.C.2 was
@@ -355,14 +375,11 @@
                             <Run Text=")"/>
                         </TextBlock>
                         <TextBlock FontSize="10" Foreground="{DynamicResource SecondaryForeground}">
-                            <Run>
-                                <Run.Text>
-                                    <MultiBinding StringFormat="{}CC plugins detected: {0} (of which {1} are in the resolved load order)">
-                                        <Binding Path="EnvironmentCreationClubPluginsCount" Mode="OneWay"/>
-                                        <Binding Path="EnvironmentCreationClubPluginsInLoadOrderCount" Mode="OneWay"/>
-                                    </MultiBinding>
-                                </Run.Text>
-                            </Run>
+                            <Run Text="{l:Loc ccPluginsDetectedPrefix}"/>
+                                <Run Text="{Binding EnvironmentCreationClubPluginsCount, Mode=OneWay}"/>
+                                <Run Text="{l:Loc ccPluginsDetectedMiddle}"/>
+                                <Run Text="{Binding EnvironmentCreationClubPluginsInLoadOrderCount, Mode=OneWay}"/>
+                                <Run Text="{l:Loc ccPluginsDetectedSuffix}"/>
                         </TextBlock>
                     </StackPanel>
                 </StackPanel>

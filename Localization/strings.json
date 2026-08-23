@@ -797,5 +797,13 @@
   "validNoModPluginsFound": "Valid (no mod plugins found)",
   "showPreview": "Show Preview",
   "hidePreview": "Hide Preview",
-  "fixEncoding": "Fix Encoding"
+  "fixEncoding": "Fix Encoding",
+  "envStatusValid": "Valid",
+  "envStatusInvalid": "Invalid",
+  "envStatusPending": "Pending",
+  "pluginsInLoadOrderPrefix": "Plugins in Load Order (",
+  "pluginsInLoadOrderSuffix": " Active)",
+  "ccPluginsDetectedPrefix": "CC plugins detected: ",
+  "ccPluginsDetectedMiddle": " (of which ",
+  "ccPluginsDetectedSuffix": " are in the resolved load order)"
 }
