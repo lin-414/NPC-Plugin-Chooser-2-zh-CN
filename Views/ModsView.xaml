@@ -334,16 +334,7 @@
                                                       Visibility="{Binding HasPluginWithOverrideRecords, Converter={StaticResource BooleanToVisibilityConverter}}">
                                                  <Viewbox.ToolTip>
                                                      <ToolTip>
-                                                         <TextBlock TextWrapping="Wrap">
-                                                             This mod has overrides of non-NPC records.
-                                                             <LineBreak/>
-                                                             NPC2 can handle these using the default option in the settings menu, or on a per-mod basis configured here.
-                                                             <LineBreak/>
-                                                             <LineBreak/>
-                                                             IMPORTANT: Just because the plugin has overrides doesn't mean these overrides need to be handled. In most cases, non-NPC overrides are safe to ignore,
-                                                             <LineBreak/>
-                                                             and handling them for large plugins can slow down patching considerably. Only handle them if the NPC appearance is bugged otherwise, or you know that it's required.
-                                                         </TextBlock>
+                                                         <TextBlock TextWrapping="Wrap" Text="{l:Loc modsNonNpcOverridesTooltip}"/>
                                                      </ToolTip>
                                                  </Viewbox.ToolTip>
                                                  <Image Source="/NPC Plugin Chooser 2;component/Resources/Contains Overrides.png" />
@@ -616,21 +607,7 @@
                                          <TextBlock Text="{l:Loc recordOverrideHandlingMode}" VerticalAlignment="Center">
                                              <TextBlock.ToolTip>
                                                  <ToolTip>
-                                                     <TextBlock TextWrapping="Wrap" Width="300">
-                                                         Controls what happens if plugins in this mod override records from another mod 
-                                                         (other than the direct NPC records).
-                                                         <LineBreak/>
-                                                         <LineBreak/>
-                                                         Default: Use the default setting from the Settings Tab.
-                                                         <LineBreak/>
-                                                         Ignore: Do not look for overridden records. Conflict patching will be fully taken care of by you.
-                                                         <LineBreak/>
-                                                         Include: Incorporate the overridden records into the output (as whole records in Default mode,
-                                                         or deltas in EasyNPC mode).
-                                                         <LineBreak/>
-                                                         Include as New: Copy the overrides as new records. Avoids conflicts if multiple appearance mods 
-                                                         override the same records.
-                                                     </TextBlock>
+                                                     <TextBlock TextWrapping="Wrap" Width="300" Text="{l:Loc modsOverrideHandlingTooltip}"/>
                                                  </ToolTip>
                                              </TextBlock.ToolTip>
                                          </TextBlock>
@@ -659,36 +636,7 @@
                                              <TextBlock Text="{l:Loc wigHandlingMode}" VerticalAlignment="Center">
                                                  <TextBlock.ToolTip>
                                                      <ToolTip>
-                                                         <TextBlock TextWrapping="Wrap" Width="340">
-                                                             This mod ships wigs: hair-slot wig armors in its Default Outfits, and/or
-                                                             hair meshes carried directly in an NPC's skin (worn armor — the High Poly
-                                                             NPC Overhaul pattern). Controls how they are handled during patching — and
-                                                             how mugshots and the 3D preview depict the NPC. Antlers are controlled
-                                                             separately.
-                                                             <LineBreak/><LineBreak/>
-                                                             Default: Use the default setting from the Settings tab.
-                                                             <LineBreak/>
-                                                             Forward To Skin: transfer an outfit wig into the NPC's skin (WornArmor) so
-                                                             it shows regardless of the outfit worn (falls back to Forward To Outfit if
-                                                             the appearance plugin assigns no WornArmor). A skin-carried wig is already
-                                                             in this state and is left as-is.
-                                                             <LineBreak/>
-                                                             Forward To Outfit: duplicate the outfit the NPC actually wears in game and
-                                                             add the wig to the duplicate (no change if it already contains the wig). A
-                                                             skin-carried wig is moved into that outfit as a generated wig armor.
-                                                             <LineBreak/>
-                                                             Convert To Headparts (EXPERIMENTAL): discard the wig armor and make the wig
-                                                             the NPC's hair — generated head part records + the wig mesh baked into the
-                                                             FaceGen file (HDT-SMP preserved; helmets hide it like normal hair). Works
-                                                             for outfit wigs AND skin-carried wigs (the 3D preview's "Set Wig Meshes"
-                                                             button corrects which skin meshes count as wigs). An outfit wig falls back
-                                                             to Forward To Skin per NPC when the bake would be unsafe; a skin-carried
-                                                             wig is left as-is instead.
-                                                             <LineBreak/>
-                                                             Leave As Is: wigs are treated like any other outfit/skin element — an outfit wig
-                                                             is forwarded only if Include Outfits is selected; a skin-carried wig stays
-                                                             in the skin.
-                                                         </TextBlock>
+                                                         <TextBlock TextWrapping="Wrap" Width="340" Text="{l:Loc modsWigHandlingTooltip}"/>
                                                      </ToolTip>
                                                  </TextBlock.ToolTip>
                                              </TextBlock>
@@ -712,25 +660,7 @@
                                              <TextBlock Text="{l:Loc convertedWigHairColor}" VerticalAlignment="Center">
                                                  <TextBlock.ToolTip>
                                                      <ToolTip>
-                                                         <TextBlock TextWrapping="Wrap" Width="340">
-                                                             Only applies when this mod's Wig Handling Mode resolves to Convert To
-                                                             Headparts. Many wig meshes carry a near-black placeholder hair color and
-                                                             rely on RaceMenu to recolor them in game (RaceMenu automatically tints worn
-                                                             hair-slot items — that is why High Poly NPC Overhaul gives every NPC black
-                                                             hair until RaceMenu is installed). A wig baked into the FaceGen file is no
-                                                             longer a worn item, so RaceMenu stops recoloring it and the placeholder
-                                                             sticks. This bakes the NPC's own hair color in instead.
-                                                             <LineBreak/><LineBreak/>
-                                                             Default: Use the default setting from the Settings tab.
-                                                             <LineBreak/>
-                                                             Auto: recolor only wigs carrying a placeholder tint; leave wigs whose
-                                                             textures are already colored by their author alone.
-                                                             <LineBreak/>
-                                                             Always use NPC's hair color: recolor every converted wig, exactly as
-                                                             RaceMenu would have done to the original worn wig.
-                                                             <LineBreak/>
-                                                             Keep the wig's own color: never touch the wig's baked hair color.
-                                                         </TextBlock>
+                                                         <TextBlock TextWrapping="Wrap" Width="340" Text="{l:Loc modsWigColorTooltip}"/>
                                                      </ToolTip>
                                                  </TextBlock.ToolTip>
                                              </TextBlock>
@@ -755,27 +685,7 @@
                                              <TextBlock Text="{l:Loc antlerHandlingMode}" VerticalAlignment="Center">
                                                  <TextBlock.ToolTip>
                                                      <ToolTip>
-                                                         <TextBlock TextWrapping="Wrap" Width="340">
-                                                             This mod ships antlers (in an outfit, baked into the worn armor, or as a
-                                                             keyword-detected FaceGen head part). Controls how they are handled during
-                                                             patching — and how mugshots and the 3D preview depict the NPC.
-                                                             <LineBreak/><LineBreak/>
-                                                             Default: Use the default setting from the Settings tab.
-                                                             <LineBreak/>
-                                                             Forward To Skin: transfer the antler into the NPC's skin (WornArmor) so it shows
-                                                             regardless of the outfit worn. Falls back to Forward To Outfit if the appearance
-                                                             plugin assigns no WornArmor.
-                                                             <LineBreak/>
-                                                             Forward To Outfit: duplicate the outfit the NPC actually wears in game and add
-                                                             the antler to the duplicate.
-                                                             <LineBreak/>
-                                                             Remove: keep the antler OFF the NPC entirely — stripped from a forwarded outfit,
-                                                             from the worn armor, and from the FaceGen. An outfit the load order owns (not
-                                                             forwarded) can't be reached.
-                                                             <LineBreak/>
-                                                             Leave As Is: the antler is treated like any other outfit element — forwarded only if
-                                                             Include Outfits is selected.
-                                                         </TextBlock>
+                                                         <TextBlock TextWrapping="Wrap" Width="340" Text="{l:Loc modsAntlerHandlingTooltip}"/>
                                                      </ToolTip>
                                                  </TextBlock.ToolTip>
                                              </TextBlock>
@@ -801,21 +711,7 @@
                                              <TextBlock Text="{l:Loc templatedNPCs}" VerticalAlignment="Center">
                                                  <TextBlock.ToolTip>
                                                      <ToolTip>
-                                                         <TextBlock TextWrapping="Wrap" Width="340">
-                                                             Some of this mod's NPCs copy their face from another NPC instead of having
-                                                             one of their own (the NPCs tab marks them with a Template icon). Controls
-                                                             what a selection from this mod does for those NPCs.
-                                                             <LineBreak/><LineBreak/>
-                                                             Default: Use the default setting from the Settings tab.
-                                                             <LineBreak/>
-                                                             Use the template's appearance: they keep showing the other NPC's face, and
-                                                             any appearance you pick for them is ignored.
-                                                             <LineBreak/>
-                                                             Give each NPC its own copy: your choice is applied to each of them
-                                                             individually, so NPCs that share a template can look different. Adds one
-                                                             copy of the face files per NPC. NPCs whose face the game picks at random
-                                                             from a levelled list keep inheriting either way.
-                                                         </TextBlock>
+                                                         <TextBlock TextWrapping="Wrap" Width="340" Text="{l:Loc modsTemplateNpcsTooltip}"/>
                                                      </ToolTip>
                                                  </TextBlock.ToolTip>
                                              </TextBlock>
@@ -842,15 +738,7 @@
                                                        VerticalAlignment="Center">
                                                 <TextBlock.ToolTip>
                                                     <ToolTip>
-                                                        <TextBlock TextWrapping="Wrap" Width="300">
-                                                            Controls how many layers deep the patcher will search for overridden records between finding relevant records.
-                                                            <LineBreak/><LineBreak/>
-                                                            This is not a total depth limit. The count resets every time a record from this mod is found, so a continuous chain of the mod's records is always followed all the way down.
-                                                            <LineBreak/><LineBreak/>
-                                                            The default of 2 is what lets the search cross one unrelated record (e.g. a vanilla outfit) to reach the mod's edits below it. Higher values may find more obscure overrides but will significantly increase patching time.
-                                                            <LineBreak/><LineBreak/>
-                                                            Leave blank to use the default. Set to 1 to only check direct dependencies; 0 disables the search entirely.
-                                                        </TextBlock>
+                                                        <TextBlock TextWrapping="Wrap" Width="300" Text="{l:Loc modsTraversalDepthTooltip}"/>
                                                     </ToolTip>
                                                 </TextBlock.ToolTip>
                                             </TextBlock>
@@ -882,14 +770,7 @@
                                                 Visibility="{Binding IsMaxNestedIntervalDepthVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
                                             <Button.ToolTip>
                                                 <ToolTip>
-                                                    <TextBlock TextWrapping="Wrap" Width="320">
-                                                        Choose which fields of an NPC record the search for this mod's overridden
-                                                        records may start from.
-                                                        <LineBreak/><LineBreak/>
-                                                        A selected field is followed as deep as it goes, through any kind of record.
-                                                        This does not limit which record types can be merged in — only where the
-                                                        search begins. Defaults to the fields that carry appearance.
-                                                    </TextBlock>
+                                                    <TextBlock TextWrapping="Wrap" Width="320" Text="{l:Loc modsOverrideRootsTooltip}"/>
                                                 </ToolTip>
                                             </Button.ToolTip>
                                         </Button>
