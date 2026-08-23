@@ -968,17 +968,12 @@
                                                <MenuItem Header="{l:Loc viewFullScreenCtrl}" Command="{Binding ToggleFullScreenCommand}"/>
                                                <MenuItem Header="{l:Loc show3DPreviewCtrl}" Command="{Binding Show3DPreviewCommand}"/>
                                                <Separator />
-                                               <MenuItem Command="{Binding AddToFavoritesCommand}"> 
-                                                   <MenuItem.Style> 
-                                                       <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}"> 
-                                                           <Setter Property="Header" Value="Add to Favorites"/> 
-                                                           <Style.Triggers> 
-                                                               <DataTrigger Binding="{Binding IsFavorite}" Value="True"> 
-                                                                   <Setter Property="Header" Value="Remove from Favorites"/> 
-                                                               </DataTrigger> 
-                                                           </Style.Triggers> 
-                                                       </Style> 
-                                                   </MenuItem.Style> 
+                                               <MenuItem Command="{Binding AddToFavoritesCommand}">
+                                                   <MenuItem.Style>
+                                                       <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
+                                                           <Setter Property="Header" Value="{Binding FavoriteMenuItemText}"/>
+                                                       </Style>
+                                                   </MenuItem.Style>
                                                </MenuItem> 
                                                <MenuItem Header="{l:Loc selectSourcePlugin}" 
                                                          Visibility="{Binding IsAmbiguousSource, Converter={StaticResource BooleanToVisibilityConverter}}" 

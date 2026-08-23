@@ -1186,5 +1186,7 @@
   "msg_mugshotNotFoundOrInvalidException": "未找到头像或路径无效（显示期间出现异常）：\n{0}\n{1}",
   "msg_confirmClearRandomizedIntro": "这将：",
   "msg_confirmClearRandomizedDeselect": "• 取消选择 {0} 个外观由随机化设置的 NPC",
-  "title_nothingToClear": "无可清除内容"
+  "title_nothingToClear": "无可清除内容",
+  "addToFavorites": "添加到收藏",
+  "unshareFromThisNpc": "取消与此 NPC 共享"
 }

@@ -1293,10 +1293,10 @@
                                          <MenuItem Header="{l:Loc show3DPreviewCtrl}" Command="{Binding Show3DPreviewCommand}"/>
                                          <Separator/>
                                          <MenuItem Command="{Binding ShareWithNpcCommand}"
+                                                   Header="{l:Loc shareWithNPC}"
                                                    ToolTip="{l:Loc makeThisAppearanceAvailable}">
                                              <MenuItem.Style>
                                                  <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
-                                                     <Setter Property="Header" Value="Share with NPC"/>
                                                      <Setter Property="Visibility" Value="Visible"/>
                                                      <Style.Triggers>
                                                          <DataTrigger Binding="{Binding IsGuestAppearance}" Value="True">
@@ -1308,10 +1308,10 @@
                                          </MenuItem>
 
                                          <MenuItem Command="{Binding UnshareFromNpcCommand}"
+                                                   Header="{l:Loc unshareFromThisNpc}"
                                                    ToolTip="{l:Loc removeThisGuestAppearance}">
                                              <MenuItem.Style>
                                                  <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
-                                                     <Setter Property="Header" Value="Unshare from this NPC"/>
                                                      <Setter Property="Visibility" Value="Collapsed"/>
                                                      <Style.Triggers>
                                                          <DataTrigger Binding="{Binding IsGuestAppearance}" Value="True">
@@ -1324,12 +1324,7 @@
                                          <MenuItem Command="{Binding AddToFavoritesCommand}">
                                              <MenuItem.Style>
                                                  <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
-                                                     <Setter Property="Header" Value="Add to Favorites"/>
-                                                     <Style.Triggers>
-                                                         <DataTrigger Binding="{Binding IsFavorite}" Value="True">
-                                                             <Setter Property="Header" Value="Remove from Favorites"/>
-                                                         </DataTrigger>
-                                                     </Style.Triggers>
+                                                     <Setter Property="Header" Value="{Binding FavoriteMenuItemText}"/>
                                                  </Style>
                                              </MenuItem.Style>
                                          </MenuItem>

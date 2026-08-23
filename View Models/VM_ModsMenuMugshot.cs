@@ -28,6 +28,8 @@ namespace NPC_Plugin_Chooser_2.View_Models;
 [DebuggerDisplay("{NpcDisplayName}")]
 public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
 {
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
     public delegate VM_ModsMenuMugshot Factory(
         string imagePath,
         FormKey npcFormKey,
@@ -91,6 +93,7 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
     [Reactive] public ModKey? CurrentSourcePlugin { get; set; }
 
     [Reactive] public bool IsFavorite { get; set; }
+    [Reactive] public string FavoriteMenuItemText { get; set; } = "Add to Favorites";
 
     [Reactive] public bool IsLoading { get; private set; }
     [Reactive] public double LoadingIconRadiusModifier { get; set; } = 0.2;
@@ -186,6 +189,12 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
         IsVisible = true;
 
         IsFavorite = _settings.FavoriteFaces.Contains((this.NpcFormKey, _parentVMModSetting.DisplayName));
+        // Favorites menu item text follows favorite state, in the current UI language
+        this.WhenAnyValue(x => x.IsFavorite)
+            .Subscribe(_ => FavoriteMenuItemText = GetTranslation(
+                IsFavorite ? "removeFromFavorites" : "addToFavorites",
+                IsFavorite ? "Remove from Favorites" : "Add to Favorites"))
+            .DisposeWith(_disposables);
 
         // START MODIFIED SECTION
         // Set initial selection state based on the consistency provider
