@@ -16,12 +16,16 @@ using System.Reactive.Disposables.Fluent;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
 using System.Text;
+using NPC_Plugin_Chooser_2.Localization;
 using System.Threading; // Required for TimeSpan
 
 namespace NPC_Plugin_Chooser_2.View_Models;
 
 public class VM_SplashScreen : ReactiveObject, IDisposable
 {
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
+
     [Reactive] public string ProgramVersion { get; private set; }
     [Reactive] public double ProgressValue { get; private set; }
     [Reactive] public string OperationText { get; private set; }
@@ -215,7 +219,7 @@ public class VM_SplashScreen : ReactiveObject, IDisposable
         var rendered = RenderPendingWarnings();
         if (!string.IsNullOrEmpty(rendered))
         {
-            ScrollableMessageBox.Show(rendered, "Initialization Warning");
+            ScrollableMessageBox.Show(rendered, GetTranslation("title_initializationWarning", "Initialization Warning"));
         }
 
         Dispose();

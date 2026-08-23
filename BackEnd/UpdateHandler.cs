@@ -1,4 +1,4 @@
-using System.Collections.Concurrent;
+﻿using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Reactive.Linq;
@@ -11,6 +11,7 @@ using Mutagen.Bethesda.Skyrim;
 using NPC_Plugin_Chooser_2.Models;
 using NPC_Plugin_Chooser_2.View_Models;
 using NPC_Plugin_Chooser_2.Views;
+using NPC_Plugin_Chooser_2.Localization;
 
 namespace NPC_Plugin_Chooser_2.BackEnd;
 
@@ -19,6 +20,8 @@ namespace NPC_Plugin_Chooser_2.BackEnd;
 /// </summary>
 public class UpdateHandler 
 {
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
     private readonly Settings _settings;
 
     public UpdateHandler(Settings settings)
@@ -518,19 +521,15 @@ public class UpdateHandler
             return;
         }
 
-        var message =
-            """
-            Starting in 2.1.7, FaceFinder downloads and auto-generated mugshots live in their own dedicated folders instead of sharing the curated Mugshots Folder you set up. This lets you switch between curated, FaceFinder, and auto-generated images per NPC without those sources overwriting each other.
+        var message = GetTranslation("msg_217SplitMessage",
+            "Starting in 2.1.7, FaceFinder downloads and auto-generated mugshots live in their own dedicated folders instead of sharing the curated Mugshots Folder you set up. This lets you switch between curated, FaceFinder, and auto-generated images per NPC without those sources overwriting each other.\n\n" +
+            "Defaults:\n" +
+            "  \u2022 FaceFinder cache → <install dir>\\FaceFinder Cache\n" +
+            "  \u2022 Auto-generated   → <install dir>\\AutoGen Mugshots\n" +
+            "  \u2022 Curated mugshots stay where you set them.\n\n" +
+            "Would you like NPC2 to move your existing FaceFinder and auto-generated mugshots out of the curated folder into these new locations now? (Recommended)");
 
-            Defaults:
-              • FaceFinder cache → <install dir>\FaceFinder Cache
-              • Auto-generated   → <install dir>\AutoGen Mugshots
-              • Curated mugshots stay where you set them.
-
-            Would you like NPC2 to move your existing FaceFinder and auto-generated mugshots out of the curated folder into these new locations now? (Recommended)
-            """;
-
-        if (!ScrollableMessageBox.Confirm(message, "2.1.7 Update: Mugshot Folder Split",
+        if (!ScrollableMessageBox.Confirm(message, GetTranslation("title_217MugshotFolderSplit", "2.1.7 Update: Mugshot Folder Split"),
                 MessageBoxImage.Information))
         {
             Debug.WriteLine("2.1.7 mugshot-split: user declined the file migration.");
@@ -617,26 +616,26 @@ public class UpdateHandler
         string? failureLogPath)
     {
         var sb = new StringBuilder();
-        sb.AppendLine($"FaceFinder cache:  moved {ffMoved}, skipped {ffSkipped}, failed {ffFailed}");
-        sb.AppendLine($"Auto-generated:    moved {agMoved}, skipped {agSkipped}, failed {agFailed}");
+        sb.AppendLine(string.Format(GetTranslation("msg_217MigrationReportLine1", "FaceFinder cache:  moved {0}, skipped {1}, failed {2}"), ffMoved, ffSkipped, ffFailed));
+        sb.AppendLine(string.Format(GetTranslation("msg_217MigrationReportLine2", "Auto-generated:    moved {0}, skipped {1}, failed {2}"), agMoved, agSkipped, agFailed));
 
         if (ffFailed > 0 || agFailed > 0)
         {
             sb.AppendLine();
             sb.AppendLine(
-                "Some files could not be moved (in use, locked, or destination already " +
-                "occupied). They remain in the curated Mugshots Folder.");
+                GetTranslation("msg_217MigrationFailures", "Some files could not be moved (in use, locked, or destination already " +
+                "occupied). They remain in the curated Mugshots Folder."));
             if (!string.IsNullOrEmpty(failureLogPath))
             {
                 sb.AppendLine();
-                sb.AppendLine($"Failure details written to:");
+                sb.AppendLine(GetTranslation("msg_217FailureDetailsWrittenTo", "Failure details written to:"));
                 sb.AppendLine(failureLogPath);
             }
-            ScrollableMessageBox.ShowWarning(sb.ToString(), "2.1.7 Mugshot Migration Complete");
+            ScrollableMessageBox.ShowWarning(sb.ToString(), GetTranslation("title_217MigrationComplete", "2.1.7 Mugshot Migration Complete"));
         }
         else
         {
-            ScrollableMessageBox.Show(sb.ToString(), "2.1.7 Mugshot Migration Complete",
+            ScrollableMessageBox.Show(sb.ToString(), GetTranslation("title_217MigrationComplete", "2.1.7 Mugshot Migration Complete"),
                 MessageBoxImage.Information);
         }
     }
@@ -880,16 +879,13 @@ public class UpdateHandler
 
     private void UpdateTo2_0_4_Initial()
     {
-        var message =
-            """
-            In previous versions, the "Include Outfits" option was erroneously defaulted to "Enabled". 
-            Changing outfits on an existing save can be problematic because it causes NPCs with 
-            modified outfits to unequip their clothes. 
-
-            If you would like to disable this option, there is now a batch option in the Mods Menu 
-            to enable/disable outfits for all mods.
-            """;
-        ScrollableMessageBox.Show(message, "Updating to 2.0.4");
+        var message = GetTranslation("msg_204OutfitDefaultMessage",
+            "In previous versions, the \"Include Outfits\" option was erroneously defaulted to \"Enabled\".\n" +
+            "Changing outfits on an existing save can be problematic because it causes NPCs with \n" +
+            "modified outfits to unequip their clothes.\n\n" +
+            "If you would like to disable this option, there is now a batch option in the Mods Menu \n" +
+            "to enable/disable outfits for all mods.");
+        ScrollableMessageBox.Show(message, GetTranslation("title_updatingTo204", "Updating to 2.0.4"));
     }
 
     private void UpdateTo2_0_7_Initial()
@@ -898,15 +894,12 @@ public class UpdateHandler
 
         if (_settings.UsePortraitCreatorFallback)
         {
-            var message =
-                """
-                The Portrait Creator has received significant updates in the 2.0.7 release. 
-                It is strongly recommended to reset Portrait Creator settings to default. 
+            var message = GetTranslation("msg_207PortraitCreatorReset",
+                "The Portrait Creator has received significant updates in the 2.0.7 release. \n" +
+                "It is strongly recommended to reset Portrait Creator settings to default.\n\n" +
+                "Would you like to do so?");
 
-                Would you like to do so?
-                """;
-
-            shouldReset = ScrollableMessageBox.Confirm(message, "Portrait Creator Settings Update");
+            shouldReset = ScrollableMessageBox.Confirm(message, GetTranslation("title_207PortraitCreatorSettingsUpdate", "Portrait Creator Settings Update"));
         }
 
         if (shouldReset)
@@ -1256,9 +1249,9 @@ public class UpdateHandler
     private async Task UpdateTo2_0_7_Final(VM_Mods modsVm, VM_NpcSelectionBar npcSelectionBar,
         VM_SplashScreen? splashReporter)
     {
-        string messageStr =
-            "Previous versions of NPC Plugin Chooser allowed you to select appearances for NPCs with invalid templates using the Select All From Mod batch action. This could result in bugged appearances in-game for those NPCs. Would you like to scan and automatically de-select these NPCs?";
-        if (!ScrollableMessageBox.Confirm(messageStr, "2.0.7 Update"))
+        string messageStr = GetTranslation("msg_207InvalidSelectionsPrompt",
+            "Previous versions of NPC Plugin Chooser allowed you to select appearances for NPCs with invalid templates using the Select All From Mod batch action. This could result in bugged appearances in-game for those NPCs. Would you like to scan and automatically de-select these NPCs?");
+        if (!ScrollableMessageBox.Confirm(messageStr, GetTranslation("title_207Update", "2.0.7 Update")))
         {
             return;
         }
@@ -1295,14 +1288,14 @@ public class UpdateHandler
         if (invalidSelections.Any())
         {
             var message = new StringBuilder();
-            message.AppendLine($"Found {invalidSelections.Count} invalid NPC selection(s) from previous versions.");
+            message.AppendLine(string.Format(GetTranslation("msg_foundInvalidSelections", "Found {0} invalid NPC selection(s) from previous versions."), invalidSelections.Count));
             message.AppendLine();
             message.AppendLine(
-                "These selections have template chain issues that will likely cause incorrect appearances in-game.");
+                GetTranslation("msg_invalidSelectionsHaveTemplateIssues", "These selections have template chain issues that will likely cause incorrect appearances in-game."));
             message.AppendLine();
-            message.AppendLine("Would you like to deselect these NPCs? (Recommended)");
+            message.AppendLine(GetTranslation("msg_deselectTheseNpcsRecommended", "Would you like to deselect these NPCs? (Recommended)"));
             message.AppendLine();
-            message.AppendLine("Details:");
+            message.AppendLine(GetTranslation("msg_details", "Details:"));
             message.AppendLine();
 
             foreach (var (npcKey, modName, reason) in invalidSelections)
@@ -1310,7 +1303,7 @@ public class UpdateHandler
                 message.AppendLine($"• {reason}");
             }
 
-            if (ScrollableMessageBox.Confirm(message.ToString(), "Invalid NPC Selections Found",
+            if (ScrollableMessageBox.Confirm(message.ToString(), GetTranslation("title_invalidNpcSelectionsFound", "Invalid NPC Selections Found"),
                     MessageBoxImage.Warning))
             {
                 // User confirmed - deselect all problematic NPCs
@@ -1320,13 +1313,13 @@ public class UpdateHandler
                     Debug.WriteLine($"Deselected invalid selection: {npcKey} -> {modName}");
                 }
 
-                ScrollableMessageBox.Show($"Deselected {invalidSelections.Count} invalid NPC selection(s).",
-                    "Selections Cleared");
+                ScrollableMessageBox.Show(string.Format(GetTranslation("msg_deselectedInvalidSelections", "Deselected {0} invalid NPC selection(s)."), invalidSelections.Count),
+                    GetTranslation("title_selectionsCleared", "Selections Cleared"));
             }
             else
             {
                 ScrollableMessageBox.ShowWarning(
-                    "Invalid selections were kept. These NPCs may have incorrect appearances in-game until you manually correct them.",
+                    GetTranslation("msg_invalidSelectionsKept", "Invalid selections were kept. These NPCs may have incorrect appearances in-game until you manually correct them."),
                     "Selections Kept");
             }
         }
@@ -1561,7 +1554,7 @@ public class UpdateHandler
                 backupMessage.AppendLine($"  • {logStr}  →  [{modName}]");
             }
 
-            if (ScrollableMessageBox.Confirm(backupMessage.ToString(), "Backup Selections Before 2.1.3 Update",
+            if (ScrollableMessageBox.Confirm(backupMessage.ToString(), GetTranslation("title_backupSelectionsBefore213", "Backup Selections Before 2.1.3 Update"),
                     MessageBoxImage.Warning))
             {
                 // Execute the same export that the Export button uses
@@ -1823,19 +1816,21 @@ public class UpdateHandler
 
         var message = new StringBuilder();
         message.AppendLine(
-            "2.2.3 changed how N.P.C.2 decides which NPCs have a customizable face. It now reads the " +
-            "Race record's \"FaceGen Head\" flag (the game's own signal for whether an actor gets a " +
-            "face) instead of the ActorTypeNPC keyword, and it reads it from the end of an NPC's " +
-            "template chain rather than from the NPC's own record.");
+            GetTranslation("msg_223FilterIntro1",
+                "2.2.3 changed how N.P.C.2 decides which NPCs have a customizable face. It now reads the " +
+                "Race record's \"FaceGen Head\" flag (the game's own signal for whether an actor gets a " +
+                "face) instead of the ActorTypeNPC keyword, and it reads it from the end of an NPC's " +
+                "template chain rather than from the NPC's own record."));
         message.AppendLine();
         message.AppendLine(
-            "This adds NPCs that were previously excluded by mistake (Miraak, for example). It also " +
-            "removes NPCs that turned out to have no face at all - typically automatons, skeletons " +
-            "and other monsters whose mod authors tagged them as people so they would behave " +
-            "correctly in combat and dialogue.");
+            GetTranslation("msg_223FilterIntro2",
+                "This adds NPCs that were previously excluded by mistake (Miraak, for example). It also " +
+                "removes NPCs that turned out to have no face at all - typically automatons, skeletons " +
+                "and other monsters whose mod authors tagged them as people so they would behave " +
+                "correctly in combat and dialogue."));
         message.AppendLine();
         message.AppendLine(
-            $"You have already chosen an appearance for {orphaned.Count} NPC(s) that are no longer offered:");
+            string.Format(GetTranslation("msg_223AlreadyChosenForOrphaned", "You have already chosen an appearance for {0} NPC(s) that are no longer offered:"), orphaned.Count));
         message.AppendLine();
 
         foreach (var (_, modName, label) in orphaned)
@@ -1844,16 +1839,18 @@ public class UpdateHandler
         }
 
         message.AppendLine();
-        message.AppendLine("Would you like to KEEP these selections?");
+        message.AppendLine(GetTranslation("msg_223KeepSelectionsPrompt", "Would you like to KEEP these selections?"));
         message.AppendLine();
         message.AppendLine(
-            "  Yes - keep them. They stay in your selection list and will still be patched. If these " +
-            "NPCs really have no face, that risks writing invalid appearance data.");
+            GetTranslation("msg_223KeepYesText",
+                "  Yes - keep them. They stay in your selection list and will still be patched. If these " +
+                "NPCs really have no face, that risks writing invalid appearance data."));
         message.AppendLine(
-            "  No  - remove them. The selections are discarded; everything else is left untouched.");
+            GetTranslation("msg_223KeepNoText",
+                "  No  - remove them. The selections are discarded; everything else is left untouched."));
 
         bool keepSelections = ScrollableMessageBox.Confirm(message.ToString(),
-            "NPC Filter Updated in 2.2.3", MessageBoxImage.Warning);
+            GetTranslation("title_223NpcFilterUpdated", "NPC Filter Updated in 2.2.3"), MessageBoxImage.Warning);
 
         if (keepSelections)
         {

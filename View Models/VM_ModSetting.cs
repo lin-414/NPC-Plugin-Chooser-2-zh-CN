@@ -31,6 +31,7 @@ using Microsoft.Extensions.Primitives;
 using Mutagen.Bethesda.Strings;
 using DragDrop = GongSolutions.Wpf.DragDrop.DragDrop;
 using IDropTarget = GongSolutions.Wpf.DragDrop.IDropTarget;
+using NPC_Plugin_Chooser_2.Localization;
 using LinkCacheConstructionMixIn = Mutagen.Bethesda.LinkCacheConstructionMixIn; // Assuming Models namespace
 
 namespace NPC_Plugin_Chooser_2.View_Models;
@@ -56,6 +57,8 @@ public enum NpcIssueType
 [DebuggerDisplay("{DisplayName}")]
 public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
 {
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
     public void Dispose()
     {
         _disposables.Dispose();
@@ -677,12 +680,12 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
             {
                 if (!_isLoadingFromModel && !IsPerformingBatchAction && !_parentVm.SuppressPopupWarnings)
                 {
-                    const string message =
+                    string message = GetTranslation("msg_disableAssetCopyingPrompt",
                         "Disabling asset copying means only FaceGen files (.nif/.dds) will be transferred.\n\n" +
                         "It becomes your responsibility to ensure that all other required assets (meshes, textures for armor, hair, eyes, etc.) are still available, though you can disable or hide the source mod plugins.\n\n" +
-                        "Are you sure you want to disable asset copying for this mod?";
+                        "Are you sure you want to disable asset copying for this mod?");
 
-                    if (!ScrollableMessageBox.Confirm(message, "Confirm Disable Asset Copying"))
+                    if (!ScrollableMessageBox.Confirm(message, GetTranslation("title_confirmDisableAssetCopying", "Confirm Disable Asset Copying")))
                     {
                         // Revert if user cancels
                         Observable.Timer(TimeSpan.FromMilliseconds(1), RxApp.MainThreadScheduler)
@@ -729,15 +732,15 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
         UnlinkMugshotDataCommand = ReactiveCommand
             .CreateFromTask(UnlinkMugshotDataAsync, this.WhenAnyValue(x => x.CanUnlinkMugshots)).DisposeWith(_disposables);
         UnlinkMugshotDataCommand.ThrownExceptions
-            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error unlinking mugshot data: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorUnlinkingMugshotData", "Error unlinking mugshot data: {0}"), ExceptionLogger.GetExceptionStack(ex))))
             .DisposeWith(_disposables);
         SetResourcePluginsCommand = ReactiveCommand.Create(SetResourcePlugins).DisposeWith(_disposables);
         SetResourcePluginsCommand.ThrownExceptions
-            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error refreshing mod '{DisplayName}': {ExceptionLogger.GetExceptionStack(ex)}"))
+            .Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorRefreshingMod", "Error refreshing mod '{0}': {1}"), DisplayName, ExceptionLogger.GetExceptionStack(ex))))
             .DisposeWith(_disposables);
         SetOverrideTraversalRootsCommand = ReactiveCommand.Create(SetOverrideTraversalRoots).DisposeWith(_disposables);
         SetOverrideTraversalRootsCommand.ThrownExceptions
-            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error setting override roots for mod '{DisplayName}': {ExceptionLogger.GetExceptionStack(ex)}"))
+            .Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorSettingOverrideRoots", "Error setting override roots for mod '{0}': {1}"), DisplayName, ExceptionLogger.GetExceptionStack(ex))))
             .DisposeWith(_disposables);
 
         // Recomputed whenever the selection changes so the button caption never lags the dialog.
@@ -748,14 +751,14 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
 
         SetKeywordsCommand = ReactiveCommand.Create(SetKeywords).DisposeWith(_disposables);
         SetKeywordsCommand.ThrownExceptions
-            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error setting keywords for mod '{DisplayName}': {ExceptionLogger.GetExceptionStack(ex)}"))
+            .Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorSettingKeywords", "Error setting keywords for mod '{0}': {1}"), DisplayName, ExceptionLogger.GetExceptionStack(ex))))
             .DisposeWith(_disposables);
         DeleteCommand = ReactiveCommand.Create(Delete, this.WhenAnyValue(x => x.CanDelete)).DisposeWith(_disposables);
         DeleteCommand.ThrownExceptions.Subscribe(ex => Debug.WriteLine($"Error executing DeleteCommand: {ExceptionLogger.GetExceptionStack(ex)}"))
             .DisposeWith(_disposables);
         RefreshCommand = ReactiveCommand.CreateFromTask(RefreshAsync).DisposeWith(_disposables);
         RefreshCommand.ThrownExceptions
-            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error refreshing mod '{DisplayName}': {ExceptionLogger.GetExceptionStack(ex)}"))
+            .Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorRefreshingMod2", "Error refreshing mod '{0}': {1}"), DisplayName, ExceptionLogger.GetExceptionStack(ex))))
             .DisposeWith(_disposables);
 
         this.WhenAnyValue(x => x.CorrespondingFolderPaths.Count)
@@ -777,13 +780,13 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
                     // Note: To implement the "Don't show me popup warnings" setting,
                     // a check against that global setting would be added here.
 
-                    const string message =
+                    string message = GetTranslation("msg_warnOverrideHandlingDefault",
                         "WARNING: Setting the override handling mode to anything other than 'Default' is generally not recommended.\n\n" +
                         "It can significantly increase patching time and is only necessary in very specific, rare scenarios.\n\n" +
                         "Only enable override handling for plugins if you see they need it via SSEedit, or if troubleshooting an NPC with bugged appearance.\n\n" +
-                        "Are you sure you want to change this setting for this specific mod?";
+                        "Are you sure you want to change this setting for this specific mod?");
 
-                    if (!ScrollableMessageBox.Confirm(message, "Confirm Override Handling Mode"))
+                    if (!ScrollableMessageBox.Confirm(message, GetTranslation("title_confirmOverrideHandlingMode", "Confirm Override Handling Mode")))
                     {
                         // If user clicks "No", schedule a reversion to the default (null) value.
                         // This runs on the UI thread after a short delay to allow the ComboBox to process the initial selection.
@@ -836,10 +839,10 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
                     !IsPerformingBatchAction &&
                     !_parentVm.SuppressPopupWarnings)
                 {
-                    const string message =
-                        "Modifying NPC outfits on an existing save can lead to NPCs unequipping their outifts entirely. Are you sure you want to enable outfit modification?";
+                    string message = GetTranslation("msg_confirmOutfitForwarding",
+                        "Modifying NPC outfits on an existing save can lead to NPCs unequipping their outifts entirely. Are you sure you want to enable outfit modification?");
 
-                    if (!ScrollableMessageBox.Confirm(message, "Confirm Outfit Forwarding"))
+                    if (!ScrollableMessageBox.Confirm(message, GetTranslation("title_confirmOutfitForwarding", "Confirm Outfit Forwarding")))
                     {
                         // If the user clicks "No", revert the checkbox state to false.
                         // The timer prevents UI contention with the checkbox's state.
@@ -860,10 +863,10 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
                     !IsPerformingBatchAction &&
                     !_parentVm.SuppressPopupWarnings)
                 {
-                    const string message =
-                        "Searching for injected records makes patching take longer, and most appearance mods don't need it. Are you sure you want to enable this?";
+                    string message = GetTranslation("msg_confirmInjectedRecordSearch",
+                        "Searching for injected records makes patching take longer, and most appearance mods don't need it. Are you sure you want to enable this?");
 
-                    if (!ScrollableMessageBox.Confirm(message, "Confirm Injected Record Search"))
+                    if (!ScrollableMessageBox.Confirm(message, GetTranslation("title_confirmInjectedRecordSearch", "Confirm Injected Record Search")))
                     {
                         // If the user clicks "No", revert the checkbox state to false.
                         // The timer prevents UI contention with the checkbox's state.
@@ -957,16 +960,16 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
             {
                 if (!_isLoadingFromModel && !IsPerformingBatchAction && !_parentVm.SuppressPopupWarnings)
                 {
-                    const string message =
+                    string message = GetTranslation("msg_warnIncludeAllOverrides",
                         "WARNING: The 'Include All' option will grab ALL override records from the selected plugins, " +
                         "not just those linked to the NPCs being processed.\n\n" +
                         "This method might include overrides that aren't relevant to the NPCs being selected.\n\n" +
                         "This option should only be used if:\n" +
                         "• You are selecting ALL NPCs in this mod, OR\n" +
                         "• As a fallback if you can't set the right Max Nested Search Layers without your computer running out of memory and crashing.\n\n" +
-                        "Are you sure you want to enable this option?";
+                        "Are you sure you want to enable this option?");
 
-                    if (!ScrollableMessageBox.Confirm(message, "Confirm Include All Overrides"))
+                    if (!ScrollableMessageBox.Confirm(message, GetTranslation("title_confirmIncludeAllOverrides", "Confirm Include All Overrides")))
                     {
                         // Revert if user cancels
                         Observable.Timer(TimeSpan.FromMilliseconds(1), RxApp.MainThreadScheduler)
@@ -1220,12 +1223,12 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
                 else if (index >= 0) // Path didn't change but new path already exists elsewhere
                 {
                     ScrollableMessageBox.ShowWarning(
-                        $"Cannot change path. The new path '{newPath}' already exists in the list.", "Browse Error");
+                        string.Format(GetTranslation("msg_browseErrorPathExists", "Cannot change path. The new path '{0}' already exists in the list."), newPath), GetTranslation("title_browseError", "Browse Error"));
                 }
                 else // index < 0
                 {
                     ScrollableMessageBox.ShowWarning(
-                        $"Cannot change path. The original path '{existingPath}' was not found.", "Browse Error");
+                        string.Format(GetTranslation("msg_browseErrorOriginalNotFound", "Cannot change path. The original path '{0}' was not found."), existingPath), GetTranslation("title_browseError", "Browse Error"));
                 }
             }
         }
@@ -1483,13 +1486,13 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
                 }
                 else if (!Directory.Exists(newPath))
                 {
-                    ScrollableMessageBox.ShowWarning($"The selected folder does not exist: '{newPath}'",
-                        "Browse Error");
+                    ScrollableMessageBox.ShowWarning(string.Format(GetTranslation("msg_folderDoesNotExist", "The selected folder does not exist: '{0}'"), newPath),
+                        GetTranslation("title_browseError", "Browse Error"));
                 }
                 else if (MugShotFolderPaths.Contains(newPath, StringComparer.OrdinalIgnoreCase))
                 {
-                    ScrollableMessageBox.ShowWarning($"The selected folder is already listed for this Mod: '{newPath}'",
-                        "Browse Error");
+                    ScrollableMessageBox.ShowWarning(string.Format(GetTranslation("msg_folderAlreadyListed", "The selected folder is already listed for this Mod: '{0}'"), newPath),
+                        GetTranslation("title_browseError", "Browse Error"));
                 }
             }
         }
@@ -2490,8 +2493,8 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
             Debug.WriteLine(
                 $"Error: Plugin {newSourcePlugin.FileName} is not a valid source choice within ModSetting '{DisplayName}' because it's not in CorrespondingModKeys.");
             ScrollableMessageBox.ShowError(
-                $"Cannot set {newSourcePlugin.FileName} as source for {NpcFormKeysToDisplayName.GetValueOrDefault(npcKey, npcKey.ToString())} because {newSourcePlugin.FileName} is not one of the plugins associated with the '{DisplayName}' mod entry.",
-                "Invalid Source Plugin");
+                string.Format(GetTranslation("msg_invalidSourcePlugin", "Cannot set {0} as source for {1} because {0} is not one of the plugins associated with the '{2}' mod entry."), newSourcePlugin.FileName, NpcFormKeysToDisplayName.GetValueOrDefault(npcKey, npcKey.ToString()), DisplayName),
+                GetTranslation("title_invalidSourcePlugin", "Invalid Source Plugin"));
             return false;
         }
 
@@ -2548,8 +2551,8 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
             if (showMessages)
             {
                 ScrollableMessageBox.ShowError(
-                    $"Plugin {newGlobalSourcePlugin.FileName} is not associated with the mod entry '{DisplayName}'.",
-                    "Invalid Global Source Plugin");
+                    string.Format(GetTranslation("msg_globalSourcePluginNotAssociated", "Plugin {0} is not associated with the mod entry '{1}'."), newGlobalSourcePlugin.FileName, DisplayName),
+                    GetTranslation("title_invalidGlobalSourcePlugin", "Invalid Global Source Plugin"));
             }
 
             return changedNpcKeys;
@@ -2573,8 +2576,8 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
             if (showMessages)
             {
                 ScrollableMessageBox.ShowError(
-                    $"Could not locate the file for plugin {newGlobalSourcePlugin.FileName} within the specified mod folders for '{DisplayName}'.",
-                    "Plugin File Not Found");
+                    string.Format(GetTranslation("msg_pluginFileNotFound", "Could not locate the file for plugin {0} within the specified mod folders for '{1}'."), newGlobalSourcePlugin.FileName, DisplayName),
+                    GetTranslation("title_pluginFileNotFound", "Plugin File Not Found"));
             }
 
             return changedNpcKeys;
@@ -2596,8 +2599,8 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
             if (showMessages)
             {
                 ScrollableMessageBox.ShowError(
-                    $"Error reading NPC data from plugin {newGlobalSourcePlugin.FileName}:\n{e.Message}",
-                    "Plugin Read Error");
+                    string.Format(GetTranslation("msg_pluginReadError", "Error reading NPC data from plugin {0}:\n{1}"), newGlobalSourcePlugin.FileName, e.Message),
+                    GetTranslation("title_pluginReadError", "Plugin Read Error"));
             }
 
             return changedNpcKeys;
@@ -2632,14 +2635,14 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
             if (changedNpcKeys.Any())
             {
                 ScrollableMessageBox.Show(
-                    $"Set {newGlobalSourcePlugin.FileName} as the source for {changedNpcKeys.Count} applicable NPC(s) in '{DisplayName}'.",
-                    "Global Source Updated");
+                    string.Format(GetTranslation("msg_globalSourceUpdated", "Set {0} as the source for {1} applicable NPC(s) in '{2}'."), newGlobalSourcePlugin.FileName, changedNpcKeys.Count, DisplayName),
+                    GetTranslation("title_globalSourceUpdated", "Global Source Updated"));
             }
             else
             {
                 ScrollableMessageBox.Show(
-                    $"No NPC source plugin assignments were changed for '{DisplayName}'. This may be because all relevant NPCs already used {newGlobalSourcePlugin.FileName} as their source, or no ambiguous NPCs are present in that plugin.",
-                    "No Changes Made");
+                    string.Format(GetTranslation("msg_noSourceAssignmentsChanged", "No NPC source plugin assignments were changed for '{0}'. This may be because all relevant NPCs already used {1} as their source, or no ambiguous NPCs are present in that plugin."), DisplayName, newGlobalSourcePlugin.FileName),
+                    GetTranslation("title_noChangesMade", "No Changes Made"));
             }
         }
 
@@ -2683,21 +2686,21 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
         if (mugshotDirNames.Count() == 1)
         {
             sb.AppendLine(
-                $"Are you sure you want to unlink the mugshot folder '{mugshotDirNames.First()}' from '{this.DisplayName}'?");
-            sb.AppendLine($"This will create a new, separate entry for '{mugshotDirNames.First()}' (mugshots only), ");
+                string.Format(GetTranslation("msg_confirmUnlinkMugshotSingle", "Are you sure you want to unlink the mugshot folder '{0}' from '{1}'?"), mugshotDirNames.First(), this.DisplayName));
+            sb.AppendLine(string.Format(GetTranslation("msg_unlinkCreatesNewEntrySingle", "This will create a new, separate entry for '{0}' (mugshots only), "), mugshotDirNames.First()));
         }
         else
         {
             sb.AppendLine(
-                $"Are you sure you want to unlink the mugshot folders '{string.Join(", ", mugshotDirNames)}' from '{this.DisplayName}'?");
+                string.Format(GetTranslation("msg_confirmUnlinkMugshotPlural", "Are you sure you want to unlink the mugshot folders '{0}' from '{1}'?"), string.Join(", ", mugshotDirNames), this.DisplayName));
             sb.AppendLine(
-                $"This will create new, separate entries for '{string.Join(", ", mugshotDirNames)}' (mugshots only), ");
+                string.Format(GetTranslation("msg_unlinkCreatesNewEntryPlural", "This will create new, separate entries for '{0}' (mugshots only), "), string.Join(", ", mugshotDirNames)));
         }
 
-        sb.AppendLine($"and '{this.DisplayName}' will no longer have these mugshots associated.");
+        sb.AppendLine(string.Format(GetTranslation("msg_unlinkNoLongerAssociated", "and '{0}' will no longer have these mugshots associated."), this.DisplayName));
 
         // Confirm with user
-        if (!ScrollableMessageBox.Confirm(sb.ToString(), "Confirm Unlink Mugshot Data"))
+        if (!ScrollableMessageBox.Confirm(sb.ToString(), GetTranslation("title_confirmUnlinkMugshotData", "Confirm Unlink Mugshot Data")))
         {
             return;
         }
@@ -2746,24 +2749,24 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
         // Confirm with user, spelling out the NPC state that goes with the entry.
         var (selectionCount, shareCount) = _parentVm.CountNpcStateForMod(DisplayName);
         var message = new StringBuilder();
-        message.AppendLine($"Are you sure you want to permanently delete the entry for '{DisplayName}'?");
+        message.AppendLine(string.Format(GetTranslation("msg_confirmDeleteModEntry", "Are you sure you want to permanently delete the entry for '{0}'?"), DisplayName));
         if (selectionCount > 0 || shareCount > 0)
         {
             message.AppendLine();
-            message.AppendLine("This will also:");
+            message.AppendLine(GetTranslation("msg_deleteWillAlso", "This will also:"));
             if (selectionCount > 0)
             {
-                message.AppendLine($"  • Deselect {selectionCount} NPC(s) that currently use this mod's appearance");
+                message.AppendLine(string.Format(GetTranslation("msg_deleteDeselectNpcs", "  • Deselect {0} NPC(s) that currently use this mod's appearance"), selectionCount));
             }
             if (shareCount > 0)
             {
-                message.AppendLine($"  • Unshare {shareCount} appearance(s) this mod supplied to other NPCs");
+                message.AppendLine(string.Format(GetTranslation("msg_deleteUnshareAppearances", "  • Unshare {0} appearance(s) this mod supplied to other NPCs"), shareCount));
             }
         }
         message.AppendLine();
-        message.Append("This action cannot be undone.");
+        message.Append(GetTranslation("msg_deleteCannotBeUndone", "This action cannot be undone."));
 
-        if (!ScrollableMessageBox.Confirm(message.ToString(), "Confirm Deletion"))
+        if (!ScrollableMessageBox.Confirm(message.ToString(), GetTranslation("title_confirmDeletion", "Confirm Deletion")))
         {
             return;
         }
@@ -2903,14 +2906,14 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
             {
                 // If the refresh determined the mod is no longer valid, notify the user.
                 var message = new StringBuilder();
-                message.AppendLine($"The mod '{DisplayName}' no longer contains any plugins or FaceGen files.");
-                message.AppendLine($"Reason: {failureReason}");
+                message.AppendLine(string.Format(GetTranslation("msg_modNoLongerContainsPlugins", "The mod '{0}' no longer contains any plugins or FaceGen files."), DisplayName));
+                message.AppendLine(string.Format(GetTranslation("msg_modReason", "Reason: {0}"), failureReason));
                 message.AppendLine();
-                message.Append("It has been removed from the appearance mods list");
+                message.Append(GetTranslation("msg_modRemovedFromList", "It has been removed from the appearance mods list"));
                 message.AppendLine(DescribeClearedNpcState(stateBefore) is { Length: > 0 } cost
-                    ? $", which also {cost}."
+                    ? string.Format(GetTranslation("msg_modRemovedCost", ", which also {0}."), cost)
                     : ".");
-                ScrollableMessageBox.Show(message.ToString(), "Mod Removed");
+                ScrollableMessageBox.Show(message.ToString(), GetTranslation("title_modRemoved", "Mod Removed"));
             }
             else
             {
@@ -2922,8 +2925,8 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
                 if (cost.Length > 0)
                 {
                     ScrollableMessageBox.Show(
-                        $"'{DisplayName}' no longer provides some of the NPCs it used to, which {cost}.",
-                        "Selections Updated");
+                        string.Format(GetTranslation("msg_selectionsUpdated", "'{0}' no longer provides some of the NPCs it used to, which {1}."), DisplayName, cost),
+                        GetTranslation("title_selectionsUpdated", "Selections Updated"));
                 }
             }
         }
@@ -3432,4 +3435,4 @@ public class VM_ModSetting : ReactiveObject, IDisposable, IDropTarget
     }
 
     #endregion
-}
+}

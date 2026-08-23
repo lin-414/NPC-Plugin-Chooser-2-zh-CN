@@ -1091,16 +1091,16 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
             ReactiveCommand.Create(RemoveAllVisibleNpcsFromGroup, canExecuteAllGroupAction);
 
         AddCurrentNpcToGroupCommand.ThrownExceptions
-            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error adding NPC to group: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorAddingNpcToGroup", "Error adding NPC to group: {0}"), ExceptionLogger.GetExceptionStack(ex))))
             .DisposeWith(_disposables);
         RemoveCurrentNpcFromGroupCommand.ThrownExceptions
-            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error removing NPC from group: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorRemovingNpcFromGroup", "Error removing NPC from group: {0}"), ExceptionLogger.GetExceptionStack(ex))))
             .DisposeWith(_disposables);
         AddAllVisibleNpcsToGroupCommand.ThrownExceptions.Subscribe(ex =>
-                ScrollableMessageBox.ShowError($"Error adding all visible NPCs to group: {ExceptionLogger.GetExceptionStack(ex)}"))
+                ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorAddingAllVisibleToGroup", "Error adding all visible NPCs to group: {0}"), ExceptionLogger.GetExceptionStack(ex))))
             .DisposeWith(_disposables);
         RemoveAllVisibleNpcsFromGroupCommand.ThrownExceptions.Subscribe(ex =>
-                ScrollableMessageBox.ShowError($"Error removing all visible NPCs from group: {ExceptionLogger.GetExceptionStack(ex)}"))
+                ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorRemovingAllVisibleFromGroup", "Error removing all visible NPCs from group: {0}"), ExceptionLogger.GetExceptionStack(ex))))
             .DisposeWith(_disposables);
 
         UpdateAvailableNpcGroups();
@@ -1192,7 +1192,7 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
             .Select(count => count >= 2);
         CompareSelectedCommand = ReactiveCommand.Create(ExecuteCompareSelected, canCompareSelected);
         CompareSelectedCommand.ThrownExceptions
-            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error comparing selected: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorComparingSelected", "Error comparing selected: {0}"), ExceptionLogger.GetExceptionStack(ex))))
             .DisposeWith(_disposables);
 
         // Define the observable for enabling the Hide/Unhide menu button
@@ -1209,27 +1209,27 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
 
         HideAllButSelectedCommand = ReactiveCommand.Create(ExecuteHideAllButSelected, canExecuteHideUnhideActions).DisposeWith(_disposables);
         HideAllButSelectedCommand.ThrownExceptions
-            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error hiding unselected: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorHidingUnselected", "Error hiding unselected: {0}"), ExceptionLogger.GetExceptionStack(ex))))
             .DisposeWith(_disposables);
         HideAllSelectedCommand = ReactiveCommand.Create(ExecuteHideAllSelected, canExecuteHideUnhideActions).DisposeWith(_disposables);
         HideAllSelectedCommand.ThrownExceptions
-            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error hiding selected: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorHidingSelected", "Error hiding selected: {0}"), ExceptionLogger.GetExceptionStack(ex))))
             .DisposeWith(_disposables);
         UnhideAllSelectedCommand = ReactiveCommand.Create(ExecuteUnhideAllSelected, canExecuteHideUnhideActions).DisposeWith(_disposables);
         UnhideAllSelectedCommand.ThrownExceptions
-            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error unhiding selected: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorUnhidingSelected", "Error unhiding selected: {0}"), ExceptionLogger.GetExceptionStack(ex))))
             .DisposeWith(_disposables);
         UnhideAllButSelectedCommand =
             ReactiveCommand.Create(ExecuteUnhideAllButSelected, canExecuteHideUnhideActions).DisposeWith(_disposables);
         UnhideAllButSelectedCommand.ThrownExceptions
-            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error unhiding unselected: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorUnhidingUnselected", "Error unhiding unselected: {0}"), ExceptionLogger.GetExceptionStack(ex))))
             .DisposeWith(_disposables);
 
         var canDeselectAll = this.WhenAnyValue(x => x.CheckedMugshotCount)
             .Select(count => count >= 1);
         DeselectAllCommand = ReactiveCommand.Create(ExecuteDeselectAll, canDeselectAll).DisposeWith(_disposables);
         DeselectAllCommand.ThrownExceptions
-            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error deselecting all: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorDeselectingAll", "Error deselecting all: {0}"), ExceptionLogger.GetExceptionStack(ex))))
             .DisposeWith(_disposables);
         // --- End NEW Setup ---
 
@@ -1242,12 +1242,12 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
 
         ImportChoicesFromLoadOrderCommand.ThrownExceptions
             .Subscribe(ex =>
-                ScrollableMessageBox.ShowError($"Error importing choices from load order: {ExceptionLogger.GetExceptionStack(ex)}", TranslationServiceProvider.GetService()?.GetString("importError") ?? "Import Error"))
+                ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorImportingChoicesFromLoadOrder", "Error importing choices from load order: {0}"), ExceptionLogger.GetExceptionStack(ex)), TranslationServiceProvider.GetService()?.GetString("importError") ?? "Import Error"))
             .DisposeWith(_disposables);
         RandomizeChoicesCommand.ThrownExceptions
             .Subscribe(ex =>
-                ScrollableMessageBox.ShowError($"Error randomizing choices: {ExceptionLogger.GetExceptionStack(ex)}",
-                    "Randomize Error"))
+                ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorRandomizingChoices", "Error randomizing choices: {0}"), ExceptionLogger.GetExceptionStack(ex)),
+                    GetTranslation("title_randomizeError", "Randomize Error")))
             .DisposeWith(_disposables);
         ExportChoicesCommand.ThrownExceptions
             .Subscribe(ex =>
@@ -1263,10 +1263,10 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         // --- End Import/Export Setup ---
         
         ShowFavoritesCommand = ReactiveCommand.Create(ShowFavoritesWindowForSharing).DisposeWith(_disposables);
-        ShowFavoritesCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error opening favorites: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+        ShowFavoritesCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorOpeningFavorites", "Error opening favorites: {0}"), ExceptionLogger.GetExceptionStack(ex)))).DisposeWith(_disposables);
 
         AddFavoriteFaceToNpcCommand = ReactiveCommand.Create<VM_NpcsMenuSelection>(ShowFavoritesWindowForApplying).DisposeWith(_disposables);
-        AddFavoriteFaceToNpcCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error opening favorites: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+        AddFavoriteFaceToNpcCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorOpeningFavorites", "Error opening favorites: {0}"), ExceptionLogger.GetExceptionStack(ex)))).DisposeWith(_disposables);
 
 
         if (CurrentNpcAppearanceMods != null && CurrentNpcAppearanceMods.Any())
@@ -1958,8 +1958,8 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
     private async Task ImportChoicesFromLoadOrderAsync()
     {
         if (!ScrollableMessageBox.Confirm(
-                "This will overwrite your current choices based on your load order. This action cannot be undone. Are you sure you want to continue?",
-                "Confirm Import Choices", MessageBoxImage.Warning))
+                GetTranslation("msg_confirmImportChoices", "This will overwrite your current choices based on your load order. This action cannot be undone. Are you sure you want to continue?"),
+                GetTranslation("title_confirmImportChoices", "Confirm Import Choices"), MessageBoxImage.Warning))
         {
             return; // User cancelled
         }
@@ -2251,45 +2251,46 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         {
             var nothingMessage = new StringBuilder();
             nothingMessage.Append(
-                "No NPCs in the selected set have an eligible appearance under these options. " +
-                "Make sure at least one source mod is checked (and, for borrowed faces, that 'Allow shared appearances' is enabled).");
+                GetTranslation("msg_noEligibleAppearance", "No NPCs in the selected set have an eligible appearance under these options. " +
+                "Make sure at least one source mod is checked (and, for borrowed faces, that 'Allow shared appearances' is enabled)."));
             if (singleOptionSkipCount > 0)
             {
                 nothingMessage.AppendLine();
                 nothingMessage.AppendLine();
-                nothingMessage.Append($"{singleOptionSkipCount} NPC(s) have exactly one eligible appearance — " +
-                                      "check 'Allow single-option NPCs' to include them.");
+                nothingMessage.Append(string.Format(GetTranslation("msg_singleOptionSkipCountNote", "{0} NPC(s) have exactly one eligible appearance — " +
+                                      "check 'Allow single-option NPCs' to include them."), singleOptionSkipCount));
             }
 
-            ScrollableMessageBox.Show(nothingMessage.ToString(), "Nothing to Randomize");
+            ScrollableMessageBox.Show(nothingMessage.ToString(), GetTranslation("title_nothingToRandomize", "Nothing to Randomize"));
             return;
         }
 
         int overwriteCount = applicableNpcs.Count(n => _consistencyProvider.DoesNpcHaveSelection(n.NpcFormKey));
 
         var confirmation = new StringBuilder();
-        confirmation.AppendLine($"This will pick a random appearance for {applicableNpcs.Count} NPC(s) from the {(scope == RandomizeScope.AllNpcs ? "full" : "current (filtered)")} list.");
+        confirmation.AppendLine(string.Format(GetTranslation("msg_randomizeWillPick", "This will pick a random appearance for {0} NPC(s) from the {1} list."), applicableNpcs.Count,
+            scope == RandomizeScope.AllNpcs ? GetTranslation("msg_randomFullOrFiltered_full", "full") : GetTranslation("msg_randomFullOrFiltered_filtered", "current (filtered)")));
         if (noEligibleCount > 0)
         {
             confirmation.AppendLine();
-            confirmation.AppendLine($"{noEligibleCount} NPC(s) in the set have no eligible appearance under these options and will be skipped.");
+            confirmation.AppendLine(string.Format(GetTranslation("msg_randomizeNoEligibleSkipped", "{0} NPC(s) in the set have no eligible appearance under these options and will be skipped."), noEligibleCount));
         }
         if (singleOptionSkipCount > 0)
         {
             confirmation.AppendLine();
-            confirmation.AppendLine($"{singleOptionSkipCount} NPC(s) have only one eligible appearance and will be left alone " +
-                                    "('Allow single-option NPCs' is off).");
+            confirmation.AppendLine(string.Format(GetTranslation("msg_randomizeSingleOptionSkipped", "{0} NPC(s) have only one eligible appearance and will be left alone " +
+                                    "('Allow single-option NPCs' is off)."), singleOptionSkipCount));
         }
         if (overwriteCount > 0)
         {
             confirmation.AppendLine();
-            confirmation.AppendLine($"{overwriteCount} NPC(s) already have a selection that will be replaced — or removed, " +
-                                    "for any NPC no appearance can be picked for. This action cannot be undone.");
+            confirmation.AppendLine(string.Format(GetTranslation("msg_randomizeOverwriteNotice", "{0} NPC(s) already have a selection that will be replaced — or removed, " +
+                                    "for any NPC no appearance can be picked for. This action cannot be undone."), overwriteCount));
         }
         confirmation.AppendLine();
-        confirmation.Append("Are you sure you want to proceed?");
+        confirmation.Append(GetTranslation("msg_areYouSureProceed", "Are you sure you want to proceed?"));
 
-        if (!ScrollableMessageBox.Confirm(confirmation.ToString(), "Confirm Randomize",
+        if (!ScrollableMessageBox.Confirm(confirmation.ToString(), GetTranslation("title_confirmRandomize", "Confirm Randomize"),
                 overwriteCount > 0 ? MessageBoxImage.Warning : MessageBoxImage.Question))
         {
             return;
@@ -2576,7 +2577,7 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         }
         else
         {
-            ScrollableMessageBox.Show(resultMessage.ToString(), "Randomize Complete");
+            ScrollableMessageBox.Show(resultMessage.ToString(), GetTranslation("title_randomizeComplete", "Randomize Complete"));
         }
     }
 
@@ -2727,18 +2728,18 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                     var reportMessage = new StringBuilder();
                     if (issues.Any())
                     {
-                        reportMessage.AppendLine($"The import file contains {issues.Count} issue(s) that will be skipped.\n");
-                        if(report.MalformedEntries.Any()) reportMessage.AppendLine("--- Malformed Entries ---\n" + string.Join('\n', report.MalformedEntries) + "\n");
-                        if(report.UnresolvedNpcs.Any()) reportMessage.AppendLine("--- Unresolved NPCs ---\n" + string.Join('\n', report.UnresolvedNpcs) + "\n");
-                        if(report.UnrecognizedMods.Any()) reportMessage.AppendLine("--- Unrecognized Mods/Choices ---\n" + string.Join('\n', report.UnrecognizedMods) + "\n");
-                        reportMessage.AppendLine($"Do you want to proceed with importing the {report.ValidSelections.Count} valid choices?");
+                        reportMessage.AppendLine(string.Format(GetTranslation("msg_importIssuesSkipped", "The import file contains {0} issue(s) that will be skipped.\n"), issues.Count));
+                        if(report.MalformedEntries.Any()) reportMessage.AppendLine(string.Format(GetTranslation("msg_importSectionMalformed", "--- Malformed Entries ---\n{0}\n"), string.Join('\n', report.MalformedEntries)));
+                        if(report.UnresolvedNpcs.Any()) reportMessage.AppendLine(string.Format(GetTranslation("msg_importSectionUnresolved", "--- Unresolved NPCs ---\n{0}\n"), string.Join('\n', report.UnresolvedNpcs)));
+                        if(report.UnrecognizedMods.Any()) reportMessage.AppendLine(string.Format(GetTranslation("msg_importSectionUnrecognized", "--- Unrecognized Mods/Choices ---\n{0}\n"), string.Join('\n', report.UnrecognizedMods)));
+                        reportMessage.AppendLine(string.Format(GetTranslation("msg_importProceedValid", "Do you want to proceed with importing the {0} valid choices?"), report.ValidSelections.Count));
                     }
                     else
                     {
-                        reportMessage.Append($"This will overwrite your current choices with {report.ValidSelections.Count} choice(s) from the file. Proceed?");
+                        reportMessage.Append(string.Format(GetTranslation("msg_importOverwriteProceed", "This will overwrite your current choices with {0} choice(s) from the file. Proceed?"), report.ValidSelections.Count));
                     }
 
-                    if (ScrollableMessageBox.Confirm(reportMessage.ToString(), "Confirm Import", issues.Any() ? MessageBoxImage.Warning : MessageBoxImage.Question))
+                    if (ScrollableMessageBox.Confirm(reportMessage.ToString(), GetTranslation("title_confirmImport", "Confirm Import"), issues.Any() ? MessageBoxImage.Warning : MessageBoxImage.Question))
                     {
                         // 4. If confirmed, apply the valid selections.
                         _consistencyProvider.ClearAllSelections();
@@ -2763,7 +2764,7 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
                                 AddGuestAppearance(targetNpcKey, modName, sourceNpcKey, sourceNpcDisplayName);
                             }
                         }
-                        ScrollableMessageBox.Show($"Import complete. {report.ValidSelections.Count} choices have been applied.", "Import Successful");
+                        ScrollableMessageBox.Show(string.Format(GetTranslation("msg_importComplete", "Import complete. {0} choices have been applied."), report.ValidSelections.Count), GetTranslation("title_importSuccessful", "Import Successful"));
                     }
                     else
                     {
@@ -2904,8 +2905,8 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         {
             Debug.WriteLine(
                 $"VM_NpcSelectionBar.JumpToMod: Could not find VM_ModSetting with DisplayName: {targetModName}");
-            ScrollableMessageBox.ShowWarning($"Could not find the mod '{targetModName}' in the Mods list.",
-                "Mod Not Found");
+            ScrollableMessageBox.ShowWarning(string.Format(GetTranslation("msg_couldNotFindMod", "Could not find the mod '{0}' in the Mods list."), targetModName),
+                GetTranslation("title_modNotFound", "Mod Not Found"));
         }
     }
     
@@ -4968,20 +4969,20 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
 
         if (toDeselect.Count == 0 && !hasRandomizedOptions)
         {
-            ScrollableMessageBox.Show(TranslationServiceProvider.GetService()?.GetString("msg_noRandomizedAppearancesToClear") ?? "There are no randomized appearances to clear.", "Nothing to Clear");
+            ScrollableMessageBox.Show(TranslationServiceProvider.GetService()?.GetString("msg_noRandomizedAppearancesToClear") ?? "There are no randomized appearances to clear.", GetTranslation("title_nothingToClear", "Nothing to Clear"));
             return;
         }
 
         var confirm = new StringBuilder();
-        confirm.AppendLine("This will:");
-        confirm.AppendLine($"• Deselect {toDeselect.Count} NPC(s) whose appearance was set by randomization");
-        confirm.AppendLine("• Remove the shared appearance options that randomization added");
+        confirm.AppendLine(GetTranslation("msg_confirmClearRandomizedIntro", "This will:"));
+        confirm.AppendLine(string.Format(GetTranslation("msg_confirmClearRandomizedDeselect", "• Deselect {0} NPC(s) whose appearance was set by randomization"), toDeselect.Count));
+        confirm.AppendLine(GetTranslation("msg_confirmClearRandomizedNpcs_2", "• Remove the shared appearance options that randomization added"));
         confirm.AppendLine();
-        confirm.AppendLine("Your manually-chosen selections and manually-shared faces are not affected.");
+        confirm.AppendLine(GetTranslation("msg_confirmClearRandomizedNpcs_3", "Your manually-chosen selections and manually-shared faces are not affected."));
         confirm.AppendLine();
-        confirm.Append("Continue?");
+        confirm.Append(GetTranslation("msg_confirmClearRandomizedNpcs_4", "Continue?"));
 
-        if (!ScrollableMessageBox.Confirm(confirm.ToString(), "Clear Randomized NPCs", MessageBoxImage.Warning))
+        if (!ScrollableMessageBox.Confirm(confirm.ToString(), GetTranslation("title_clearRandomizedNpcs", "Clear Randomized NPCs"), MessageBoxImage.Warning))
         {
             return;
         }
@@ -5001,7 +5002,7 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
 
         _lazyVmSettings.Value?.RequestThrottledSave();
 
-        ScrollableMessageBox.Show($"Cleared randomized appearances for {toDeselect.Count} NPC(s).", "Clear Complete");
+        ScrollableMessageBox.Show(string.Format(GetTranslation("msg_clearedRandomized", "Cleared randomized appearances for {0} NPC(s)."), toDeselect.Count), GetTranslation("title_clearComplete", "Clear Complete"));
     }
 
     public void RefreshCurrentNpcAppearanceSources()
@@ -5511,22 +5512,22 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
 
         if (!applicableNpcs.Any())
         {
-            ScrollableMessageBox.Show($"The mod '{targetModName}' is not a direct appearance source for any known NPCs.", "No Applicable NPCs");
+            ScrollableMessageBox.Show(string.Format(GetTranslation("msg_notDirectAppearanceSource", "The mod '{0}' is not a direct appearance source for any known NPCs."), targetModName), GetTranslation("title_noApplicableNpcs", "No Applicable NPCs"));
             return;
         }
 
         // Add a confirmation dialog for this potentially large-scale change.
         var confirmationMessage =
-            $"This will set the appearance for {applicableNpcs.Count} NPC(s) to '{targetModName}'.\n\n";
+            string.Format(GetTranslation("msg_bulkSelectionWillSet", "This will set the appearance for {0} NPC(s) to '{1}'.\n\n"), applicableNpcs.Count, targetModName);
 
         if (referenceMod.AssociatedModSetting == null ||
             !referenceMod.AssociatedModSetting.CorrespondingFolderPaths.Any())
         {
-            confirmationMessage += $"Since only mugshots for '{referenceMod.ModName}' are installed, without the actual mod, validation can't be performed. If the mod contains templated NPCs, their appearances may get bugged without validation. It is safer to install the mod and then batch-apply it so that validation can be performed. Continue anyway?" + "\n\n";
+            confirmationMessage += string.Format(GetTranslation("msg_bulkSelectionMugshotsOnly", "Since only mugshots for '{0}' are installed, without the actual mod, validation can't be performed. If the mod contains templated NPCs, their appearances may get bugged without validation. It is safer to install the mod and then batch-apply it so that validation can be performed. Continue anyway?\n\n"), referenceMod.ModName);
         }
-        confirmationMessage += "Are you sure you want to proceed?";
+        confirmationMessage += GetTranslation("msg_areYouSureProceed", "Are you sure you want to proceed?");
 
-        if (!ScrollableMessageBox.Confirm(confirmationMessage, "Confirm Bulk Selection"))
+        if (!ScrollableMessageBox.Confirm(confirmationMessage, GetTranslation("title_confirmBulkSelection", "Confirm Bulk Selection")))
         {
             return;
         }
@@ -5662,24 +5663,24 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         if (!applicableNpcs.Any())
         {
             string message = onlyAvailable
-                ? $"The mod '{targetModName}' is not an available appearance source for any of the currently visible NPCs."
-                : $"The mod '{targetModName}' is not a valid appearance source for any of the currently visible NPCs.";
-            ScrollableMessageBox.Show(message, "No Applicable NPCs");
+                ? string.Format(GetTranslation("msg_notAvailableSourceForVisible", "The mod '{0}' is not an available appearance source for any of the currently visible NPCs."), targetModName)
+                : string.Format(GetTranslation("msg_notValidSourceForVisible", "The mod '{0}' is not a valid appearance source for any of the currently visible NPCs."), targetModName);
+            ScrollableMessageBox.Show(message, GetTranslation("title_noApplicableNpcs", "No Applicable NPCs"));
             return;
         }
 
         // The confirmation message is customized based on the action
         var confirmationMessage =
-            $"This will set the appearance for {applicableNpcs.Count} NPC(s) to '{targetModName}'.\n\n";
+            string.Format(GetTranslation("msg_bulkSelectionWillSet", "This will set the appearance for {0} NPC(s) to '{1}'.\n\n"), applicableNpcs.Count, targetModName);
 
         if (referenceMod.AssociatedModSetting == null ||
             !referenceMod.AssociatedModSetting.CorrespondingFolderPaths.Any())
         {
-            confirmationMessage += $"Since only mugshots for '{referenceMod.ModName}' are installed, without the actual mod, validation can't be performed. If the mod contains templated NPCs, their appearances may get bugged without validation. It is safer to install the mod and then batch-apply it so that validation can be performed. Continue anyway?" + "\n\n";
+            confirmationMessage += string.Format(GetTranslation("msg_bulkSelectionMugshotsOnly", "Since only mugshots for '{0}' are installed, without the actual mod, validation can't be performed. If the mod contains templated NPCs, their appearances may get bugged without validation. It is safer to install the mod and then batch-apply it so that validation can be performed. Continue anyway?\n\n"), referenceMod.ModName);
         }
-        confirmationMessage += "Are you sure you want to proceed?";
+        confirmationMessage += GetTranslation("msg_areYouSureProceed", "Are you sure you want to proceed?");
 
-        if (!ScrollableMessageBox.Confirm(confirmationMessage, "Confirm Bulk Selection"))
+        if (!ScrollableMessageBox.Confirm(confirmationMessage, GetTranslation("title_confirmBulkSelection", "Confirm Bulk Selection")))
         {
             return;
         }
@@ -5810,13 +5811,13 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
 
         if (!npcsToUnselect.Any())
         {
-            ScrollableMessageBox.Show($"No NPCs currently have '{targetModName}' selected.", "No Action Taken");
+            ScrollableMessageBox.Show(string.Format(GetTranslation("msg_noNpcsHaveModSelected", "No NPCs currently have '{0}' selected."), targetModName), GetTranslation("title_noActionTaken", "No Action Taken"));
             return;
         }
 
         // Display the confirmation dialog with the required warning message.
-        string confirmationMessage = $"{npcsToUnselect.Count} NPC selections will be cleared, and will no longer have an appearance selected. Are you sure you want to proceed?";
-        if (!ScrollableMessageBox.Confirm(confirmationMessage, "Confirm Bulk Unselection", MessageBoxImage.Warning))
+        string confirmationMessage = string.Format(GetTranslation("msg_bulkUnselectionConfirm", "{0} NPC selections will be cleared, and will no longer have an appearance selected. Are you sure you want to proceed?"), npcsToUnselect.Count);
+        if (!ScrollableMessageBox.Confirm(confirmationMessage, GetTranslation("title_confirmBulkUnselection", "Confirm Bulk Unselection"), MessageBoxImage.Warning))
         {
             return;
         }
@@ -5851,13 +5852,13 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
 
         if (!npcsToUnselect.Any())
         {
-            ScrollableMessageBox.Show($"No currently visible NPCs have '{targetModName}' selected.", "No Action Taken");
+            ScrollableMessageBox.Show(string.Format(GetTranslation("msg_noVisibleNpcsHaveModSelected", "No currently visible NPCs have '{0}' selected."), targetModName), GetTranslation("title_noActionTaken", "No Action Taken"));
             return;
         }
 
         // Display the confirmation dialog for visible NPCs.
-        string confirmationMessage = $"{npcsToUnselect.Count} visible NPC selections will be cleared, and will no longer have an appearance selected. Are you sure you want to proceed?";
-        if (!ScrollableMessageBox.Confirm(confirmationMessage, "Confirm Visible Unselection", MessageBoxImage.Warning))
+        string confirmationMessage = string.Format(GetTranslation("msg_visibleUnselectionConfirm", "{0} visible NPC selections will be cleared, and will no longer have an appearance selected. Are you sure you want to proceed?"), npcsToUnselect.Count);
+        if (!ScrollableMessageBox.Confirm(confirmationMessage, GetTranslation("title_confirmVisibleUnselection", "Confirm Visible Unselection"), MessageBoxImage.Warning))
         {
             return;
         }
@@ -6055,8 +6056,8 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         if (!AreAnyFiltersActive())
         {
             if (!ScrollableMessageBox.Confirm(
-                    $"No filters are currently applied. Are you sure you want to add ALL {totalNpcCount} NPCs in your game to the group '{groupName}'?",
-                    "Confirm Add All NPCs"))
+                    string.Format(GetTranslation("msg_confirmAddAllNpcs", "No filters are currently applied. Are you sure you want to add ALL {0} NPCs in your game to the group '{1}'?"), totalNpcCount, groupName),
+                    GetTranslation("title_confirmAddAllNpcs", "Confirm Add All NPCs")))
             {
                 Debug.WriteLine("Add All Visible NPCs to Group cancelled by user (no filters active).");
                 return false;
@@ -6064,8 +6065,8 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         }
         else
         {
-            if (!ScrollableMessageBox.Confirm($"Add all {count} currently visible NPCs to the group '{groupName}'?",
-                    "Confirm Add Visible NPCs"))
+            if (!ScrollableMessageBox.Confirm(string.Format(GetTranslation("msg_confirmAddVisibleNpcs", "Add all {0} currently visible NPCs to the group '{1}'?"), count, groupName),
+                    GetTranslation("title_confirmAddVisibleNpcs", "Confirm Add Visible NPCs")))
             {
                 Debug.WriteLine("Add All Visible NPCs to Group cancelled by user.");
                 return false;
@@ -6109,8 +6110,8 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         if (!AreAnyFiltersActive())
         {
             if (!ScrollableMessageBox.Confirm(
-                    $"No filters are currently applied. Are you sure you want to attempt removing ALL {totalNpcCount} NPCs in your game from the group '{groupName}'?",
-                    "Confirm Remove All NPCs", MessageBoxImage.Warning))
+                    string.Format(GetTranslation("msg_confirmRemoveAllNpcs", "No filters are currently applied. Are you sure you want to attempt removing ALL {0} NPCs in your game from the group '{1}'?"), totalNpcCount, groupName),
+                    GetTranslation("title_confirmRemoveAllNpcs", "Confirm Remove All NPCs"), MessageBoxImage.Warning))
             {
                 Debug.WriteLine("Remove All Visible NPCs from Group cancelled by user (no filters active).");
                 return false;
@@ -6119,8 +6120,8 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         else
         {
             if (!ScrollableMessageBox.Confirm(
-                    $"Remove all {count} currently visible NPCs from the group '{groupName}'?",
-                    "Confirm Remove Visible NPCs"))
+                    string.Format(GetTranslation("msg_confirmRemoveVisibleNpcs", "Remove all {0} currently visible NPCs from the group '{1}'?"), count, groupName),
+                    GetTranslation("title_confirmRemoveVisibleNpcs", "Confirm Remove Visible NPCs")))
             {
                 Debug.WriteLine("Remove All Visible NPCs from Group cancelled by user.");
                 return false;
@@ -6226,9 +6227,9 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
 
         if (!npcsToUpdate.Any()) return;
 
-        var confirmationMessage = $"This will change the selected appearance for {npcsToUpdate.Count} NPC(s) from '{fromModName} ({fromNpcKey})' to '{toModName} ({toNpcKey})'. Proceed?";
+        var confirmationMessage = string.Format(GetTranslation("msg_confirmMassUpdate", "This will change the selected appearance for {0} NPC(s) from '{1} ({2})' to '{3} ({4})'. Proceed?"), npcsToUpdate.Count, fromModName, fromNpcKey, toModName, toNpcKey);
         string imagePath = @"Resources\Replace Selected Mod.png";
-        if (ScrollableMessageBox.Confirm(confirmationMessage, "Confirm Mass Update", displayImagePath: imagePath))
+        if (ScrollableMessageBox.Confirm(confirmationMessage, GetTranslation("title_confirmMassUpdate", "Confirm Mass Update"), displayImagePath: imagePath))
         {
             foreach (var npc in npcsToUpdate)
             {

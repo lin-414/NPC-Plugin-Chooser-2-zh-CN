@@ -393,12 +393,12 @@ public class VM_Run : ReactiveObject, IDisposable
 
                     var warning = new StringBuilder(HandlingModeDisplay.SkyPatcherForwardToOutfitWarning);
                     warning.AppendLine().AppendLine();
-                    warning.AppendLine($"Wigs forward to outfits for {outfitForwardingMods.Count} mod(s):");
+                    warning.AppendLine(string.Format(GetTranslation("msg_wigsForwardToOutfitsFor", "Wigs forward to outfits for {0} mod(s):"), outfitForwardingMods.Count));
                     foreach (var modName in outfitForwardingMods)
                     {
                         warning.AppendLine("    " + modName);
                     }
-                    warning.Append("\nContinue patching anyway?");
+                    warning.Append(GetTranslation("msg_continuePatchingAnyway", "\nContinue patching anyway?"));
 
                     bool proceed = true;
                     Application.Current?.Dispatcher.Invoke(() =>
@@ -763,8 +763,8 @@ public class VM_Run : ReactiveObject, IDisposable
             Application.Current?.Dispatcher.Invoke(() =>
             {
                 ScrollableMessageBox.ShowWarning(
-                    $"The selected plugin '{Path.GetFileName(targetPluginPath)}' has no master files listed in its header.",
-                    "No Masters Found");
+                    string.Format(GetTranslation("msg_pluginHasNoMasters", "The selected plugin '{0}' has no master files listed in its header."), Path.GetFileName(targetPluginPath)),
+                    GetTranslation("title_noMastersFound", "No Masters Found"));
             });
             return;
         }
@@ -851,7 +851,7 @@ public class VM_Run : ReactiveObject, IDisposable
             forceLog: true);
 
         // Show detailed results in ScrollableMessageBox
-        Application.Current?.Dispatcher.Invoke(() => { ScrollableMessageBox.Show(report, "Master Analysis Results"); });
+        Application.Current?.Dispatcher.Invoke(() => { ScrollableMessageBox.Show(report, GetTranslation("title_masterAnalysisResults", "Master Analysis Results")); });
     }
 
     private record PatchingBatch(string Suffix, List<KeyValuePair<FormKey, ScreeningResult>> Selections);

@@ -1,4 +1,6 @@
-using NPC_Plugin_Chooser_2.Models;
+﻿using NPC_Plugin_Chooser_2.Models;
+
+using NPC_Plugin_Chooser_2.Localization;
 
 namespace NPC_Plugin_Chooser_2.View_Models;
 
@@ -78,8 +80,8 @@ public static class HandlingModeDisplay
     /// <summary>Confirmation shown when the user selects Convert To Headparts
     /// (globally or per mod). Declining reverts the dropdown to its previous
     /// value.</summary>
-    public const string ConvertToHeadPartsWarning =
-        "Convert To Headparts is an EXPERIMENTAL feature.\n\n" +
+    public static string ConvertToHeadPartsWarning => TranslationServiceProvider.GetService()?.GetString(
+        "msg_convertToHeadPartsWarning") ?? ("Convert To Headparts is an EXPERIMENTAL feature.\n\n" +
         "The wig armor is discarded and rebuilt as head part records, with the wig mesh baked " +
         "directly into each affected NPC's FaceGen file.\n\n" +
         "Please verify your output by spawning the affected NPCs in game and confirming they " +
@@ -87,9 +89,10 @@ public static class HandlingModeDisplay
         "You may report NPCs for which the conversion is unsuccessful, but no promises that " +
         "anything can be done about it. (In the author's testing this works reliably, including " +
         "on HDT-enabled wigs.)\n\n" +
-        "Are you sure you want to enable Convert To Headparts?";
+        "Are you sure you want to enable Convert To Headparts?");
 
-    public const string ConvertToHeadPartsWarningTitle = "Confirm Wig Conversion";
+    public static string ConvertToHeadPartsWarningTitle => TranslationServiceProvider.GetService()?.GetString(
+        "title_confirmWigConversion") ?? "Confirm Wig Conversion";
 
     /// <summary>
     /// Warning shown wherever Forward To Outfit and SkyPatcher mode are both in
@@ -108,14 +111,15 @@ public static class HandlingModeDisplay
     /// Skin- and HeadPart-carried wigs ride on record fields instead and were
     /// verified unaffected in the same session.
     /// </summary>
-    public const string SkyPatcherForwardToOutfitWarning =
-        "SkyPatcher applies outfits unreliably.\n\n" +
+    public static string SkyPatcherForwardToOutfitWarning => TranslationServiceProvider.GetService()?.GetString(
+        "msg_skypatcherForwardToOutfitWarning") ?? ("SkyPatcher applies outfits unreliably.\n\n" +
         "It repoints an NPC's default outfit but never equips it. The game intermittently " +
         "leaves the forwarded outfit in the NPC's inventory unworn, so the NPC spawns naked. " +
         "Which NPCs are affected shifts between playthroughs, and nothing in the output tells " +
         "them apart — N.P.C.2 can neither detect nor correct this.\n\n" +
         "In SkyPatcher mode, forward wigs as Skin or Headparts instead. Both are written into " +
-        "records and are unaffected.";
+        "records and are unaffected.");
 
-    public const string SkyPatcherForwardToOutfitWarningTitle = "SkyPatcher + Forward To Outfit";
+    public static string SkyPatcherForwardToOutfitWarningTitle => TranslationServiceProvider.GetService()?.GetString(
+        "title_skypatcherForwardToOutfit") ?? "SkyPatcher + Forward To Outfit";
 }
