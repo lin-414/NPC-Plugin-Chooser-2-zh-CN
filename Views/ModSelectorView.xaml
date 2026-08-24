@@ -6,6 +6,7 @@
              xmlns:local="clr-namespace:NPC_Plugin_Chooser_2.Views"
              xmlns:vm="clr-namespace:NPC_Plugin_Chooser_2.View_Models"
              xmlns:reactiveui="http://reactiveui.net"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
      
              mc:Ignorable="d"
              x:TypeArguments="vm:VM_ModSelector"
@@ -17,7 +18,7 @@
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
-        <TextBox Grid.Row="0" Text="{Binding FilterText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,3,3" ToolTip="Filter the list of mods below."/>
+        <TextBox Grid.Row="0" Text="{Binding FilterText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,3,3" ToolTip="{l:Loc filterTheList}"/>
         
         <Border Grid.Row="1" BorderBrush="Gray" BorderThickness="1" CornerRadius="2">
             <ListBox ItemsSource="{Binding SelectableMods}" 

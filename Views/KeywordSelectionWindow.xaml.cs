@@ -4,6 +4,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Input;
+using NPC_Plugin_Chooser_2.Localization;
 
 namespace NPC_Plugin_Chooser_2.Views;
 
@@ -12,6 +13,9 @@ namespace NPC_Plugin_Chooser_2.Views;
 /// </summary>
 public partial class KeywordSelectionWindow : Window, INotifyPropertyChanged
 {
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
+
     private ObservableCollection<string> _currentKeywords = new();
     private ObservableCollection<string> _otherKeywords = new();
     private ObservableCollection<string> _filteredOtherKeywords = new();
@@ -124,8 +128,8 @@ public partial class KeywordSelectionWindow : Window, INotifyPropertyChanged
         // Check if keyword already exists (case-insensitive)
         if (_currentKeywords.Any(k => k.Equals(newKeyword, StringComparison.OrdinalIgnoreCase)))
         {
-            MessageBox.Show($"The keyword '{newKeyword}' already exists.",
-                "Duplicate Keyword",
+            MessageBox.Show(string.Format(GetTranslation("msg_duplicateKeyword", "The keyword '{0}' already exists."), newKeyword),
+                GetTranslation("title_duplicateKeyword", "Duplicate Keyword"),
                 MessageBoxButton.OK,
                 MessageBoxImage.Information);
             return;
@@ -187,8 +191,8 @@ public partial class KeywordSelectionWindow : Window, INotifyPropertyChanged
             return;
         }
 
-        var result = MessageBox.Show("Are you sure you want to remove all keywords from this mod?",
-            "Clear All Keywords",
+        var result = MessageBox.Show(GetTranslation("msg_confirmClearAllKeywords", "Are you sure you want to remove all keywords from this mod?"),
+            GetTranslation("title_clearAllKeywords", "Clear All Keywords"),
             MessageBoxButton.YesNo,
             MessageBoxImage.Question);
 

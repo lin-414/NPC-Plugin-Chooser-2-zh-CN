@@ -27,6 +27,7 @@ using Autofac.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection;
 using System.Threading.Tasks;
 using NPC_Plugin_Chooser_2.Themes;
+using NPC_Plugin_Chooser_2.Localization;
 using IContainer = Autofac.IContainer; // Added for Task
 
 namespace NPC_Plugin_Chooser_2
@@ -348,7 +349,10 @@ namespace NPC_Plugin_Chooser_2
             
             builder.RegisterType<EventLogger>().AsSelf().SingleInstance();
 
-            splashVM.UpdateProgress(40, "Registering Views with DI...");
+                        // Register TranslationService for UI localization
+                        builder.RegisterType<TranslationService>().AsSelf().SingleInstance();
+
+                        splashVM.UpdateProgress(40, "Registering Views with DI...");
             builder.RegisterType<MainWindow>().As<IViewFor<VM_MainWindow>>();
             builder.RegisterType<NpcsView>().As<IViewFor<VM_NpcSelectionBar>>();
             builder.RegisterType<SettingsView>().As<IViewFor<VM_Settings>>();
@@ -404,7 +408,16 @@ namespace NPC_Plugin_Chooser_2
             // Application dispatcher is resolvable from any thread).
             ReactiveUI.RxSchedulers.MainThreadScheduler = new DispatcherScheduler(Application.Current.Dispatcher);
 
-            StartupLogger.LogPhase("Application Initialization");
+                        // Initialize UI localization
+                        StartupLogger.Log("Initializing UI localization");
+                        var translationService = container.Resolve<TranslationService>();
+                        string uiLanguage = settingsModel.UiLanguage ?? "en";
+                        translationService.Initialize(uiLanguage);
+                        TranslationServiceProvider.SetService(translationService);
+                        LocSource.EnsureSubscribed();
+                        StartupLogger.Log($"UI localization initialized: {uiLanguage}");
+
+                        StartupLogger.LogPhase("Application Initialization");
             splashVM.UpdateProgress(65, "Initializing main application services...");
             VM_Settings? settingsViewModel;
             StartupLogger.Log("Resolving VM_Settings");

@@ -12,6 +12,7 @@
              xmlns:System="clr-namespace:System;assembly=mscorlib"
              xmlns:dd="urn:gong-wpf-dragdrop"
              xmlns:models="clr-namespace:NPC_Plugin_Chooser_2.Models"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
              mc:Ignorable="d"
              x:TypeArguments="vm:VM_NpcSelectionBar"
              d:DataContext="{d:DesignInstance Type=vm:VM_NpcSelectionBar}"
@@ -52,7 +53,7 @@
             <StackPanel Orientation="Horizontal"
                         Background="Transparent"
                         Cursor="Hand"
-                        ToolTip="Click to show or hide this group. Collapsed groups stay collapsed next time you launch.">
+                        ToolTip="{l:Loc clickToShowOr}">
                 <StackPanel.InputBindings>
                     <MouseBinding MouseAction="LeftClick" Command="{Binding ToggleCommand}"/>
                 </StackPanel.InputBindings>
@@ -137,14 +138,14 @@
 
         <!-- Define the ContextMenu as a resource, using the Proxy -->
         <ContextMenu x:Key="HideUnhideContextMenuResource">
-            <MenuItem Header="Hide all selected"
+            <MenuItem Header="{l:Loc hideAllSelected}"
                       Command="{Binding Path=DataContext.HideAllSelectedCommand, Source={StaticResource DataContextProxy}}" />
-            <MenuItem Header="Hide all but selected"
+            <MenuItem Header="{l:Loc hideAllButSelected}"
                       Command="{Binding Path=DataContext.HideAllButSelectedCommand, Source={StaticResource DataContextProxy}}" />
             <Separator />
-            <MenuItem Header="Unhide all selected"
+            <MenuItem Header="{l:Loc unhideAllSelected}"
                       Command="{Binding Path=DataContext.UnhideAllSelectedCommand, Source={StaticResource DataContextProxy}}" />
-            <MenuItem Header="Unhide all but selected"
+            <MenuItem Header="{l:Loc unhideAllButSelected}"
                       Command="{Binding Path=DataContext.UnhideAllButSelectedCommand, Source={StaticResource DataContextProxy}}" />
         </ContextMenu>
     
@@ -169,21 +170,21 @@
                           Padding="{Binding GroupNpcGroups.IsExpanded, Converter={StaticResource GroupPaddingConverter}}">
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,2,0,2"
                                 Visibility="{Binding GroupNpcGroups.IsExpanded, Converter={StaticResource BooleanToVisibilityConverter}}">
-                        <TextBlock Text="Group:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                        <TextBlock Text="{l:Loc group}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                         <ComboBox MinWidth="120" MaxWidth="200" Margin="0,0,5,0" VerticalAlignment="Center"
                                   IsEditable="True"
                                   ItemsSource="{Binding AvailableNpcGroups}"
                                   Text="{Binding SelectedGroupName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                  ToolTip="Select or type a group name"/>
+                                  ToolTip="{l:Loc selectOrType}"/>
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="2,0">
-                            <Button x:Name="AddCurrentNpcButton" Content="Add" Padding="3,1" Margin="0,0,1,0" Command="{Binding AddCurrentNpcToGroupCommand}" ToolTip="Add the currently selected NPC to the specified group"/>
-                            <Button x:Name="RemoveCurrentNpcButton" Content="Remove" Padding="3,1" Margin="0,0,2,0" Command="{Binding RemoveCurrentNpcFromGroupCommand}" ToolTip="Remove the currently selected NPC from the specified group"/>
-                            <TextBlock Text="Current" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                            <Button x:Name="AddCurrentNpcButton" Content="{l:Loc add}" Padding="3,1" Margin="0,0,1,0" Command="{Binding AddCurrentNpcToGroupCommand}" ToolTip="{l:Loc addTheCurrentlySelected}"/>
+                            <Button x:Name="RemoveCurrentNpcButton" Content="{l:Loc remove}" Padding="3,1" Margin="0,0,2,0" Command="{Binding RemoveCurrentNpcFromGroupCommand}" ToolTip="{l:Loc removeTheCurrentlySelected}"/>
+                            <TextBlock Text="{l:Loc current}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="2,0">
-                            <Button x:Name="AddVisibleNpcsButton" Content="Add" Padding="3,1" Margin="0,0,1,0" Command="{Binding AddAllVisibleNpcsToGroupCommand}" ToolTip="Add all NPCs currently visible in the list below to the specified group"/>
-                            <Button x:Name="RemoveVisibleNpcsButton" Content="Remove" Padding="3,1" Margin="0,0,2,0" Command="{Binding RemoveAllVisibleNpcsFromGroupCommand}" ToolTip="Remove all NPCs currently visible in the list below from the specified group"/>
-                            <TextBlock Text="Visible" VerticalAlignment="Center"/>
+                            <Button x:Name="AddVisibleNpcsButton" Content="{l:Loc add}" Padding="3,1" Margin="0,0,1,0" Command="{Binding AddAllVisibleNpcsToGroupCommand}" ToolTip="{l:Loc addAllNPCsCurrently}"/>
+                            <Button x:Name="RemoveVisibleNpcsButton" Content="{l:Loc remove}" Padding="3,1" Margin="0,0,2,0" Command="{Binding RemoveAllVisibleNpcsFromGroupCommand}" ToolTip="{l:Loc removeAllNPCsCurrently}"/>
+                            <TextBlock Text="{l:Loc visible}" VerticalAlignment="Center"/>
                         </StackPanel>
                     </StackPanel>
                 </GroupBox>
@@ -194,12 +195,12 @@
                           Padding="{Binding GroupShow.IsExpanded, Converter={StaticResource GroupPaddingConverter}}">
                     <StackPanel Orientation="Horizontal" MinHeight="26"
                                 Visibility="{Binding GroupShow.IsExpanded, Converter={StaticResource BooleanToVisibilityConverter}}">
-                        <CheckBox Content="Single-Option NPCs" Margin="3,2,3,2" IsChecked="{Binding ShowSingleOptionNpcs, Mode=TwoWay}" VerticalAlignment="Center" ToolTip="If unchecked, hides NPCs that only have one available appearance."/>
-                        <CheckBox Content="Unloaded NPCs" Margin="3,2,3,2" IsChecked="{Binding ShowUnloadedNpcs, Mode=TwoWay}" VerticalAlignment="Center" ToolTip="If unchecked, hides NPCs that are not part of your current load order (e.g., from mugshots or inactive mods)."/>
-                        <CheckBox Content="SkyPatcher Templates" Margin="3,2,3,2" IsChecked="{Binding ShowSkyPatcherTemplates, Mode=TwoWay}" VerticalAlignment="Center" ToolTip="If unchecked, hides dummy NPCs used by SkyPatcher NPC Replacers. You should not select an appearance for these dummy NPCs."/>
-                        <CheckBox Content="Hidden Mods" Margin="3,2, 3, 2" IsChecked="{Binding ShowHiddenMods, Mode=TwoWay}" VerticalAlignment="Center" ToolTip="Toggle visibility of hidden appearance mods"/>
-                        <CheckBox Content="Uninstalled Mods" Margin="3,2,3,2" IsChecked="{Binding ShowUninstalledMods, Mode=TwoWay}" VerticalAlignment="Center" ToolTip="If unchecked, hides mugshot-only appearance entries (mods without a corresponding data folder), including those from FaceFinder."/>
-                        <CheckBox Content="NPC Descriptions" Margin="3,2,3,2" IsChecked="{Binding ShowNpcDescriptions, Mode=TwoWay}" VerticalAlignment="Center" ToolTip="If checked, shows descriptions for selected base game NPCs from online sources."/>
+                        <CheckBox Content="{l:Loc singleOptionNPCs}" Margin="3,2,3,2" IsChecked="{Binding ShowSingleOptionNpcs, Mode=TwoWay}" VerticalAlignment="Center" ToolTip="{l:Loc ifUncheckedHidesNPCs}"/>
+                        <CheckBox Content="{l:Loc unloadedNPCs}" Margin="3,2,3,2" IsChecked="{Binding ShowUnloadedNpcs, Mode=TwoWay}" VerticalAlignment="Center" ToolTip="{l:Loc ifUncheckedHides}"/>
+                        <CheckBox Content="{l:Loc skyPatcherTemplates}" Margin="3,2,3,2" IsChecked="{Binding ShowSkyPatcherTemplates, Mode=TwoWay}" VerticalAlignment="Center" ToolTip="{l:Loc ifUncheckedHidesDummy}"/>
+                        <CheckBox Content="{l:Loc hiddenMods}" Margin="3,2, 3, 2" IsChecked="{Binding ShowHiddenMods, Mode=TwoWay}" VerticalAlignment="Center" ToolTip="{l:Loc toggleVisibilityOfHidden}"/>
+                        <CheckBox Content="{l:Loc uninstalledMods}" Margin="3,2,3,2" IsChecked="{Binding ShowUninstalledMods, Mode=TwoWay}" VerticalAlignment="Center" ToolTip="{l:Loc ifUncheckedHidesMugshot}"/>
+                        <CheckBox Content="{l:Loc nPCDescriptions}" Margin="3,2,3,2" IsChecked="{Binding ShowNpcDescriptions, Mode=TwoWay}" VerticalAlignment="Center" ToolTip="{l:Loc ifCheckedShowsDescriptions}"/>
                     </StackPanel>
                 </GroupBox>
                 
@@ -228,10 +229,10 @@
                           Padding="{Binding GroupSelectedMugshots.IsExpanded, Converter={StaticResource GroupPaddingConverter}}">
                     <StackPanel Orientation="Horizontal"
                                 Visibility="{Binding GroupSelectedMugshots.IsExpanded, Converter={StaticResource BooleanToVisibilityConverter}}">
-                        <Button Content="Compare" Margin="0,2,5,2" Padding="5,2" VerticalAlignment="Center"
+                        <Button Content="{l:Loc compare}" Margin="0,2,5,2" Padding="5,2" VerticalAlignment="Center"
                                 Command="{Binding CompareSelectedCommand}"
-                                ToolTip="Compare all checked mugshots in a full-screen view (Requires 2+ selected)."/>
-                        <Button Content="Hide/Unhide" Margin="0,2,5,2" Padding="5,2" VerticalAlignment="Center"
+                                ToolTip="{l:Loc compareAllCheckedMugshots}"/>
+                        <Button Content="{l:Loc hideUnhide}" Margin="0,2,5,2" Padding="5,2" VerticalAlignment="Center"
                                 ContextMenu="{StaticResource HideUnhideContextMenuResource}"
                                 Click="HideUnhideButton_Click"
                                 IsEnabled="{Binding CanOpenHideUnhideMenu}"
@@ -249,9 +250,9 @@
                           VerticalAlignment="Center" Margin="5,2,5,2"
                           BorderThickness="{Binding GroupSubmenus.IsExpanded, Converter={StaticResource GroupBorderThicknessConverter}}"
                           Padding="{Binding GroupSubmenus.IsExpanded, Converter={StaticResource GroupPaddingConverter}}">
-                    <Button Content="Favorites" Padding="5,2" VerticalAlignment="Center" Command="{Binding ShowFavoritesCommand}"
+                    <Button Content="{l:Loc favorites}" Padding="5,2" VerticalAlignment="Center" Command="{Binding ShowFavoritesCommand}"
                             Visibility="{Binding GroupSubmenus.IsExpanded, Converter={StaticResource BooleanToVisibilityConverter}}"
-                            ToolTip="Add an appearance from your list of favorite faces."/>
+                            ToolTip="{l:Loc addAnAppearanceFrom}"/>
                 </GroupBox>
             </WrapPanel>
         </Border>
@@ -271,12 +272,12 @@
                         <!-- Search Term 1 -->
                         <Grid Margin="0,0,0,5">
                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                           <CheckBox Grid.Column="0" Content="Not" Margin="0,0,5,0" VerticalAlignment="Center" IsChecked="{Binding SearchInversion1, Mode=TwoWay, Converter={StaticResource FilterInversionConverter}}" ToolTip="Unchecked: keep NPCs matching this filter.&#x0a;Checked: keep NPCs that do NOT match it."/>
-                           <ComboBox Grid.Column="1" MinWidth="80" Margin="0,0,3,0" VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource NpcSearchTypeEnumValues}}" SelectedItem="{Binding SearchType1, Mode=TwoWay}" ToolTip="Select search field 1&#x0a;Ctrl+Shift+C clears all search filters">
+                           <CheckBox Grid.Column="0" Content="{l:Loc not}" Margin="0,0,5,0" VerticalAlignment="Center" IsChecked="{Binding SearchInversion1, Mode=TwoWay, Converter={StaticResource FilterInversionConverter}}" ToolTip="{l:Loc uncheckedKeepNPCsMatching}"/>
+                           <ComboBox Grid.Column="1" MinWidth="80" Margin="0,0,3,0" VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource NpcSearchTypeEnumValues}}" SelectedItem="{Binding SearchType1, Mode=TwoWay}" ToolTip="{l:Loc selectSearchField1}">
                                <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Converter={StaticResource EnumDescConverter}}"/></DataTemplate></ComboBox.ItemTemplate>
                            </ComboBox>
                            <Grid Grid.Column="2">
-                               <TextBox VerticalAlignment="Center" Text="{Binding SearchText1, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" ToolTip="Enter search term 1">
+                               <TextBox VerticalAlignment="Center" Text="{Binding SearchText1, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" ToolTip="{l:Loc enterSearchTerm1}">
                                     <TextBox.Style>
                                         <Style TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
                                             <Setter Property="Visibility" Value="Visible"/>
@@ -305,34 +306,34 @@
                                         </Style>
                                     </TextBox.Style>
                                </TextBox>
-                               <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource SelectionStateFilterTypeEnumValues}}" SelectedItem="{Binding SelectedStateFilter1, Mode=TwoWay}" ToolTip="Filter by selection state" Visibility="{Binding IsSelectionStateSearch1, Converter={StaticResource BooleanToVisibilityConverter}}">
+                               <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource SelectionStateFilterTypeEnumValues}}" SelectedItem="{Binding SelectedStateFilter1, Mode=TwoWay}" ToolTip="{l:Loc filterBySelectionState}" Visibility="{Binding IsSelectionStateSearch1, Converter={StaticResource BooleanToVisibilityConverter}}">
                                     <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Converter={StaticResource EnumDescConverter}}"/></DataTemplate></ComboBox.ItemTemplate>
                                </ComboBox>
-                               <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource ShareStatusFilterTypeEnumValues}}" SelectedItem="{Binding SelectedShareStatusFilter1, Mode=TwoWay}" ToolTip="Filter by guest status" Visibility="{Binding IsShareStatusSearch1, Converter={StaticResource BooleanToVisibilityConverter}}">
+                               <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource ShareStatusFilterTypeEnumValues}}" SelectedItem="{Binding SelectedShareStatusFilter1, Mode=TwoWay}" ToolTip="{l:Loc filterByGuestStatus}" Visibility="{Binding IsShareStatusSearch1, Converter={StaticResource BooleanToVisibilityConverter}}">
                                    <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Converter={StaticResource EnumDescConverter}}"/></DataTemplate></ComboBox.ItemTemplate>
                                </ComboBox>
-                               <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource UniquenessFilterTypeEnumValues}}" SelectedItem="{Binding SelectedUniquenessFilter1, Mode=TwoWay}" ToolTip="Filter by uniqueness" Visibility="{Binding IsUniquenessSearch1, Converter={StaticResource BooleanToVisibilityConverter}}">
+                               <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource UniquenessFilterTypeEnumValues}}" SelectedItem="{Binding SelectedUniquenessFilter1, Mode=TwoWay}" ToolTip="{l:Loc filterByUniqueness}" Visibility="{Binding IsUniquenessSearch1, Converter={StaticResource BooleanToVisibilityConverter}}">
                                    <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding}"/></DataTemplate></ComboBox.ItemTemplate>
                                </ComboBox>
-                               <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource GenderFilterTypeEnumValues}}" SelectedItem="{Binding SelectedGenderFilter1, Mode=TwoWay}" ToolTip="Filter by gender" Visibility="{Binding IsGenderSearch1, Converter={StaticResource BooleanToVisibilityConverter}}">
+                               <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource GenderFilterTypeEnumValues}}" SelectedItem="{Binding SelectedGenderFilter1, Mode=TwoWay}" ToolTip="{l:Loc filterByGender}" Visibility="{Binding IsGenderSearch1, Converter={StaticResource BooleanToVisibilityConverter}}">
                                    <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding}"/></DataTemplate></ComboBox.ItemTemplate>
                                </ComboBox>
-                               <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource TemplateFilterTypeEnumValues}}" SelectedItem="{Binding SelectedTemplateFilter1, Mode=TwoWay}" ToolTip="Filter by template status" Visibility="{Binding IsTemplateSearch1, Converter={StaticResource BooleanToVisibilityConverter}}">
+                               <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource TemplateFilterTypeEnumValues}}" SelectedItem="{Binding SelectedTemplateFilter1, Mode=TwoWay}" ToolTip="{l:Loc filterByTemplateStatus}" Visibility="{Binding IsTemplateSearch1, Converter={StaticResource BooleanToVisibilityConverter}}">
                                    <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Converter={StaticResource EnumDescConverter}}"/></DataTemplate></ComboBox.ItemTemplate>
                                </ComboBox>
-                               <ComboBox VerticalAlignment="Center" ItemsSource="{Binding AvailableNpcGroups}" SelectedItem="{Binding SelectedGroupFilter1, Mode=TwoWay}" ToolTip="Select group to filter by" Visibility="{Binding IsGroupSearch1, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                               <ComboBox VerticalAlignment="Center" IsEditable="True" IsTextSearchEnabled="False" ItemsSource="{Binding AvailableRaces}" Text="{Binding SearchText1, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" ToolTip="Filter by race Name or EditorID. Append ~ for an exact match (e.g. NordRace~)." Visibility="{Binding IsRaceSearch1, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                               <ComboBox VerticalAlignment="Center" ItemsSource="{Binding AvailableNpcGroups}" SelectedItem="{Binding SelectedGroupFilter1, Mode=TwoWay}" ToolTip="{l:Loc selectGroupToFilter}" Visibility="{Binding IsGroupSearch1, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                               <ComboBox VerticalAlignment="Center" IsEditable="True" IsTextSearchEnabled="False" ItemsSource="{Binding AvailableRaces}" Text="{Binding SearchText1, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" ToolTip="{l:Loc filterByRaceName}" Visibility="{Binding IsRaceSearch1, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                            </Grid>
                         </Grid>
                         <!-- Search Term 2 -->
                         <Grid Margin="0,0,0,5">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                            <CheckBox Grid.Column="0" Content="Not" Margin="0,0,5,0" VerticalAlignment="Center" IsChecked="{Binding SearchInversion2, Mode=TwoWay, Converter={StaticResource FilterInversionConverter}}" ToolTip="Unchecked: keep NPCs matching this filter.&#x0a;Checked: keep NPCs that do NOT match it."/>
-                            <ComboBox Grid.Column="1" MinWidth="80" Margin="0,0,3,0" VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource NpcSearchTypeEnumValues}}" SelectedItem="{Binding SearchType2, Mode=TwoWay}" ToolTip="Select search field 2&#x0a;Ctrl+Shift+C clears all search filters">
+                            <CheckBox Grid.Column="0" Content="{l:Loc not}" Margin="0,0,5,0" VerticalAlignment="Center" IsChecked="{Binding SearchInversion2, Mode=TwoWay, Converter={StaticResource FilterInversionConverter}}" ToolTip="{l:Loc uncheckedKeepNPCsMatching}"/>
+                            <ComboBox Grid.Column="1" MinWidth="80" Margin="0,0,3,0" VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource NpcSearchTypeEnumValues}}" SelectedItem="{Binding SearchType2, Mode=TwoWay}" ToolTip="{l:Loc selectSearchField2}">
                                 <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Converter={StaticResource EnumDescConverter}}"/></DataTemplate></ComboBox.ItemTemplate>
                             </ComboBox>
                             <Grid Grid.Column="2">
-                                <TextBox VerticalAlignment="Center" Text="{Binding SearchText2, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" ToolTip="Enter search term 2">
+                                <TextBox VerticalAlignment="Center" Text="{Binding SearchText2, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" ToolTip="{l:Loc enterSearchTerm2}">
                                     <TextBox.Style>
                                         <Style TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
                                             <Setter Property="Visibility" Value="Visible"/>
@@ -362,34 +363,34 @@
                                         </Style>
                                     </TextBox.Style>
                                 </TextBox>
-                                <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource SelectionStateFilterTypeEnumValues}}" SelectedItem="{Binding SelectedStateFilter2, Mode=TwoWay}" ToolTip="Filter by selection state" Visibility="{Binding IsSelectionStateSearch2, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource SelectionStateFilterTypeEnumValues}}" SelectedItem="{Binding SelectedStateFilter2, Mode=TwoWay}" ToolTip="{l:Loc filterBySelectionState}" Visibility="{Binding IsSelectionStateSearch2, Converter={StaticResource BooleanToVisibilityConverter}}">
                                      <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Converter={StaticResource EnumDescConverter}}"/></DataTemplate></ComboBox.ItemTemplate>
                                 </ComboBox>
-                                <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource ShareStatusFilterTypeEnumValues}}" SelectedItem="{Binding SelectedShareStatusFilter2, Mode=TwoWay}" ToolTip="Filter by guest status" Visibility="{Binding IsShareStatusSearch2, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource ShareStatusFilterTypeEnumValues}}" SelectedItem="{Binding SelectedShareStatusFilter2, Mode=TwoWay}" ToolTip="{l:Loc filterByGuestStatus}" Visibility="{Binding IsShareStatusSearch2, Converter={StaticResource BooleanToVisibilityConverter}}">
                                     <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Converter={StaticResource EnumDescConverter}}"/></DataTemplate></ComboBox.ItemTemplate>
                                 </ComboBox>
-                                <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource UniquenessFilterTypeEnumValues}}" SelectedItem="{Binding SelectedUniquenessFilter2, Mode=TwoWay}" ToolTip="Filter by uniqueness" Visibility="{Binding IsUniquenessSearch2, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource UniquenessFilterTypeEnumValues}}" SelectedItem="{Binding SelectedUniquenessFilter2, Mode=TwoWay}" ToolTip="{l:Loc filterByUniqueness}" Visibility="{Binding IsUniquenessSearch2, Converter={StaticResource BooleanToVisibilityConverter}}">
                                     <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding}"/></DataTemplate></ComboBox.ItemTemplate>
                                 </ComboBox>
-                                <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource GenderFilterTypeEnumValues}}" SelectedItem="{Binding SelectedGenderFilter2, Mode=TwoWay}" ToolTip="Filter by gender" Visibility="{Binding IsGenderSearch2, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource GenderFilterTypeEnumValues}}" SelectedItem="{Binding SelectedGenderFilter2, Mode=TwoWay}" ToolTip="{l:Loc filterByGender}" Visibility="{Binding IsGenderSearch2, Converter={StaticResource BooleanToVisibilityConverter}}">
                                     <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding}"/></DataTemplate></ComboBox.ItemTemplate>
                                 </ComboBox>
-                                <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource TemplateFilterTypeEnumValues}}" SelectedItem="{Binding SelectedTemplateFilter2, Mode=TwoWay}" ToolTip="Filter by template status" Visibility="{Binding IsTemplateSearch2, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource TemplateFilterTypeEnumValues}}" SelectedItem="{Binding SelectedTemplateFilter2, Mode=TwoWay}" ToolTip="{l:Loc filterByTemplateStatus}" Visibility="{Binding IsTemplateSearch2, Converter={StaticResource BooleanToVisibilityConverter}}">
                                     <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Converter={StaticResource EnumDescConverter}}"/></DataTemplate></ComboBox.ItemTemplate>
                                 </ComboBox>
-                                <ComboBox VerticalAlignment="Center" ItemsSource="{Binding AvailableNpcGroups}" SelectedItem="{Binding SelectedGroupFilter2, Mode=TwoWay}" ToolTip="Select group to filter by" Visibility="{Binding IsGroupSearch2, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                                <ComboBox VerticalAlignment="Center" IsEditable="True" IsTextSearchEnabled="False" ItemsSource="{Binding AvailableRaces}" Text="{Binding SearchText2, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" ToolTip="Filter by race Name or EditorID. Append ~ for an exact match (e.g. NordRace~)." Visibility="{Binding IsRaceSearch2, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                                <ComboBox VerticalAlignment="Center" ItemsSource="{Binding AvailableNpcGroups}" SelectedItem="{Binding SelectedGroupFilter2, Mode=TwoWay}" ToolTip="{l:Loc selectGroupToFilterBy}" Visibility="{Binding IsGroupSearch2, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                                <ComboBox VerticalAlignment="Center" IsEditable="True" IsTextSearchEnabled="False" ItemsSource="{Binding AvailableRaces}" Text="{Binding SearchText2, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" ToolTip="{l:Loc filterByRaceTip}" Visibility="{Binding IsRaceSearch2, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                            </Grid>
                         </Grid>
                         <!-- Search Term 3 -->
                         <Grid Margin="0,0,0,5">
                              <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                             <CheckBox Grid.Column="0" Content="Not" Margin="0,0,5,0" VerticalAlignment="Center" IsChecked="{Binding SearchInversion3, Mode=TwoWay, Converter={StaticResource FilterInversionConverter}}" ToolTip="Unchecked: keep NPCs matching this filter.&#x0a;Checked: keep NPCs that do NOT match it."/>
-                             <ComboBox Grid.Column="1" MinWidth="80" Margin="0,0,3,0" VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource NpcSearchTypeEnumValues}}" SelectedItem="{Binding SearchType3, Mode=TwoWay}" ToolTip="Select search field 3&#x0a;Ctrl+Shift+C clears all search filters">
+                             <CheckBox Grid.Column="0" Content="{l:Loc not}" Margin="0,0,5,0" VerticalAlignment="Center" IsChecked="{Binding SearchInversion3, Mode=TwoWay, Converter={StaticResource FilterInversionConverter}}" ToolTip="{l:Loc uncheckedKeepNPCsMatching}"/>
+                             <ComboBox Grid.Column="1" MinWidth="80" Margin="0,0,3,0" VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource NpcSearchTypeEnumValues}}" SelectedItem="{Binding SearchType3, Mode=TwoWay}" ToolTip="{l:Loc selectSearchField3}">
                                 <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Converter={StaticResource EnumDescConverter}}"/></DataTemplate></ComboBox.ItemTemplate>
                              </ComboBox>
                               <Grid Grid.Column="2">
-                                 <TextBox VerticalAlignment="Center" Text="{Binding SearchText3, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" ToolTip="Enter search term 3">
+                                 <TextBox VerticalAlignment="Center" Text="{Binding SearchText3, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" ToolTip="{l:Loc enterSearchTerm3}">
                                      <TextBox.Style>
                                          <Style TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
                                              <Setter Property="Visibility" Value="Visible"/>
@@ -419,64 +420,64 @@
                                          </Style>
                                      </TextBox.Style>
                                  </TextBox>
-                                 <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource SelectionStateFilterTypeEnumValues}}" SelectedItem="{Binding SelectedStateFilter3, Mode=TwoWay}" ToolTip="Filter by selection state" Visibility="{Binding IsSelectionStateSearch3, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                 <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource SelectionStateFilterTypeEnumValues}}" SelectedItem="{Binding SelectedStateFilter3, Mode=TwoWay}" ToolTip="{l:Loc filterBySelectionState}" Visibility="{Binding IsSelectionStateSearch3, Converter={StaticResource BooleanToVisibilityConverter}}">
                                       <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Converter={StaticResource EnumDescConverter}}"/></DataTemplate></ComboBox.ItemTemplate>
                                  </ComboBox>
-                                  <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource ShareStatusFilterTypeEnumValues}}" SelectedItem="{Binding SelectedShareStatusFilter3, Mode=TwoWay}" ToolTip="Filter by guest status" Visibility="{Binding IsShareStatusSearch3, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                  <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource ShareStatusFilterTypeEnumValues}}" SelectedItem="{Binding SelectedShareStatusFilter3, Mode=TwoWay}" ToolTip="{l:Loc filterByGuestStatus}" Visibility="{Binding IsShareStatusSearch3, Converter={StaticResource BooleanToVisibilityConverter}}">
                                       <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Converter={StaticResource EnumDescConverter}}"/></DataTemplate></ComboBox.ItemTemplate>
                                   </ComboBox>
-                                  <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource UniquenessFilterTypeEnumValues}}" SelectedItem="{Binding SelectedUniquenessFilter3, Mode=TwoWay}" ToolTip="Filter by uniqueness" Visibility="{Binding IsUniquenessSearch3, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                  <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource UniquenessFilterTypeEnumValues}}" SelectedItem="{Binding SelectedUniquenessFilter3, Mode=TwoWay}" ToolTip="{l:Loc filterByUniqueness}" Visibility="{Binding IsUniquenessSearch3, Converter={StaticResource BooleanToVisibilityConverter}}">
                                       <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding}"/></DataTemplate></ComboBox.ItemTemplate>
                                   </ComboBox>
-                                  <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource GenderFilterTypeEnumValues}}" SelectedItem="{Binding SelectedGenderFilter3, Mode=TwoWay}" ToolTip="Filter by gender" Visibility="{Binding IsGenderSearch3, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                  <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource GenderFilterTypeEnumValues}}" SelectedItem="{Binding SelectedGenderFilter3, Mode=TwoWay}" ToolTip="{l:Loc filterByGender}" Visibility="{Binding IsGenderSearch3, Converter={StaticResource BooleanToVisibilityConverter}}">
                                       <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding}"/></DataTemplate></ComboBox.ItemTemplate>
                                   </ComboBox>
-                                  <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource TemplateFilterTypeEnumValues}}" SelectedItem="{Binding SelectedTemplateFilter3, Mode=TwoWay}" ToolTip="Filter by template status" Visibility="{Binding IsTemplateSearch3, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                  <ComboBox VerticalAlignment="Center" ItemsSource="{Binding Source={StaticResource TemplateFilterTypeEnumValues}}" SelectedItem="{Binding SelectedTemplateFilter3, Mode=TwoWay}" ToolTip="{l:Loc filterByTemplateStatus}" Visibility="{Binding IsTemplateSearch3, Converter={StaticResource BooleanToVisibilityConverter}}">
                                       <ComboBox.ItemTemplate><DataTemplate><TextBlock Text="{Binding Converter={StaticResource EnumDescConverter}}"/></DataTemplate></ComboBox.ItemTemplate>
                                   </ComboBox>
-                                 <ComboBox VerticalAlignment="Center" ItemsSource="{Binding AvailableNpcGroups}" SelectedItem="{Binding SelectedGroupFilter3, Mode=TwoWay}" ToolTip="Select group to filter by" Visibility="{Binding IsGroupSearch3, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                                 <ComboBox VerticalAlignment="Center" IsEditable="True" IsTextSearchEnabled="False" ItemsSource="{Binding AvailableRaces}" Text="{Binding SearchText3, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" ToolTip="Filter by race Name or EditorID. Append ~ for an exact match (e.g. NordRace~)." Visibility="{Binding IsRaceSearch3, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                                 <ComboBox VerticalAlignment="Center" ItemsSource="{Binding AvailableNpcGroups}" SelectedItem="{Binding SelectedGroupFilter3, Mode=TwoWay}" ToolTip="{l:Loc selectGroupToFilterBy}" Visibility="{Binding IsGroupSearch3, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                                 <ComboBox VerticalAlignment="Center" IsEditable="True" IsTextSearchEnabled="False" ItemsSource="{Binding AvailableRaces}" Text="{Binding SearchText3, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" ToolTip="{l:Loc filterByRaceTip}" Visibility="{Binding IsRaceSearch3, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                              </Grid>
                          </Grid>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                            <RadioButton Content="AND (Match All)" GroupName="SearchLogic" VerticalAlignment="Center" Margin="0,0,10,0" 
-                                         ToolTip="Results must match all active search terms"
+                            <RadioButton Content="{l:Loc aNDMatchAll}" GroupName="{l:Loc searchLogic}" VerticalAlignment="Center" Margin="0,0,10,0" 
+                                         ToolTip="{l:Loc resultsMustMatchAll}"
                                          IsChecked="{Binding CurrentSearchLogic, Mode=TwoWay, Converter={StaticResource EnumMatchToBooleanConverter}, ConverterParameter={x:Static vm:SearchLogic.AND}}"/>
-                            <RadioButton Content="OR (Match Any)" GroupName="SearchLogic" VerticalAlignment="Center" 
-                                         ToolTip="Results must match at least one active search term"
+                            <RadioButton Content="{l:Loc oRMatchAny}" GroupName="{l:Loc searchLogic}" VerticalAlignment="Center" 
+                                         ToolTip="{l:Loc resultsMustMatchAt}"
                                          IsChecked="{Binding CurrentSearchLogic, Mode=TwoWay, Converter={StaticResource EnumMatchToBooleanConverter}, ConverterParameter={x:Static vm:SearchLogic.OR}}"/>
                         </StackPanel>
                         
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,5,0,0">
-                            <TextBlock Text="Sort By:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                            <TextBlock Text="{l:Loc sortBy}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                             <ComboBox ItemsSource="{Binding Source={StaticResource NpcSortPropertyEnumValues}}"
                                       SelectedItem="{Binding SelectedSortProperty, Mode=TwoWay}"
                                       MinWidth="80" VerticalAlignment="Center" Margin="0,0,10,0"
-                                      ToolTip="Change the sort order of the NPC list."/>
-                            <CheckBox Content="Reverse" IsChecked="{Binding IsSortReversed, Mode=TwoWay}" 
-                                      VerticalAlignment="Center" ToolTip="Reverse the current sort order."/>
+                                      ToolTip="{l:Loc changeTheSortOrder}"/>
+                            <CheckBox Content="{l:Loc reverse}" IsChecked="{Binding IsSortReversed, Mode=TwoWay}" 
+                                      VerticalAlignment="Center" ToolTip="{l:Loc reverseTheCurrentSort}"/>
                         </StackPanel>
                     </StackPanel>
                 </Border>
                 <!-- NPC Navigation Buttons -->
                 <Border DockPanel.Dock="Bottom" BorderThickness="0,1,1,0" BorderBrush="{DynamicResource BorderBrush}" Padding="2">
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                        <Button x:Name="NavPreviousButton" ToolTip="Previous NPC in list (Alt+Up)" Padding="4,2" Margin="2,0"
+                        <Button x:Name="NavPreviousButton" ToolTip="{l:Loc previousNPCInList}" Padding="4,2" Margin="2,0"
                                 MinWidth="28" MinHeight="22"
                                 Command="{Binding NavigatePreviousNpcCommand}">
                             <TextBlock Text="▲" FontSize="11"/>
                         </Button>
-                        <Button x:Name="NavNextButton" ToolTip="Next NPC in list (Alt+Down)" Padding="4,2" Margin="2,0"
+                        <Button x:Name="NavNextButton" ToolTip="{l:Loc nextNPCInList}" Padding="4,2" Margin="2,0"
                                 MinWidth="28" MinHeight="22"
                                 Command="{Binding NavigateNextNpcCommand}">
                             <TextBlock Text="▼" FontSize="11"/>
                         </Button>
-                        <Button x:Name="NavBackButton" ToolTip="Go to previously viewed NPC (Alt+Left)" Padding="4,2" Margin="2,0"
+                        <Button x:Name="NavBackButton" ToolTip="{l:Loc goToPreviouslyViewed}" Padding="4,2" Margin="2,0"
                                 MinWidth="28" MinHeight="22"
                                 Command="{Binding NavigateBackNpcCommand}">
                             <TextBlock Text="◀" FontSize="11"/>
                         </Button>
-                        <Button x:Name="NavForwardButton" ToolTip="Go to next viewed NPC (Alt+Right)" Padding="4,2" Margin="2,0"
+                        <Button x:Name="NavForwardButton" ToolTip="{l:Loc goToNextViewed}" Padding="4,2" Margin="2,0"
                                 MinWidth="28" MinHeight="22"
                                 Command="{Binding NavigateForwardNpcCommand}">
                             <TextBlock Text="▶" FontSize="11"/>
@@ -521,7 +522,7 @@
                                      </Border.ToolTip>
                                      <Border.ContextMenu>
                                         <ContextMenu>
-                                            <MenuItem Header="Include Outfits"
+                                            <MenuItem Header="{l:Loc includeOutfits}"
                                                       ItemsSource="{Binding Source={StaticResource OutfitOverrideEnumValues}}">
                                                 <MenuItem.ItemContainerStyle>
                                                     <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
@@ -554,28 +555,28 @@
                                                     </Style>
                                                 </MenuItem.ItemContainerStyle>
                                             </MenuItem>
-                                            <MenuItem Header="Render" SubmenuOpened="RenderSubmenu_OnSubmenuOpened">
-                                                <MenuItem Header="Override Global Setting"
+                                            <MenuItem Header="{l:Loc render}" SubmenuOpened="RenderSubmenu_OnSubmenuOpened">
+                                                <MenuItem Header="{l:Loc overrideGlobalSetting}"
                                                           IsCheckable="True"
                                                           IsChecked="{Binding RenderOverrideGlobal, Mode=TwoWay}"
-                                                          ToolTip="When checked, this NPC's mugshots use the per-NPC Include Default Outfit / Include Headgear options below instead of the global Settings-tab toggles. Persists across sessions."/>
-                                                <MenuItem Header="Include Default Outfit"
+                                                          ToolTip="{l:Loc whenCheckedThisNPC}"/>
+                                                <MenuItem Header="{l:Loc includeDefaultOutfit}"
                                                           IsCheckable="True"
                                                           IsChecked="{Binding RenderIncludeDefaultOutfit, Mode=TwoWay}"
                                                           IsEnabled="{Binding RenderOverrideGlobal}"
-                                                          ToolTip="Render this NPC wearing its default outfit. Only applies when 'Override Global Setting' is checked."/>
-                                                <MenuItem Header="Include Headgear"
+                                                          ToolTip="{l:Loc renderThisNPCWearing}"/>
+                                                <MenuItem Header="{l:Loc includeHeadgear}"
                                                           IsCheckable="True"
                                                           IsChecked="{Binding RenderIncludeHeadgear, Mode=TwoWay}"
                                                           IsEnabled="{Binding RenderHeadgearEnabled}"
-                                                          ToolTip="Render this NPC wearing its headgear (e.g. a hood or helmet, which hides hair). Uncheck to see the NPC without headgear. Only applies when 'Override Global Setting' is checked."/>
+                                                          ToolTip="{l:Loc renderThisNPC}"/>
                                             </MenuItem>
                                             <Separator/>
-                                            <MenuItem Header="Add Face from Favorites"
+                                            <MenuItem Header="{l:Loc addFaceFromFavorites}"
                                                       Command="{Binding Path=DataContext.AddFavoriteFaceToNpcCommand, Source={StaticResource DataContextProxy}}"
                                                       CommandParameter="{Binding}"/>
                                             <Separator Visibility="{Binding HasTemplateReferences, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                                            <MenuItem Header="Jump to Template Reference"
+                                            <MenuItem Header="{l:Loc jumpToTemplateReference}"
                                                       ItemsSource="{Binding TemplateReferenceEntries}"
                                                       Command="{Binding Path=DataContext.JumpToTemplateReferenceCommand, Source={StaticResource DataContextProxy}}"
                                                       CommandParameter="{Binding TemplateReferenceEntries[0].NpcFormKey}"
@@ -601,13 +602,13 @@
                                                 </MenuItem.ItemContainerStyle>
                                             </MenuItem>
                                             <Separator/>
-                                            <MenuItem Header="Copy">
-                                                <MenuItem Header="FormID"
+                                            <MenuItem Header="{l:Loc copy}">
+                                                <MenuItem Header="{l:Loc formID}"
                                                           Command="{Binding CopyFormIdCommand}"
-                                                          ToolTip="Copy this NPC's load-order FormID (e.g. 0501A67C) to the clipboard.&#10;Note: the leading digits are the plugin's load order index. For NPCs from any plugin other than Skyrim.esm, the FormID will change if you reorder, add, or remove plugins."/>
-                                                <MenuItem Header="FormKey"
+                                                          ToolTip="{l:Loc copyThisNPCS}"/>
+                                                <MenuItem Header="{l:Loc formKey}"
                                                           Command="{Binding CopyFormKeyCommand}"
-                                                          ToolTip="Copy this NPC's FormKey (e.g. 01A67C:Skyrim.esm) to the clipboard."/>
+                                                          ToolTip="{l:Loc copyThisNPC}"/>
                                             </MenuItem>
                                         </ContextMenu>
                                     </Border.ContextMenu>
@@ -635,11 +636,11 @@
                                                  </Style>
                                              </StackPanel.Style>
                                              <!-- Grey "T" for winning-override template sources -->
-                                             <TextBlock Text="T" FontWeight="Bold" Foreground="Gray" Margin="0,0,2,0"
+                                             <TextBlock Text="{l:Loc t}" FontWeight="Bold" Foreground="Gray" Margin="0,0,2,0"
                                                         ToolTip="{Binding WinningOverrideTemplateUsersTooltip}"
                                                         Visibility="{Binding IsWinningOverrideTemplateSource, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                                              <!-- Purple/Green "T" for app-mod template sources -->
-                                             <TextBlock Text="T" FontWeight="Bold" Margin="0,0,2,0"
+                                             <TextBlock Text="{l:Loc t}" FontWeight="Bold" Margin="0,0,2,0"
                                                         ToolTip="{Binding AppModTemplateTooltip}">
                                                  <TextBlock.Style>
                                                      <Style TargetType="TextBlock">
@@ -695,11 +696,11 @@
                                                  </Style>
                                              </StackPanel.Style>
                                              <!-- Grey "T" for winning-override template sources -->
-                                             <TextBlock Text="T" FontWeight="Bold" Foreground="Gray" Margin="3,0,0,0"
+                                             <TextBlock Text="{l:Loc t}" FontWeight="Bold" Foreground="Gray" Margin="3,0,0,0"
                                                         ToolTip="{Binding WinningOverrideTemplateUsersTooltip}"
                                                         Visibility="{Binding IsWinningOverrideTemplateSource, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                                              <!-- Purple/Green "T" for app-mod template sources -->
-                                             <TextBlock Text="T" FontWeight="Bold" Margin="2,0,0,0"
+                                             <TextBlock Text="{l:Loc t}" FontWeight="Bold" Margin="2,0,0,0"
                                                         ToolTip="{Binding AppModTemplateTooltip}">
                                                  <TextBlock.Style>
                                                      <Style TargetType="TextBlock">
@@ -1104,7 +1105,7 @@
                                          <Grid Width="{Binding RelativeSource={RelativeSource AncestorType=Grid}, Path=ActualWidth, Converter={StaticResource PercentageSizingConverter}, ConverterParameter='20'}"
                                                Height="{Binding RelativeSource={RelativeSource Self}, Path=Width}"
                                                Visibility="{Binding IsAmbiguousSource, Converter={StaticResource BooleanToVisibilityConverter}}"
-                                               ToolTip="This NPC is defined in multiple source plugins. Right-click to select the correct source.">
+                                               ToolTip="{l:Loc thisNPCIsDefined}">
                                              <Viewbox Stretch="Uniform">
                                                  <Image Source="/NPC Plugin Chooser 2;component/Resources/Multiple Plugins for NPC.png" />
                                              </Viewbox>
@@ -1243,7 +1244,7 @@
                                                BorderBrush="Transparent"
                                                Foreground="White"
                                                BorderThickness="0"
-                                               ToolTip="Select this mugshot for comparison or hiding others.">
+                                               ToolTip="{l:Loc selectThisMugshotFor}">
                                          <CheckBox.Style>
                                              <Style TargetType="CheckBox">
                                                  <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
@@ -1285,25 +1286,25 @@
                                  </Grid>
                                  <Border.ContextMenu>
                                      <ContextMenu>
-                                         <MenuItem Header="Select" Command="{Binding SelectCommand}" />
-                                         <MenuItem Header="Hide" Command="{Binding HideCommand}" />
-                                         <MenuItem Header="Unhide" Command="{Binding UnhideCommand}" />
+                                         <MenuItem Header="{l:Loc select}" Command="{Binding SelectCommand}" />
+                                         <MenuItem Header="{l:Loc hide}" Command="{Binding HideCommand}" />
+                                         <MenuItem Header="{l:Loc unhide}" Command="{Binding UnhideCommand}" />
                                          <Separator />
-                                         <MenuItem Header="Select All From This Mod" Command="{Binding SelectAllFromThisModCommand}" />
-                                         <MenuItem Header="Select Available From This Mod" Command="{Binding SelectAvailableFromThisModCommand}" />
-                                         <MenuItem Header="Select Visible From This Mod" Command="{Binding SelectVisibleFromThisModCommand}" />
-                                         <MenuItem Header="Select Visible &amp; Available From This Mod" Command="{Binding SelectVisibleAndAvailableFromThisModCommand}" />
-                                         <MenuItem Header="Unselect All From This Mod" Command="{Binding UnselectAllFromThisModCommand}" />
-                                         <MenuItem Header="Unselect Visible From This Mod" Command="{Binding UnselectVisibleFromThisModCommand}" />
+                                         <MenuItem Header="{l:Loc selectAllFromThis}" Command="{Binding SelectAllFromThisModCommand}" />
+                                         <MenuItem Header="{l:Loc selectAvailableFromThis}" Command="{Binding SelectAvailableFromThisModCommand}" />
+                                         <MenuItem Header="{l:Loc selectVisibleFromThis}" Command="{Binding SelectVisibleFromThisModCommand}" />
+                                         <MenuItem Header="{l:Loc selectVisibleAmpAvailable}" Command="{Binding SelectVisibleAndAvailableFromThisModCommand}" />
+                                         <MenuItem Header="{l:Loc unselectAllFromThis}" Command="{Binding UnselectAllFromThisModCommand}" />
+                                         <MenuItem Header="{l:Loc unselectVisibleFromThis}" Command="{Binding UnselectVisibleFromThisModCommand}" />
                                          <Separator />
-                                         <MenuItem Header="Hide All From This Mod" Command="{Binding HideAllFromThisModCommand}" />
-                                         <MenuItem Header="Unhide All From This Mod" Command="{Binding UnhideAllFromThisModCommand}" />
+                                         <MenuItem Header="{l:Loc hideAllFromThis}" Command="{Binding HideAllFromThisModCommand}" />
+                                         <MenuItem Header="{l:Loc unhideAllFromThis}" Command="{Binding UnhideAllFromThisModCommand}" />
                                          <Separator />
-                                         <MenuItem Header="Jump to Mod" Command="{Binding JumpToModCommand}" Visibility="{Binding CanJumpToMod, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                                         <MenuItem Header="Jump to Template" Command="{Binding JumpToTemplateCommand}" Visibility="{Binding CanJumpToTemplate, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                                         <MenuItem Header="{l:Loc jumpToMod}" Command="{Binding JumpToModCommand}" Visibility="{Binding CanJumpToMod, Converter={StaticResource BooleanToVisibilityConverter}}"/>
+                                         <MenuItem Header="{l:Loc jumpToTemplate}" Command="{Binding JumpToTemplateCommand}" Visibility="{Binding CanJumpToTemplate, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                                          <Separator/>
                                     
-                                        <MenuItem Header="Select Source Plugin"
+                                        <MenuItem Header="{l:Loc selectSourcePlugin}"
                                                     Visibility="{Binding IsAmbiguousSource, Converter={StaticResource BooleanToVisibilityConverter}}"
                                                     ItemsSource="{Binding AvailableSourcePlugins}">
                                             <MenuItem.ItemContainerStyle>
@@ -1323,10 +1324,10 @@
                                                 </Style>
                                             </MenuItem.ItemContainerStyle>
                                         </MenuItem>
-                                        <MenuItem Header="Select Same Source Plugin Where Possible"
+                                        <MenuItem Header="{l:Loc selectSameSourcePlugin}"
                                                     Visibility="{Binding IsAmbiguousSource, Converter={StaticResource BooleanToVisibilityConverter}}"
                                                     Command="{Binding SelectSameSourcePluginWherePossibleCommand}"
-                                                    ToolTip="For all other ambiguous NPCs in this mod, sets their source to this source plugin if it contains the NPC."/>
+                                                    ToolTip="{l:Loc forAllOtherAmbiguous}"/>
                                         <Separator Visibility="{Binding IsAmbiguousSource, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                                          
                                          <MenuItem Header="Show Full Image (Ctrl+RClick)" Command="{Binding ToggleFullScreenCommand}"/>
@@ -1355,10 +1356,10 @@
                                                    ToolTip="Delete the image currently shown on this tile and fall back to the next available mugshot source."/>
                                          <Separator/>
                                          <MenuItem Command="{Binding ShareWithNpcCommand}"
-                                                   ToolTip="Make this appearance available for another NPC.">
+                                                   Header="{l:Loc shareWithNPC}"
+                                                   ToolTip="{l:Loc makeThisAppearanceAvailable}">
                                              <MenuItem.Style>
                                                  <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
-                                                     <Setter Property="Header" Value="Share with NPC"/>
                                                      <Setter Property="Visibility" Value="Visible"/>
                                                      <Style.Triggers>
                                                          <DataTrigger Binding="{Binding IsGuestAppearance}" Value="True">
@@ -1370,10 +1371,10 @@
                                          </MenuItem>
 
                                          <MenuItem Command="{Binding UnshareFromNpcCommand}"
-                                                   ToolTip="Remove this guest appearance from the current NPC.">
+                                                   Header="{l:Loc unshareFromThisNpc}"
+                                                   ToolTip="{l:Loc removeThisGuestAppearance}">
                                              <MenuItem.Style>
                                                  <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
-                                                     <Setter Property="Header" Value="Unshare from this NPC"/>
                                                      <Setter Property="Visibility" Value="Collapsed"/>
                                                      <Style.Triggers>
                                                          <DataTrigger Binding="{Binding IsGuestAppearance}" Value="True">
@@ -1386,17 +1387,12 @@
                                          <MenuItem Command="{Binding AddToFavoritesCommand}">
                                              <MenuItem.Style>
                                                  <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
-                                                     <Setter Property="Header" Value="Add to Favorites"/>
-                                                     <Style.Triggers>
-                                                         <DataTrigger Binding="{Binding IsFavorite}" Value="True">
-                                                             <Setter Property="Header" Value="Remove from Favorites"/>
-                                                         </DataTrigger>
-                                                     </Style.Triggers>
+                                                     <Setter Property="Header" Value="{Binding FavoriteMenuItemText}"/>
                                                  </Style>
                                              </MenuItem.Style>
                                          </MenuItem>
                                          <Separator/>
-                                         <MenuItem Header="Open Mod Folder" 
+                                         <MenuItem Header="{l:Loc openModFolder}" 
                                                    ItemsSource="{Binding AssociatedModSetting.CorrespondingFolderPaths}"
                                                    Command="{Binding OpenFolderCommand}"
                                                    CommandParameter="{Binding AssociatedModSetting.CorrespondingFolderPaths[0]}"
@@ -1421,11 +1417,11 @@
                                                  </Style>
                                              </MenuItem.ItemContainerStyle>
                                          </MenuItem>
-                                         <MenuItem Header="Open Mugshot Folder" 
+                                         <MenuItem Header="{l:Loc openMugshotFolder}" 
                                                    Command="{Binding OpenFolderCommand}"
                                                    CommandParameter="{Binding MugshotFolderPath}"
                                                    Visibility="{Binding CanOpenMugshotFolder, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                                         <MenuItem Header="Visit Mod Page"
+                                         <MenuItem Header="{l:Loc visitModPage}"
                                                    ItemsSource="{Binding ModPageUrls}"
                                                    DisplayMemberPath="DisplayName"
                                                    Visibility="{Binding CanVisitModPage, Converter={StaticResource BooleanToVisibilityConverter}}">
@@ -1444,7 +1440,7 @@
                  </ItemsControl>
              </ScrollViewer>
 
-            <TextBlock Grid.Column="2" Text="Select an NPC..." HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="16" Foreground="{DynamicResource HintForeground}" TextWrapping="Wrap" Margin="20">
+            <TextBlock Grid.Column="2" Text="{l:Loc selectAnNPC}" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="16" Foreground="{DynamicResource HintForeground}" TextWrapping="Wrap" Margin="20">
                  <TextBlock.Style>
                     <Style TargetType="TextBlock">
                         <Setter Property="Visibility" Value="Collapsed"/>
@@ -1485,7 +1481,7 @@
                             <TextBlock Text="{Binding CurrentNpcDescription}" TextWrapping="Wrap"
                                        Foreground="{DynamicResource PrimaryForeground}"/>
                         </ScrollViewer>
-                        <TextBlock Text="Loading description..." FontStyle="Italic" Foreground="{DynamicResource HintForeground}" HorizontalAlignment="Center" VerticalAlignment="Center"
+                        <TextBlock Text="{l:Loc loadingDescription}" FontStyle="Italic" Foreground="{DynamicResource HintForeground}" HorizontalAlignment="Center" VerticalAlignment="Center"
                                    Visibility="{Binding IsLoadingDescription, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                     </Grid>
                 </Border>
@@ -1505,9 +1501,9 @@
                             </Style.Triggers>
                         </Style>
                     </StackPanel.Style>
-                    <TextBlock Text="Mugshot Source:" VerticalAlignment="Center" Margin="0,0,5,0"
+                    <TextBlock Text="{l:Loc mugshotSource}" VerticalAlignment="Center" Margin="0,0,5,0"
                                Foreground="{DynamicResource PrimaryForeground}"/>
-                    <RadioButton Content="MD" GroupName="MugshotSourceOverride" Margin="2,0" VerticalAlignment="Center"
+                    <RadioButton Content="{l:Loc mD}" GroupName="{l:Loc mugshotSourceOverride}" Margin="2,0" VerticalAlignment="Center"
                                  IsEnabled="{Binding IsManualDownloadSourceAvailable}"
                                  ToolTipService.ShowOnDisabled="True"
                                  Command="{Binding ToggleMugshotSourceOverrideCommand}"
@@ -1526,7 +1522,7 @@
                             </Style>
                         </RadioButton.Style>
                     </RadioButton>
-                    <RadioButton Content="FF" GroupName="MugshotSourceOverride" Margin="2,0" VerticalAlignment="Center"
+                    <RadioButton Content="{l:Loc fF}" GroupName="{l:Loc mugshotSourceOverride}" Margin="2,0" VerticalAlignment="Center"
                                  IsEnabled="{Binding IsFaceFinderSourceAvailable}"
                                  ToolTipService.ShowOnDisabled="True"
                                  Command="{Binding ToggleMugshotSourceOverrideCommand}"
@@ -1545,7 +1541,7 @@
                             </Style>
                         </RadioButton.Style>
                     </RadioButton>
-                    <RadioButton Content="AG" GroupName="MugshotSourceOverride" Margin="2,0" VerticalAlignment="Center"
+                    <RadioButton Content="{l:Loc aG}" GroupName="{l:Loc mugshotSourceOverride}" Margin="2,0" VerticalAlignment="Center"
                                  IsEnabled="{Binding IsAutoGenSourceAvailable}"
                                  ToolTipService.ShowOnDisabled="True"
                                  Command="{Binding ToggleMugshotSourceOverrideCommand}"
@@ -1567,17 +1563,17 @@
                 </StackPanel>
 
                 <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                    <Button x:Name="ZoomOutButton" Content="-" Width="25" Height="25" Margin="2,0" ToolTip="Zoom Out (Ctrl+Scroll Wheel)"/>
+                    <Button x:Name="ZoomOutButton" Content="-" Width="25" Height="25" Margin="2,0" ToolTip="{l:Loc zoomOutCtrlScroll}"/>
                     <TextBox x:Name="ZoomPercentageTextBox" Width="60" Height="25" Margin="2,0" TextAlignment="Center" VerticalContentAlignment="Center"
                              Text="{Binding NpcsViewZoomLevel, StringFormat='F2', Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                              PreviewMouseWheel="ZoomPercentageTextBox_PreviewMouseWheel"
-                             ToolTip="Current Zoom Level. Editable. Ctrl+Scroll Wheel in image area or Scroll Wheel here to adjust."/>
+                             ToolTip="{l:Loc currentZoomLevel}"/>
                     <TextBlock Text="%" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                    <Button x:Name="ZoomInButton" Content="+" Width="25" Height="25" Margin="2,0" ToolTip="Zoom In (Ctrl+Scroll Wheel)"/>
-                    <CheckBox x:Name="LockZoomCheckBox" Content="Lock Zoom" Margin="10,0,5,0" VerticalAlignment="Center" ToolTip="Lock the current zoom level. If unchecked, zoom adjusts to fit images."/>
-                    <Button x:Name="ResetZoomNpcsButton" Content="Reset Zoom" Margin="5,0,0,0" Padding="5,2"
+                    <Button x:Name="ZoomInButton" Content="+" Width="25" Height="25" Margin="2,0" ToolTip="{l:Loc zoomInCtrlScroll}"/>
+                    <CheckBox x:Name="LockZoomCheckBox" Content="{l:Loc lockZoom}" Margin="10,0,5,0" VerticalAlignment="Center" ToolTip="{l:Loc lockTheCurrentZoom}"/>
+                    <Button x:Name="ResetZoomNpcsButton" Content="{l:Loc resetZoom}" Margin="5,0,0,0" Padding="5,2"
                             Command="{Binding ResetZoomNpcsCommand}"
-                            ToolTip="Reset zoom to automatically fit images."/>
+                            ToolTip="{l:Loc resetZoomToAutomatically}"/>
                 </StackPanel>
             </Grid>
         </Border>

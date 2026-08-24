@@ -1,4 +1,4 @@
-<reactiveui:ReactiveUserControl x:Class="NPC_Plugin_Chooser_2.Views.ModIssuesView"
+﻿<reactiveui:ReactiveUserControl x:Class="NPC_Plugin_Chooser_2.Views.ModIssuesView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -6,6 +6,7 @@
              xmlns:local="clr-namespace:NPC_Plugin_Chooser_2.Views"
              xmlns:vm="clr-namespace:NPC_Plugin_Chooser_2.View_Models"
              xmlns:reactiveui="http://reactiveui.net"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
              mc:Ignorable="d"
              x:TypeArguments="vm:VM_ModIssues"
              d:DataContext="{d:DesignInstance Type=vm:VM_ModIssues}"
@@ -38,7 +39,7 @@
                 </Grid.ColumnDefinitions>
 
                 <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
-                    <TextBlock Text="Scan:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                    <TextBlock Text="{l:Loc scan_2}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                     <!-- Searchable scan-target picker: type to filter (substring),
                          pick ALL or a mod. Auto-open-while-typing lives in
                          code-behind (ScanTargetComboBox_TextChanged). -->
@@ -49,15 +50,15 @@
                               Text="{Binding ScanTargetText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                               TextBoxBase.TextChanged="ScanTargetComboBox_TextChanged"
                               DropDownOpened="ScanTargetComboBox_DropDownOpened"
-                              ToolTip="Which mod to scan. ALL scans every eligible appearance mod.&#x0a;Type to search the list — Scan then covers the exact pick, or every mod matching the typed text."/>
-                    <Button Content="Scan" Command="{Binding ScanCommand}" Padding="10,3" Margin="0,0,5,0"
-                            ToolTip="Scan the targeted appearance mods for missing assets (ALL = every installed appearance mod). Mods that haven't changed since the last scan are skipped (cached)."/>
-                    <Button Content="Rescan All" Command="{Binding RescanAllCommand}" Padding="10,3" Margin="0,0,5,0"
-                            ToolTip="Scan the targeted mods from scratch, ignoring cached results."/>
-                    <Button Content="Cancel" Command="{Binding CancelScanCommand}" Padding="10,3" Margin="0,0,10,0"
+                              ToolTip="{l:Loc whichModToScan}"/>
+                    <Button Content="{l:Loc scan}" Command="{Binding ScanCommand}" Padding="10,3" Margin="0,0,5,0"
+                            ToolTip="{l:Loc scanTheTargetedAppearance}"/>
+                    <Button Content="{l:Loc rescanAll}" Command="{Binding RescanAllCommand}" Padding="10,3" Margin="0,0,5,0"
+                            ToolTip="{l:Loc scanTheTargetedMods}"/>
+                    <Button Content="{l:Loc cancel}" Command="{Binding CancelScanCommand}" Padding="10,3" Margin="0,0,10,0"
                             Visibility="{Binding IsScanning, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                    <Button Content="Export CSV" Command="{Binding ExportCsvCommand}" Padding="10,3" Margin="0,0,10,0"
-                            ToolTip="Export all detected issues to a CSV file."/>
+                    <Button Content="{l:Loc exportCsv}" Command="{Binding ExportCsvCommand}" Padding="10,3" Margin="0,0,10,0"
+                            ToolTip="{l:Loc exportAllDetectedIssues}"/>
                 </StackPanel>
 
                 <!-- DockPanel, not a horizontal StackPanel: a StackPanel measures
@@ -104,50 +105,50 @@
                 <Border Grid.Row="0" BorderBrush="LightGray" BorderThickness="0,0,0,1" Margin="0,0,0,5" Padding="5">
                     <WrapPanel Orientation="Horizontal">
                         <StackPanel Orientation="Horizontal" Margin="0,2,15,2">
-                            <TextBlock Text="Filter Name:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                            <TextBlock Text="{l:Loc filterName}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                             <TextBox Text="{Binding NameFilterText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                      MinWidth="120" VerticalAlignment="Center"
                                      ToolTip="Filter the list by mod display name&#x0a;Ctrl+Shift+C clears all search filters"/>
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" Margin="0,2,15,2">
-                            <TextBlock Text="Filter NPC:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                            <TextBlock Text="{l:Loc filterNPC}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                             <TextBox Text="{Binding NpcSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                      MinWidth="120" VerticalAlignment="Center"
                                      ToolTip="Show only mods with an affected NPC whose name or FormKey matches&#x0a;Ctrl+Shift+C clears all search filters"/>
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" Margin="0,2,15,2">
-                            <TextBlock Text="Issue Type:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                            <TextBlock Text="{l:Loc issueType}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                             <ComboBox ItemsSource="{Binding AvailableIssueTypeFilters}"
                                       SelectedItem="{Binding SelectedIssueTypeFilter, Mode=TwoWay}"
                                       DisplayMemberPath="Label"
                                       MinWidth="140" VerticalAlignment="Center"
-                                      ToolTip="Show only mods (and NPC tiles) with this kind of issue"/>
+                                      ToolTip="{l:Loc showOnlyModsAnd}"/>
                         </StackPanel>
                         <CheckBox IsChecked="{Binding IncludeOutfitOnlyIssues, Mode=TwoWay}"
-                                  Content="Include outfit-only issues"
+                                  Content="{l:Loc includeOutfitOnlyIssues}"
                                   VerticalAlignment="Center" Margin="0,2,15,2"
-                                  ToolTip="If unchecked, mods and NPCs whose only problems are outfit/headgear-related are hidden, leaving just face and body defects."/>
-                        <TextBlock Text="Show:" VerticalAlignment="Center" Margin="0,2,6,2"/>
+                                  ToolTip="{l:Loc ifUncheckedModsAnd}"/>
+                        <TextBlock Text="{l:Loc show}" VerticalAlignment="Center" Margin="0,2,6,2"/>
                         <CheckBox IsChecked="{Binding ShowIssues, Mode=TwoWay}"
                                   Content="{Binding ShowIssuesLabel}"
                                   VerticalAlignment="Center" Margin="0,2,10,2"
-                                  ToolTip="Issues are visibly broken in game right now — dark faces, invisible or untextured meshes, missing required mods."/>
+                                  ToolTip="{l:Loc issuesAreVisiblyBroken}"/>
                         <CheckBox IsChecked="{Binding ShowWarnings, Mode=TwoWay}"
                                   Content="{Binding ShowWarningsLabel}"
                                   VerticalAlignment="Center" Margin="0,2,10,2"
-                                  ToolTip="Warnings render fine today but can break under realistic conditions — assets supplied by another installed mod that must stay activated, defects the ghost effect currently hides, weight-pair files this NPC's weight happens not to need."/>
+                                  ToolTip="{l:Loc warningsRenderFineToday}"/>
                         <CheckBox IsChecked="{Binding ShowNotes, Mode=TwoWay}"
                                   Content="{Binding ShowNotesLabel}"
                                   VerticalAlignment="Center" Margin="0,2,10,2"
-                                  ToolTip="Notes are engine-inert or imperceptible findings — secondary texture maps (specular, environment, subsurface) that even vanilla meshes reference without shipping, or records this mod can never forward into a patch."/>
+                                  ToolTip="{l:Loc notesAreEngineInert}"/>
                         <CheckBox IsChecked="{Binding ShowIgnored, Mode=TwoWay}"
                                   Content="{Binding ShowIgnoredLabel}"
                                   VerticalAlignment="Center" Margin="0,2,15,2"
-                                  ToolTip="Show issues you have ignored (right-click a results row to ignore/unignore). Ignored issues are excluded from counts, badges and CSV export while hidden."/>
+                                  ToolTip="{l:Loc showIssuesYouHave}"/>
                         <CheckBox IsChecked="{Binding GroupByFile, Mode=TwoWay}"
-                                  Content="Group by file"
+                                  Content="{l:Loc groupByFile}"
                                   VerticalAlignment="Center" Margin="0,2,15,2"
-                                  ToolTip="Collapse the results table to one row per distinct problem with an NPC count — shared body/head meshes repeat the same missing file across many NPCs. Clicking a mugshot still shows that NPC's individual rows."/>
+                                  ToolTip="{l:Loc collapseTheResultsTable}"/>
                     </WrapPanel>
                 </Border>
 
@@ -173,7 +174,7 @@
                                     Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=ListBox}}">
                                 <Border.ContextMenu>
                                     <ContextMenu>
-                                        <MenuItem Header="Rescan this mod (ignore cache)"
+                                        <MenuItem Header="{l:Loc rescanThisModIgnoreCache}"
                                                   Command="{Binding PlacementTarget.Tag.RescanModCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                                   CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
                                     </ContextMenu>
@@ -186,10 +187,10 @@
                                         </Grid.ColumnDefinitions>
                                         <TextBlock Grid.Column="0" Text="{Binding DisplayName}" FontWeight="SemiBold"
                                                    TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
-                                        <Button Grid.Column="1" Content="Mods tab"
+                                        <Button Grid.Column="1" Content="{l:Loc modsTab}"
                                                 Command="{Binding OpenInModsTabCommand}"
                                                 Padding="5,1" Margin="5,0,0,0" VerticalAlignment="Center"
-                                                ToolTip="Show this mod in the Mods tab"/>
+                                                ToolTip="{l:Loc showThisModIn}"/>
                                     </Grid>
                                     <TextBlock Text="{Binding SummaryText}" FontSize="11" Margin="0,2,0,0"/>
                                     <!-- Per-type count chips double as filter toggles: clicking one
@@ -207,7 +208,7 @@
                                                 <Button Command="{Binding DataContext.ToggleIssueTypeFilterCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
                                                         CommandParameter="{Binding Type}"
                                                         Cursor="Hand" Margin="0,1,4,1"
-                                                        ToolTip="Show only this issue type (click again to show all)">
+                                                        ToolTip="{l:Loc showOnlyThisIssue}">
                                                     <Button.Template>
                                                         <ControlTemplate TargetType="Button">
                                                             <Border x:Name="Pill" Background="{DynamicResource MugshotCaptionBackground}"
@@ -280,7 +281,7 @@
                                         </Grid.ColumnDefinitions>
                                         <TextBlock Grid.Column="0" Text="{Binding}" Foreground="Gray"
                                                    TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
-                                        <Button Grid.Column="1" Content="Scan" Padding="6,0" Margin="5,0,0,0"
+                                        <Button Grid.Column="1" Content="{l:Loc scan}" Padding="6,0" Margin="5,0,0,0"
                                                 Command="{Binding DataContext.ScanSingleModCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
                                                 CommandParameter="{Binding}"/>
                                     </Grid>
@@ -308,7 +309,7 @@
                         <TextBlock Text="{Binding SelectedEntry.DisplayName, StringFormat='NPCs with issues in: {0}', TargetNullValue='Select a mod from the left panel'}"
                                    FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center"
                                    HorizontalAlignment="Left" TextTrimming="CharacterEllipsis"/>
-                        <Button Content="Cancel Mugshot Load"
+                        <Button Content="{l:Loc cancelMugshotLoad}"
                                 Command="{Binding CancelMugshotLoadCommand}"
                                 VerticalAlignment="Center" HorizontalAlignment="Right"
                                 Padding="5,2"
@@ -459,9 +460,9 @@
 
                                     <Border.ContextMenu>
                                         <ContextMenu>
-                                            <MenuItem Header="Jump to NPC in List" Command="{Binding JumpToNpcCommand}"/>
-                                            <MenuItem Header="View Full Screen (Ctrl+RClick)" Command="{Binding ToggleFullScreenCommand}"/>
-                                            <MenuItem Header="Show 3D Preview (Ctrl+Shift+RClick)" Command="{Binding Show3DPreviewCommand}"/>
+                                            <MenuItem Header="{l:Loc jumpToNPCIn}" Command="{Binding JumpToNpcCommand}"/>
+                                            <MenuItem Header="{l:Loc viewFullScreenCtrl}" Command="{Binding ToggleFullScreenCommand}"/>
+                                            <MenuItem Header="{l:Loc show3DPreviewCtrl}" Command="{Binding Show3DPreviewCommand}"/>
                                         </ContextMenu>
                                     </Border.ContextMenu>
                                 </Border>
@@ -522,9 +523,9 @@
                               VerticalGridLinesBrush="{DynamicResource BorderBrush}">
                         <DataGrid.ContextMenu>
                             <ContextMenu>
-                                <MenuItem Header="Copy selected cells"
+                                <MenuItem Header="{l:Loc copySelectedCells}"
                                           Command="ApplicationCommands.Copy"
-                                          InputGestureText="Ctrl+C"/>
+                                          InputGestureText="{l:Loc ctrlC}"/>
                             </ContextMenu>
                         </DataGrid.ContextMenu>
                         <DataGrid.ColumnHeaderStyle>
@@ -561,36 +562,36 @@
                                 <Setter Property="ContextMenu">
                                     <Setter.Value>
                                         <ContextMenu>
-                                            <MenuItem Header="Ignore this file for this mod (all NPCs)"
+                                            <MenuItem Header="{l:Loc ignoreThisFileForMod}"
                                                       Command="{Binding PlacementTarget.Tag.IgnoreFileCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                                       CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
-                                            <MenuItem Header="Ignore this file in ALL mods"
+                                            <MenuItem Header="{l:Loc ignoreThisFileInAllMods}"
                                                       Command="{Binding PlacementTarget.Tag.IgnoreFileAllModsCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                                       CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
-                                            <MenuItem Header="Ignore exactly this row's issue(s)"
+                                            <MenuItem Header="{l:Loc ignoreExactlyThisRow}"
                                                       Command="{Binding PlacementTarget.Tag.IgnoreExactCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                                       CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
-                                            <MenuItem Header="Unignore"
+                                            <MenuItem Header="{l:Loc unignore}"
                                                       Command="{Binding PlacementTarget.Tag.UnignoreCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                                       CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
                                             <Separator/>
-                                            <MenuItem Header="Copy NPC">
-                                                <MenuItem Header="Name"
+                                            <MenuItem Header="{l:Loc copyNpc}">
+                                                <MenuItem Header="{l:Loc name}"
                                                           Command="{Binding PlacementTarget.Tag.CopyNpcNameCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                                           CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
-                                                <MenuItem Header="EditorID"
+                                                <MenuItem Header="{l:Loc editorID}"
                                                           Command="{Binding PlacementTarget.Tag.CopyNpcEditorIdCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                                           CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
-                                                <MenuItem Header="FormID (load order)"
+                                                <MenuItem Header="{l:Loc formidLoadOrder}"
                                                           Command="{Binding PlacementTarget.Tag.CopyNpcFormIdCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                                           CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
-                                                <MenuItem Header="FormKey"
+                                                <MenuItem Header="{l:Loc formKey}"
                                                           Command="{Binding PlacementTarget.Tag.CopyNpcFormKeyCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                                           CommandParameter="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource AncestorType=ContextMenu}}"/>
                                             </MenuItem>
-                                            <MenuItem Header="Copy selected cells"
+                                            <MenuItem Header="{l:Loc copySelectedCells}"
                                                       Command="ApplicationCommands.Copy"
-                                                      InputGestureText="Ctrl+C"/>
+                                                      InputGestureText="{l:Loc ctrlC}"/>
                                         </ContextMenu>
                                     </Setter.Value>
                                 </Setter>
@@ -615,21 +616,21 @@
                             </Style>
                         </DataGrid.Resources>
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="NPC" Binding="{Binding NpcDisplayName}" Width="Auto"/>
-                            <DataGridTextColumn Header="NPCs" Binding="{Binding NpcCount}" Width="Auto"/>
-                            <DataGridTextColumn Header="Category" Binding="{Binding Category}" Width="Auto"/>
-                            <DataGridTextColumn Header="Issue" Binding="{Binding TypeDisplay}" Width="Auto"/>
+                            <DataGridTextColumn Header="{l:Loc nPC}" Binding="{Binding NpcDisplayName}" Width="Auto"/>
+                            <DataGridTextColumn Header="{l:Loc nPCs}" Binding="{Binding NpcCount}" Width="Auto"/>
+                            <DataGridTextColumn Header="{l:Loc category}" Binding="{Binding Category}" Width="Auto"/>
+                            <DataGridTextColumn Header="{l:Loc issue}" Binding="{Binding TypeDisplay}" Width="Auto"/>
                             <!-- Which of the scanned mod's plugins the record verdict came
                                  from (multi-plugin mods only; empty elsewhere). -->
-                            <DataGridTextColumn Header="Plugin" Binding="{Binding Plugin}" Width="Auto"
+                            <DataGridTextColumn Header="{l:Loc plugin}" Binding="{Binding Plugin}" Width="Auto"
                                                 ElementStyle="{StaticResource WrappingCellText}"/>
-                            <DataGridTextColumn Header="Missing / Affected Path" Binding="{Binding AffectedPath}" Width="2*"
+                            <DataGridTextColumn Header="{l:Loc missingAffectedPath}" Binding="{Binding AffectedPath}" Width="2*"
                                                 ElementStyle="{StaticResource WrappingCellText}"/>
-                            <DataGridTextColumn Header="Where" Binding="{Binding Location}" Width="*"
+                            <DataGridTextColumn Header="{l:Loc where}" Binding="{Binding Location}" Width="*"
                                                 ElementStyle="{StaticResource WrappingCellText}"/>
-                            <DataGridTextColumn Header="Referenced By" Binding="{Binding Referencer}" Width="*"
+                            <DataGridTextColumn Header="{l:Loc referencedBy}" Binding="{Binding Referencer}" Width="*"
                                                 ElementStyle="{StaticResource WrappingCellText}"/>
-                            <DataGridTextColumn Header="Provided By" Binding="{Binding ProvidedBy}" Width="*"
+                            <DataGridTextColumn Header="{l:Loc providedBy}" Binding="{Binding ProvidedBy}" Width="*"
                                                 ElementStyle="{StaticResource WrappingCellText}"/>
                             <!-- Details can run to dozens of lines (dark-face reason texts); the
                                  row simply grows to fit. Tall rows are fine under ScrollUnit=Pixel,
@@ -637,7 +638,7 @@
                                  two-level wheel handoff (cell scroll, then table scroll) read badly,
                                  and the cap only ever existed because item-based scrolling could not
                                  navigate tall rows. ClipboardContentBinding keeps Ctrl+C intact. -->
-                            <DataGridTemplateColumn Header="Details" Width="2*"
+                            <DataGridTemplateColumn Header="{l:Loc details}" Width="2*"
                                                     ClipboardContentBinding="{Binding DetailWithRemedy}"
                                                     SortMemberPath="Detail">
                                 <DataGridTemplateColumn.CellTemplate>
@@ -659,16 +660,16 @@
         <!-- ====================== Zoom bar ====================== -->
         <Border Grid.Row="2" BorderBrush="LightGray" BorderThickness="0,1,0,0" Margin="0,5,0,0" Padding="5">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                <TextBlock Text="Zoom:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                <TextBlock Text="{l:Loc zoom}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                 <Button x:Name="ZoomOutButton" Content="-" Width="25" Margin="0,0,2,0"/>
                 <TextBox x:Name="ZoomPercentageTextBox" Width="50" VerticalAlignment="Center" TextAlignment="Center"
                          PreviewMouseWheel="ZoomPercentageTextBox_PreviewMouseWheel"/>
                 <TextBlock Text="%" VerticalAlignment="Center" Margin="2,0,2,0"/>
                 <Button x:Name="ZoomInButton" Content="+" Width="25" Margin="0,0,10,0"/>
-                <CheckBox x:Name="LockZoomCheckBox" Content="Lock" VerticalAlignment="Center" Margin="0,0,10,0"
-                          ToolTip="Keep the current zoom level instead of auto-fitting"/>
-                <Button x:Name="ResetZoomButton" Content="Reset" Padding="8,1"
-                        ToolTip="Return to automatic fit"/>
+                <CheckBox x:Name="LockZoomCheckBox" Content="{l:Loc lock}" VerticalAlignment="Center" Margin="0,0,10,0"
+                          ToolTip="{l:Loc keepTheCurrentZoom}"/>
+                <Button x:Name="ResetZoomButton" Content="{l:Loc reset}" Padding="8,1"
+                        ToolTip="{l:Loc returnToAutomaticFit}"/>
             </StackPanel>
         </Border>
     </Grid>

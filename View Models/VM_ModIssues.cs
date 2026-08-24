@@ -17,6 +17,7 @@ using Mutagen.Bethesda.Skyrim;
 using NPC_Plugin_Chooser_2.BackEnd;
 using NPC_Plugin_Chooser_2.BackEnd.CharacterViewerHost;
 using NPC_Plugin_Chooser_2.Models;
+using NPC_Plugin_Chooser_2.Localization;
 using NPC_Plugin_Chooser_2.Views;
 using ReactiveUI;
 using ReactiveUI.Fody.Helpers;
@@ -146,10 +147,10 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
     /// that NPC's individual rows.</summary>
     [Reactive] public bool GroupByFile { get; set; } = true;
 
-    [Reactive] public string ShowIssuesLabel { get; set; } = "Issues";
-    [Reactive] public string ShowWarningsLabel { get; set; } = "Warnings";
-    [Reactive] public string ShowNotesLabel { get; set; } = "Notes";
-    [Reactive] public string ShowIgnoredLabel { get; set; } = "Ignored";
+    [Reactive] public string ShowIssuesLabel { get; set; } = GetTranslation("issues", "Issues");
+    [Reactive] public string ShowWarningsLabel { get; set; } = GetTranslation("warnings", "Warnings");
+    [Reactive] public string ShowNotesLabel { get; set; } = GetTranslation("notes", "Notes");
+    [Reactive] public string ShowIgnoredLabel { get; set; } = GetTranslation("ignored", "Ignored");
 
     // --- Scan state ---
     [Reactive] public bool IsScanning { get; private set; }
@@ -686,8 +687,8 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
             // exact silence cost a diagnosis round on 2026-08-18).
             Debug.WriteLine($"VM_ModIssues.OfferPluginSwitches failed: {ExceptionLogger.GetExceptionStack(ex)}");
             ScrollableMessageBox.ShowWarning(
-                $"The post-scan plugin-switch dialog failed:\n{ExceptionLogger.GetExceptionStack(ex)}",
-                "Switch Suggestions Error");
+                string.Format(GetTranslation("switchDialogFailed", "The post-scan plugin-switch dialog failed:\n{0}"), ExceptionLogger.GetExceptionStack(ex)),
+                GetTranslation("switchSuggestionsError", "Switch Suggestions Error"));
             return null;
         }
     }
@@ -805,10 +806,11 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         }
         catch (Exception ex)
         {
-            ScanStatusMessage = "Scan failed — see debug log.";
+            ScanStatusMessage = GetTranslation("scanFailedSeeDebugLog", "Scan failed — see debug log.");
             Debug.WriteLine($"VM_ModIssues.ScanAsync failed: {ExceptionLogger.GetExceptionStack(ex)}");
             ScrollableMessageBox.ShowWarning(
-                $"The mod issue scan failed:\n{ExceptionLogger.GetExceptionStack(ex)}", "Scan Error");
+                string.Format(GetTranslation("modIssueScanFailed", "The mod issue scan failed:\n{0}"), ExceptionLogger.GetExceptionStack(ex)),
+                GetTranslation("scanError", "Scan Error"));
         }
         finally
         {
@@ -861,10 +863,10 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         }
         _allEntries.Sort((a, b) => string.Compare(a.DisplayName, b.DisplayName, StringComparison.OrdinalIgnoreCase));
 
-        ShowIssuesLabel = totals.Issues > 0 || ShowIssues ? $"Issues ({totals.Issues})" : "Issues";
-        ShowWarningsLabel = totals.Warnings > 0 || ShowWarnings ? $"Warnings ({totals.Warnings})" : "Warnings";
-        ShowNotesLabel = totals.Notes > 0 || ShowNotes ? $"Notes ({totals.Notes})" : "Notes";
-        ShowIgnoredLabel = totals.Ignored > 0 || ShowIgnored ? $"Ignored ({totals.Ignored})" : "Ignored";
+        ShowIssuesLabel = totals.Issues > 0 || ShowIssues ? string.Format(GetTranslation("issuesCount", "Issues ({0})"), totals.Issues) : GetTranslation("issues", "Issues");
+        ShowWarningsLabel = totals.Warnings > 0 || ShowWarnings ? string.Format(GetTranslation("warningsCount", "Warnings ({0})"), totals.Warnings) : GetTranslation("warnings", "Warnings");
+        ShowNotesLabel = totals.Notes > 0 || ShowNotes ? string.Format(GetTranslation("notesCount", "Notes ({0})"), totals.Notes) : GetTranslation("notes", "Notes");
+        ShowIgnoredLabel = totals.Ignored > 0 || ShowIgnored ? string.Format(GetTranslation("ignoredCount", "Ignored ({0})"), totals.Ignored) : GetTranslation("ignored", "Ignored");
 
         // Eligible mods absent from the results: absence must not read as clean.
         UnscannedModNames.Clear();
@@ -1693,7 +1695,7 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         }
         catch (Exception ex)
         {
-            ScrollableMessageBox.ShowWarning($"Failed to export CSV:\n{ex.Message}", "Export Error");
+            ScrollableMessageBox.ShowWarning(string.Format(GetTranslation("exportCsvFailed", "Failed to export CSV:\n{0}"), ex.Message), GetTranslation("exportError", "Export Error"));
         }
     }
 
@@ -1715,4 +1717,8 @@ public class VM_ModIssues : ReactiveObject, ISearchFilterHost, IDisposable
         DisposeAndClearMugshots();
         _refreshMugshotSizesSubject.Dispose();
     }
+
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
+
 }

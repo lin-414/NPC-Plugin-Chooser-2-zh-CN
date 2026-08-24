@@ -6,9 +6,10 @@
         xmlns:vm="clr-namespace:NPC_Plugin_Chooser_2.View_Models"
         xmlns:themes="clr-namespace:NPC_Plugin_Chooser_2.Themes"
         xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
         mc:Ignorable="d"
         Style="{DynamicResource ThemedWindowStyle}"
-        Title="Select Target NPC to Share Appearance With" Height="450" Width="400" WindowStartupLocation="CenterOwner"
+        Title="{l:Loc selectTargetNPCTo}" Height="450" Width="400" WindowStartupLocation="CenterOwner"
         d:DataContext="{d:DesignInstance Type=vm:VM_NpcShareTargetSelector}">
     
     <i:Interaction.Behaviors>
@@ -21,9 +22,9 @@
 
     <DockPanel Margin="10">
         <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
-            <Button Content="Share and Select" Margin="5" IsDefault="True" Command="{Binding ShareAndSelectCommand}" CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=Window}}"/>
-            <Button Content="Share" Margin="5" IsDefault="True" Command="{Binding ShareCommand}" CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=Window}}"/>
-            <Button Content="Cancel" Margin="5" IsCancel="True" Command="{Binding CancelCommand}" CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=Window}}"/>
+            <Button Content="{l:Loc shareAndSelect}" Margin="5" IsDefault="True" Command="{Binding ShareAndSelectCommand}" CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=Window}}"/>
+            <Button Content="{l:Loc share}" Margin="5" IsDefault="True" Command="{Binding ShareCommand}" CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=Window}}"/>
+            <Button Content="{l:Loc cancel}" Margin="5" IsCancel="True" Command="{Binding CancelCommand}" CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=Window}}"/>
         </StackPanel>
 
         <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,10">

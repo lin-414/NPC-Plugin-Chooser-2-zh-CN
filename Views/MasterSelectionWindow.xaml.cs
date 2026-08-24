@@ -4,6 +4,7 @@ using System.IO;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using Mutagen.Bethesda.Plugins;
+using NPC_Plugin_Chooser_2.Localization;
 
 namespace NPC_Plugin_Chooser_2.Views;
 
@@ -43,6 +44,8 @@ public class SelectableMaster : INotifyPropertyChanged
 /// </summary>
 public partial class MasterSelectionWindow : Window
 {
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
     public ObservableCollection<SelectableMaster> Masters { get; } = new();
     
     /// <summary>
@@ -116,8 +119,8 @@ public partial class MasterSelectionWindow : Window
     {
         if (!SelectedMasters.Any())
         {
-            MessageBox.Show("Please select at least one master to analyze.", 
-                "No Masters Selected", 
+            MessageBox.Show(GetTranslation("msg_selectAtLeastOneMaster", "Please select at least one master to analyze."), 
+                GetTranslation("title_noMastersSelected", "No Masters Selected"), 
                 MessageBoxButton.OK, 
                 MessageBoxImage.Warning);
             return;

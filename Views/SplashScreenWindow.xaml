@@ -4,8 +4,9 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:vm="clr-namespace:NPC_Plugin_Chooser_2.View_Models"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
         mc:Ignorable="d"
-        Title="Initializing." Height="350" Width="500"
+        Title="{l:Loc initializing}" Height="350" Width="500"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         WindowStartupLocation="CenterScreen" ShowInTaskbar="False" Topmost="True"
         d:DataContext="{d:DesignInstance Type=vm:VM_SplashScreen, IsDesignTimeCreatable=False}">

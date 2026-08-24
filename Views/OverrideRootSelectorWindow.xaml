@@ -8,10 +8,11 @@
         xmlns:themes="clr-namespace:NPC_Plugin_Chooser_2.Themes"
         xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
         xmlns:reactiveui="http://reactiveui.net"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
         mc:Ignorable="d"
         x:TypeArguments="vm:VM_OverrideRootSelector"
         Style="{DynamicResource ThemedWindowStyle}"
-        Title="Override Roots" Height="620" Width="620"
+        Title="{l:Loc overrideRoots}" Height="620" Width="620"
         WindowStartupLocation="CenterOwner"
         ShowInTaskbar="False">
 
@@ -29,14 +30,10 @@
 
         <StackPanel Grid.Row="0" Margin="0,0,0,10">
             <TextBlock TextWrapping="Wrap">
-                <Run Text="Which fields of an NPC record the search for this mod's overridden records may START from."/>
+                <Run Text="{l:Loc whichFieldsOfAn}"/>
             </TextBlock>
-            <TextBlock TextWrapping="Wrap" Opacity="0.8" Margin="0,6,0,0">
-                A ticked field is followed as deep as it goes, through any kind of record — this does not
-                limit which record types can be pulled in, only where the search begins. The defaults are the
-                fields that carry appearance. Adding others (AI packages especially) lets the search wander
-                into unrelated records and copy them into the output, so tick them only if this mod needs it.
-            </TextBlock>
+            <TextBlock TextWrapping="Wrap" Opacity="0.8" Margin="0,6,0,0"
+                                   Text="{l:Loc aTickedFieldIs}"/>
         </StackPanel>
 
         <Border Grid.Row="1" BorderBrush="Gray" BorderThickness="1">
@@ -72,13 +69,13 @@
 
         <Grid Grid.Row="3" Margin="0,10,0,0">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
-                <Button Content="Reset to Defaults" Padding="8,2" Command="{Binding ResetToDefaultsCommand}"/>
-                <Button Content="Check All" Padding="8,2" Margin="5,0,0,0" Command="{Binding CheckAllCommand}"/>
-                <Button Content="Uncheck All" Padding="8,2" Margin="5,0,0,0" Command="{Binding UncheckAllCommand}"/>
+                <Button Content="{l:Loc resetToDefaults}" Padding="8,2" Command="{Binding ResetToDefaultsCommand}"/>
+                <Button Content="{l:Loc checkAll}" Padding="8,2" Margin="5,0,0,0" Command="{Binding CheckAllCommand}"/>
+                <Button Content="{l:Loc uncheckAll}" Padding="8,2" Margin="5,0,0,0" Command="{Binding UncheckAllCommand}"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                <Button Content="OK" Width="80" IsDefault="True" Command="{Binding OKCommand}"/>
-                <Button Content="Cancel" Width="80" Margin="5,0,0,0" IsCancel="True" Command="{Binding CancelCommand}"/>
+                <Button Content="{l:Loc ok}" Width="80" IsDefault="True" Command="{Binding OKCommand}"/>
+                <Button Content="{l:Loc cancel}" Width="80" Margin="5,0,0,0" IsCancel="True" Command="{Binding CancelCommand}"/>
             </StackPanel>
         </Grid>
     </Grid>

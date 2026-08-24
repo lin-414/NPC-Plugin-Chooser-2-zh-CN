@@ -10,6 +10,7 @@
         xmlns:vm="clr-namespace:NPC_Plugin_Chooser_2.View_Models"
         xmlns:themes="clr-namespace:NPC_Plugin_Chooser_2.Themes"
         xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
         mc:Ignorable="d"
         d:DataContext="{d:DesignInstance Type=vm:VM_InvalidSelectionsWindow}"
         Title="Invalid Selections Found"
@@ -141,20 +142,20 @@
 
         <Grid Grid.Row="4" Margin="0,12,0,0">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
-                <Button Content="Copy Text" Command="{Binding CopyTextCommand}"
+                <Button Content="{l:Loc copyText}" Command="{Binding CopyTextCommand}"
                         Height="30" Padding="12,0"
-                        ToolTip="Copy the whole list as indented text (issue, then mod, then NPC)."/>
-                <Button Content="Copy Sheet" Command="{Binding CopySheetCommand}"
+                        ToolTip="{l:Loc copyTheWholeList}"/>
+                <Button Content="{l:Loc copySheet}" Command="{Binding CopySheetCommand}"
                         Height="30" Padding="12,0" Margin="10,0,0,0"
-                        ToolTip="Copy one tab-separated row per NPC (Issue, Mod, NPC, FormKey, Missing Record); paste directly into Excel."/>
+                        ToolTip="{l:Loc copyOneTabSeparated}"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                <Button Content="Skip and Continue" Click="ContinueButton_Click"
+                <Button Content="{l:Loc skipAndContinue}" Click="ContinueButton_Click"
                         Height="30" Padding="12,0" IsDefault="True"
-                        ToolTip="Patch the valid selections and skip the ones listed above."/>
-                <Button Content="Cancel Run" Click="CancelButton_Click"
+                        ToolTip="{l:Loc patchTheValidSelections}"/>
+                <Button Content="{l:Loc cancelRun}" Click="CancelButton_Click"
                         Height="30" Padding="12,0" Margin="10,0,0,0" IsCancel="True"
-                        ToolTip="Abort without patching anything."/>
+                        ToolTip="{l:Loc abortWithoutPatchingAnything}"/>
             </StackPanel>
         </Grid>
     </Grid>

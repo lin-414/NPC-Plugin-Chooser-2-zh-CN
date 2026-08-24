@@ -1,7 +1,8 @@
-using System.Windows;
+﻿using System.Windows;
 using System.Windows.Input;
 using NPC_Plugin_Chooser_2.View_Models;
 using ReactiveUI;
+using NPC_Plugin_Chooser_2.Localization;
 
 namespace NPC_Plugin_Chooser_2.Views;
 
@@ -18,6 +19,8 @@ namespace NPC_Plugin_Chooser_2.Views;
 /// </summary>
 public partial class FullScreen3DPreviewView : ReactiveWindow<VM_FullScreen3DPreview>
 {
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
     public FullScreen3DPreviewView()
     {
         InitializeComponent();
@@ -56,11 +59,12 @@ public partial class FullScreen3DPreviewView : ReactiveWindow<VM_FullScreen3DPre
         if (!vm.RenderSettingsChanged()) return;
 
         bool keep = ScrollableMessageBox.Confirm(
-            "You changed render settings while previewing this NPC.\n\n" +
-            "Save these changes as your global render defaults?\n\n" +
-            "Yes — keep changes globally.\n" +
-            "No — revert to the settings that were active before the preview opened.",
-            title: "Save Render Changes?");
+            GetTranslation("msg_renderChangesPrompt",
+                "You changed render settings while previewing this NPC.\n\n" +
+                "Save these changes as your global render defaults?\n\n" +
+                "Yes — keep changes globally.\n" +
+                "No — revert to the settings that were active before the preview opened."),
+            title: GetTranslation("title_saveRenderChanges", "Save Render Changes?"));
         if (!keep)
         {
             vm.RevertRenderSettingsToSnapshot();

@@ -6,9 +6,10 @@
         xmlns:local="clr-namespace:NPC_Plugin_Chooser_2.Views"
         xmlns:themes="clr-namespace:NPC_Plugin_Chooser_2.Themes"
         xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
         mc:Ignorable="d"
         Style="{DynamicResource ThemedWindowStyle}"
-        Title="ScrollableMessageBox">
+        Title="{l:Loc scrollableMessageBox}">
     
     <i:Interaction.Behaviors>
         <themes:TitleBarThemingBehavior />
@@ -43,9 +44,9 @@
                         Margin="10"
                         x:Name="ButtonPanel"
             >
-                <Button x:Name="YesButton" Content="Yes" Width="75" Height="25" Margin="0,0,10,0" Click="YesButton_Click" Visibility="Collapsed"/>
-                <Button x:Name="NoButton" Content="No" Width="75" Height="25" Click="NoButton_Click" Visibility="Collapsed"/>
-                <Button x:Name="OkButton" Content="OK" Width="75" Height="25" Click="OkButton_Click" Visibility="Collapsed"/>
+                <Button x:Name="YesButton" Content="{l:Loc yes}" Width="75" Height="25" Margin="0,0,10,0" Click="YesButton_Click" Visibility="Collapsed"/>
+                <Button x:Name="NoButton" Content="{l:Loc no}" Width="75" Height="25" Click="NoButton_Click" Visibility="Collapsed"/>
+                <Button x:Name="OkButton" Content="{l:Loc ok}" Width="75" Height="25" Click="OkButton_Click" Visibility="Collapsed"/>
             </StackPanel>
         </Grid>
     </Grid>

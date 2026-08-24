@@ -8,8 +8,9 @@
         xmlns:views="clr-namespace:NPC_Plugin_Chooser_2.Views"
         xmlns:themes="clr-namespace:NPC_Plugin_Chooser_2.Themes"
         xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
         mc:Ignorable="d"
-        Title="Link Local Mods to FaceFinder" Height="600" Width="800"
+        Title="{l:Loc linkLocalModsTo}" Height="600" Width="800"
         d:DataContext="{d:DesignInstance vm:VM_ModFaceFinderLinker}"
         Style="{StaticResource ThemedWindowStyle}">
     
@@ -27,9 +28,8 @@
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
-        <TextBlock Grid.Row="0" TextWrapping="Wrap" Margin="0,0,0,10">
-            Drag a mod from the FaceFinder list (left) and drop it onto your corresponding local mod (right) to create a link.
-        </TextBlock>
+        <TextBlock Grid.Row="0" TextWrapping="Wrap" Margin="0,0,0,10"
+                           Text="{l:Loc dragAModFrom}"/>
 
         <Grid Grid.Row="1">
             <Grid.ColumnDefinitions>
@@ -37,7 +37,7 @@
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
-           <GroupBox Grid.Column="0" Header="FaceFinder Mods" Margin="0,0,5,0">
+           <GroupBox Grid.Column="0" Header="{l:Loc faceFinderMods}" Margin="0,0,5,0">
                <DockPanel>
                    <Grid DockPanel.Dock="Top" Margin="0,0,0,5">
                        <Grid.ColumnDefinitions>
@@ -69,7 +69,7 @@
                </DockPanel>
            </GroupBox>
 
-            <GroupBox Grid.Column="1" Header="Your Local Mods" Margin="5,0,0,0">
+            <GroupBox Grid.Column="1" Header="{l:Loc yourLocalMods}" Margin="5,0,0,0">
                 <DockPanel>
                     <Grid DockPanel.Dock="Top" Margin="0,0,0,5">
                         <Grid.ColumnDefinitions>
@@ -111,7 +111,7 @@
                                                             </TextBlock.Style>
                                                         </TextBlock>
 
-                                                        <Button Grid.Column="1" Content="x"
+                                                        <Button Grid.Column="1" Content="{l:Loc x}"
                                                                 Command="{Binding DataContext.UnlinkCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                                                 CommandParameter="{Binding}"
                                                                 FontWeight="Bold" Foreground="Red" Cursor="Hand" Padding="5,0" Margin="10,0,0,0"

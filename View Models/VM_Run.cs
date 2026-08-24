@@ -7,6 +7,7 @@ using Mutagen.Bethesda.Plugins;
 using Mutagen.Bethesda.Skyrim;
 using NPC_Plugin_Chooser_2.BackEnd;
 using NPC_Plugin_Chooser_2.Models;
+using NPC_Plugin_Chooser_2.Localization;
 using ReactiveUI;
 using ReactiveUI.Fody.Helpers;
 using System.IO;
@@ -61,7 +62,7 @@ public class VM_Run : ReactiveObject, IDisposable
     /// </summary>
     public ObservableCollection<RunLogEntry> LogLines { get; } = new();
     [Reactive] public bool IsRunning { get; private set; }
-    [Reactive] public string RunButtonText { get; private set; } = "Run Patch Generation";
+    [Reactive] public string RunButtonText { get; private set; } = GetTranslation("runPatchGeneration", "Run Patch Generation");
     [Reactive] public double ProgressValue { get; private set; } = 0;
     [Reactive] public string ProgressText { get; private set; } = string.Empty;
     /// <summary>
@@ -152,7 +153,7 @@ public class VM_Run : ReactiveObject, IDisposable
         forwardedOutfitDistributor.ConnectToUILogger(AppendLog, UpdateProgress, ResetProgress, ResetLog);
 
         this.WhenAnyValue(x => x.IsRunning)
-            .Select(isRunning => isRunning ? "Cancel Patching" : "Run Patch Generation")
+            .Select(isRunning => isRunning ? GetTranslation("cancelPatching", "Cancel Patching") : GetTranslation("runPatchGeneration", "Run Patch Generation"))
             .ObserveOn(RxApp.MainThreadScheduler)
             .BindTo(this, x => x.RunButtonText)
             .DisposeWith(_disposables);
@@ -391,12 +392,12 @@ public class VM_Run : ReactiveObject, IDisposable
 
                     var warning = new StringBuilder(HandlingModeDisplay.SkyPatcherForwardToOutfitWarning);
                     warning.AppendLine().AppendLine();
-                    warning.AppendLine($"Wigs forward to outfits for {outfitForwardingMods.Count} mod(s):");
+                    warning.AppendLine(string.Format(GetTranslation("msg_wigsForwardToOutfitsFor", "Wigs forward to outfits for {0} mod(s):"), outfitForwardingMods.Count));
                     foreach (var modName in outfitForwardingMods)
                     {
                         warning.AppendLine("    " + modName);
                     }
-                    warning.Append("\nContinue patching anyway?");
+                    warning.Append(GetTranslation("msg_continuePatchingAnyway", "\nContinue patching anyway?"));
 
                     bool proceed = true;
                     Application.Current?.Dispatcher.Invoke(() =>
@@ -761,8 +762,8 @@ public class VM_Run : ReactiveObject, IDisposable
             Application.Current?.Dispatcher.Invoke(() =>
             {
                 ScrollableMessageBox.ShowWarning(
-                    $"The selected plugin '{Path.GetFileName(targetPluginPath)}' has no master files listed in its header.",
-                    "No Masters Found");
+                    string.Format(GetTranslation("msg_pluginHasNoMasters", "The selected plugin '{0}' has no master files listed in its header."), Path.GetFileName(targetPluginPath)),
+                    GetTranslation("title_noMastersFound", "No Masters Found"));
             });
             return;
         }
@@ -1046,4 +1047,7 @@ public class VM_Run : ReactiveObject, IDisposable
         // mutated on the UI thread, so marshal rather than clearing in place.
         RxApp.MainThreadScheduler.Schedule(() => LogLines.Clear());
     }
+
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
 }

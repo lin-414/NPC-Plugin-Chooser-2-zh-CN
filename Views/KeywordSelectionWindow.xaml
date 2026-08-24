@@ -5,8 +5,9 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:themes="clr-namespace:NPC_Plugin_Chooser_2.Themes"
         xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
         mc:Ignorable="d"
-        Title="Set Keywords"
+        Title="{l:Loc setKeywords}"
         Height="500" Width="700"
         WindowStartupLocation="CenterOwner"
         ResizeMode="CanResizeWithGrip"
@@ -26,13 +27,13 @@
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0" 
-                   Text="Setting Keywords For:" 
+                   Text="{l:Loc settingKeywordsFor}" 
                    FontWeight="SemiBold"
                    Margin="0,0,0,5"/>
         
         <TextBlock Grid.Row="1" 
                    x:Name="ModNameTextBlock"
-                   Text="[Mod Name]"
+                   Text="{l:Loc modName}"
                    Foreground="{DynamicResource PrimaryForeground}"
                    FontWeight="Bold"
                    TextWrapping="Wrap"
@@ -46,7 +47,7 @@
             </Grid.ColumnDefinitions>
 
             <!-- Left Panel: Current Mod's Keywords -->
-            <GroupBox Grid.Column="0" Header="Current Keywords" Margin="0,0,5,0">
+            <GroupBox Grid.Column="0" Header="{l:Loc currentKeywords}" Margin="0,0,5,0">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -55,17 +56,17 @@
                     </Grid.RowDefinitions>
                     
                     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="5,5,5,5">
-                        <Button Content="Remove Selected" 
+                        <Button Content="{l:Loc removeSelected}" 
                                 x:Name="RemoveSelectedButton"
                                 Click="RemoveSelectedButton_Click"
                                 Padding="10,3" 
-                                ToolTip="Remove the selected keyword from this mod"/>
-                        <Button Content="Clear All" 
+                                ToolTip="{l:Loc removeTheSelectedKeyword}"/>
+                        <Button Content="{l:Loc clearAll}" 
                                 x:Name="ClearAllButton"
                                 Click="ClearAllButton_Click"
                                 Padding="10,3"
                                 Margin="5,0,0,0"
-                                ToolTip="Remove all keywords from this mod"/>
+                                ToolTip="{l:Loc removeAllKeywordsFrom}"/>
                     </StackPanel>
                     
                     <ListBox Grid.Row="1" 
@@ -87,30 +88,30 @@
                         <TextBox Grid.Column="0" 
                                  x:Name="NewKeywordTextBox"
                                  VerticalContentAlignment="Center"
-                                 ToolTip="Type a new keyword and press Add or Enter"/>
+                                 ToolTip="{l:Loc typeANewKeyword}"/>
                         <Button Grid.Column="1" 
-                                Content="Add" 
+                                Content="{l:Loc add}" 
                                 x:Name="AddNewKeywordButton"
                                 Click="AddNewKeywordButton_Click"
                                 Padding="10,3" 
                                 Margin="5,0,0,0"
-                                ToolTip="Add the typed keyword to this mod"/>
+                                ToolTip="{l:Loc addTheTypedKeyword}"/>
                     </Grid>
                 </Grid>
             </GroupBox>
 
             <!-- Center: Transfer Buttons -->
             <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="5">
-                <Button Content="&lt;&lt; Add" 
+                <Button Content="{l:Loc ltLtAdd}" 
                         x:Name="AddFromOthersButton"
                         Click="AddFromOthersButton_Click"
                         Padding="10,5" 
                         Margin="0,5"
-                        ToolTip="Add the selected keyword from other mods to this mod"/>
+                        ToolTip="{l:Loc addTheSelectedKeyword}"/>
             </StackPanel>
 
             <!-- Right Panel: Keywords from Other Mods -->
-            <GroupBox Grid.Column="2" Header="Keywords from Other Mods" Margin="5,0,0,0">
+            <GroupBox Grid.Column="2" Header="{l:Loc keywordsFromOtherMods}" Margin="5,0,0,0">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
@@ -118,11 +119,11 @@
                     </Grid.RowDefinitions>
                     
                     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="5,5,5,5">
-                        <TextBlock Text="Filter:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                        <TextBlock Text="{l:Loc filter}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                         <TextBox x:Name="FilterTextBox" 
                                  MinWidth="150" 
                                  TextChanged="FilterTextBox_TextChanged"
-                                 ToolTip="Filter the list of available keywords"/>
+                                 ToolTip="{l:Loc filterTheListOf}"/>
                     </StackPanel>
                     
                     <ListBox Grid.Row="1" 
@@ -142,7 +143,7 @@
 
         <TextBlock Grid.Row="3" 
                    x:Name="StatusTextBlock"
-                   Text="Double-click a keyword on the right to add it, or select and click Add."
+                   Text="{l:Loc doubleClickAKeyword}"
                    TextWrapping="Wrap"
                    Foreground="{DynamicResource DisabledForeground}"
                    Margin="0,10,0,10"/>
@@ -150,14 +151,14 @@
         <StackPanel Grid.Row="4" 
                     Orientation="Horizontal" 
                     HorizontalAlignment="Right">
-            <Button Content="OK" 
+            <Button Content="{l:Loc oK}" 
                     x:Name="OkButton"
                     Click="OkButton_Click"
                     IsDefault="True"
                     MinWidth="80" 
                     Padding="15,5" 
                     Margin="0,0,10,0"/>
-            <Button Content="Cancel" 
+            <Button Content="{l:Loc cancel}" 
                     x:Name="CancelButton"
                     Click="CancelButton_Click"
                     IsCancel="True"

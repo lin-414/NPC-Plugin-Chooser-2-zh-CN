@@ -20,11 +20,14 @@ using NPC_Plugin_Chooser_2.Views;
 using ReactiveUI;
 using ReactiveUI.Fody.Helpers;
 using Splat;
+using NPC_Plugin_Chooser_2.Localization;
 
 namespace NPC_Plugin_Chooser_2.View_Models;
 
 public class VM_FavoriteFaces : ReactiveObject, IActivatableViewModel, IDisposable, ISearchFilterHost
 {
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
     public delegate VM_FavoriteFaces Factory(FavoriteFacesMode mode, VM_NpcsMenuSelection? targetNpcForApply);
     
     public enum FavoriteFacesMode
@@ -621,8 +624,8 @@ public class VM_FavoriteFaces : ReactiveObject, IActivatableViewModel, IDisposab
         if (FilteredFavoriteMugshots.Count == 0 || string.IsNullOrWhiteSpace(SelectedFavoriteGroupName)) return;
         var groupName = SelectedFavoriteGroupName.Trim();
         if (!ScrollableMessageBox.Confirm(
-                $"Add all {FilteredFavoriteMugshots.Count} currently visible favorite(s) to the group '{groupName}'?",
-                "Confirm Add Visible Favorites"))
+                string.Format(GetTranslation("msg_confirmAddVisibleFavorites", "Add all {0} currently visible favorite(s) to the group '{1}'?"), FilteredFavoriteMugshots.Count, groupName),
+                GetTranslation("title_confirmAddVisibleFavorites", "Confirm Add Visible Favorites")))
         {
             return;
         }
@@ -642,8 +645,8 @@ public class VM_FavoriteFaces : ReactiveObject, IActivatableViewModel, IDisposab
         if (FilteredFavoriteMugshots.Count == 0 || string.IsNullOrWhiteSpace(SelectedFavoriteGroupName)) return;
         var groupName = SelectedFavoriteGroupName.Trim();
         if (!ScrollableMessageBox.Confirm(
-                $"Remove all {FilteredFavoriteMugshots.Count} currently visible favorite(s) from the group '{groupName}'?",
-                "Confirm Remove Visible Favorites"))
+                string.Format(GetTranslation("msg_confirmRemoveVisibleFavorites", "Remove all {0} currently visible favorite(s) from the group '{1}'?"), FilteredFavoriteMugshots.Count, groupName),
+                GetTranslation("title_confirmRemoveVisibleFavorites", "Confirm Remove Visible Favorites")))
         {
             return;
         }
@@ -704,9 +707,9 @@ public class VM_FavoriteFaces : ReactiveObject, IActivatableViewModel, IDisposab
             // An empty dropdown would leave the user with nothing to do and no explanation.
             ScrollableMessageBox.ShowWarning(
                 action == FavoriteBatchAction.Add
-                    ? "No mods with appearances are available. Populate the Mods menu first."
-                    : "You have no favorites to remove.",
-                "Nothing To Do");
+                    ? GetTranslation("msg_noModsWithAppearances", "No mods with appearances are available. Populate the Mods menu first.")
+                    : GetTranslation("msg_noFavoritesToRemove", "You have no favorites to remove."),
+                GetTranslation("title_nothingToDo", "Nothing To Do"));
             selectorVm.Dispose();
             return;
         }
@@ -751,9 +754,9 @@ public class VM_FavoriteFaces : ReactiveObject, IActivatableViewModel, IDisposab
 
         int alreadyPresent = modSetting.NpcFormKeysToDisplayName.Count - added;
         ScrollableMessageBox.Show(
-            $"Added {added} appearance(s) from '{modSetting.DisplayName}' to your favorites." +
-            (alreadyPresent > 0 ? $"{Environment.NewLine}{alreadyPresent} were already favorited." : string.Empty),
-            "Favorites Updated");
+            string.Format(GetTranslation("msg_favoritesAddedFromMod", "Added {0} appearance(s) from '{1}' to your favorites."), added, modSetting.DisplayName) +
+            (alreadyPresent > 0 ? Environment.NewLine + string.Format(GetTranslation("msg_favoritesAlreadyPresent", "{0} were already favorited."), alreadyPresent) : string.Empty),
+            GetTranslation("title_favoritesUpdated", "Favorites Updated"));
     }
 
     private void RemoveAllFavoritesFromMod(string modName)
@@ -763,7 +766,7 @@ public class VM_FavoriteFaces : ReactiveObject, IActivatableViewModel, IDisposab
             .ToList();
         if (toRemove.Count == 0)
         {
-            ScrollableMessageBox.ShowWarning($"You have no favorites from '{modName}'.", "Nothing To Remove");
+            ScrollableMessageBox.ShowWarning($"You have no favorites from '{modName}'.", TranslationServiceProvider.GetService()?.GetString("nothingToRemove") ?? "Nothing To Remove");
             return;
         }
 
@@ -860,7 +863,7 @@ public class VM_FavoriteFaces : ReactiveObject, IActivatableViewModel, IDisposab
         if (SelectedMugshot == null) return;
         if (CurrentTargetNpc == null)
         {
-            ScrollableMessageBox.ShowWarning("Please select an NPC in the main window to apply this face to.", "No NPC Selected");
+            ScrollableMessageBox.ShowWarning(TranslationServiceProvider.GetService()?.GetString("msg_pleaseSelectAnNpcToApplyFace") ?? "Please select an NPC in the main window to apply this face to.", TranslationServiceProvider.GetService()?.GetString("noNpcSelected") ?? "No NPC Selected");
             return;
         }
         _npcsViewModel.AddGuestAppearance(CurrentTargetNpc.NpcFormKey, SelectedMugshot.ModDisplayName,
@@ -879,7 +882,7 @@ public class VM_FavoriteFaces : ReactiveObject, IActivatableViewModel, IDisposab
         if (SelectedMugshot == null) return;
         if (CurrentTargetNpc == null)
         {
-            ScrollableMessageBox.ShowWarning("Please select an NPC in the main window to make this face available to.", "No NPC Selected");
+            ScrollableMessageBox.ShowWarning(TranslationServiceProvider.GetService()?.GetString("msg_pleaseSelectAnNpcToMakeFaceAvailable") ?? "Please select an NPC in the main window to make this face available to.", TranslationServiceProvider.GetService()?.GetString("noNpcSelected") ?? "No NPC Selected");
             return;
         }
 

@@ -6,6 +6,7 @@
              xmlns:local="clr-namespace:NPC_Plugin_Chooser_2.Views"
              xmlns:vm="clr-namespace:NPC_Plugin_Chooser_2.View_Models"
              xmlns:reactiveui="http://reactiveui.net"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
              mc:Ignorable="d"
              x:TypeArguments="vm:VM_Summary"
              d:DataContext="{d:DesignInstance Type=vm:VM_Summary}"
@@ -24,18 +25,18 @@
 
         <Border Grid.Row="0" BorderBrush="Gray" BorderThickness="0,0,0,1" Padding="5">
             <WrapPanel Orientation="Horizontal" VerticalAlignment="Center">
-                <TextBlock Text="View Mode:" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                <RadioButton Content="Gallery" GroupName="ViewMode" VerticalAlignment="Center" Margin="0,0,5,0"
+                <TextBlock Text="{l:Loc viewMode}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                <RadioButton Content="{l:Loc gallery}" GroupName="{l:Loc viewMode2}" VerticalAlignment="Center" Margin="0,0,5,0"
                              IsChecked="{Binding ViewMode, Converter={StaticResource EnumMatchToBooleanConverter}, ConverterParameter=Gallery}"/>
             
-                <RadioButton Content="List" GroupName="ViewMode" VerticalAlignment="Center" Margin="0,0,15,0"
+                <RadioButton Content="{l:Loc list}" GroupName="{l:Loc viewMode2}" VerticalAlignment="Center" Margin="0,0,15,0"
                              IsChecked="{Binding ViewMode, Converter={StaticResource EnumMatchToBooleanConverter}, ConverterParameter=List}"/>
 
-                <TextBlock Text="NPC Group:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                <TextBlock Text="{l:Loc nPCGroup}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                 <ComboBox MinWidth="150" ItemsSource="{Binding AvailableNpcGroups}" SelectedItem="{Binding SelectedNpcGroup, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,15,0"/>
 
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Visibility="{Binding ViewMode, Converter={StaticResource EnumMatchToBooleanConverter}, ConverterParameter=Gallery}">
-                    <TextBlock Text="Max # NPCs per page:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                    <TextBlock Text="{l:Loc maxNPCsPerPage}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                     <TextBox Text="{Binding MaxNpcsPerPage, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" MinWidth="50" VerticalAlignment="Center"/>
                 </StackPanel>
             </WrapPanel>
@@ -60,10 +61,10 @@
                                     Width="{Binding ImageWidth}" Height="{Binding ImageHeight}">
                                 <Border.ContextMenu>
                                     <ContextMenu>
-                                        <MenuItem Header="Show Full Image" Command="{Binding ToggleFullScreenCommand}"/>
-                                        <MenuItem Header="Jump to NPC in List" Command="{Binding JumpToNpcCommand}"/>
-                                        <MenuItem Header="Jump to Mod in List" Command="{Binding JumpToModCommand}"/>
-                                        <MenuItem Header="Visit Mod Page"
+                                        <MenuItem Header="{l:Loc showFullImage}" Command="{Binding ToggleFullScreenCommand}"/>
+                                        <MenuItem Header="{l:Loc jumpToNPCIn}" Command="{Binding JumpToNpcCommand}"/>
+                                        <MenuItem Header="{l:Loc jumpToModIn}" Command="{Binding JumpToModCommand}"/>
+                                        <MenuItem Header="{l:Loc visitModPage}"
                                                   DisplayMemberPath="DisplayName"
                                                   Visibility="{Binding CanVisitModPage, Converter={StaticResource BooleanToVisibilityConverter}}">
                                             <MenuItem.Style>
@@ -156,10 +157,10 @@
                       SelectionUnit="FullRow"
                       Visibility="{Binding ViewMode, Converter={StaticResource EnumToVisibilityConverter}, ConverterParameter=List}">
                 <DataGrid.Columns>
-                    <DataGridTextColumn Header="NPC" Binding="{Binding NpcDisplayName}" Width="2*"/>
-                    <DataGridTextColumn Header="Selected Mod" Binding="{Binding SelectedModName}" Width="2*"/>
+                    <DataGridTextColumn Header="{l:Loc nPC}" Binding="{Binding NpcDisplayName}" Width="2*"/>
+                    <DataGridTextColumn Header="{l:Loc selectedMod}" Binding="{Binding SelectedModName}" Width="2*"/>
 
-                    <DataGridTextColumn Header="Source NPC (if different)" Binding="{Binding SourceNpcForDisplay}" Width="2*"/>
+                    <DataGridTextColumn Header="{l:Loc sourceNPCIfDifferent}" Binding="{Binding SourceNpcForDisplay}" Width="2*"/>
                 </DataGrid.Columns>
             </DataGrid>
 
@@ -169,21 +170,21 @@
             <Grid>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center"
                             Visibility="{Binding ViewMode, Converter={StaticResource EnumToVisibilityConverter}, ConverterParameter=Gallery}">
-                    <Button Content="&lt;" Command="{Binding PreviousPageCommand}" Width="25" Height="25" Margin="0,0,5,0" ToolTip="Previous Page"/>
+                    <Button Content="{l:Loc lt}" Command="{Binding PreviousPageCommand}" Width="25" Height="25" Margin="0,0,5,0" ToolTip="{l:Loc previousPage}"/>
                     <TextBlock Text="{Binding PageDisplay}" VerticalAlignment="Center" Margin="5,0"/>
-                    <Button Content="&gt;" Command="{Binding NextPageCommand}" Width="25" Height="25" Margin="5,0,0,0" ToolTip="Next Page"/>
+                    <Button Content="{l:Loc gt}" Command="{Binding NextPageCommand}" Width="25" Height="25" Margin="5,0,0,0" ToolTip="{l:Loc nextPage}"/>
                 </StackPanel>
                 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                    <Button x:Name="ZoomOutButton" Content="-" Command="{Binding ZoomOutSummaryCommand}" Width="25" Height="25" Margin="2,0" ToolTip="Zoom Out (Ctrl+Scroll Wheel)"/>
+                    <Button x:Name="ZoomOutButton" Content="-" Command="{Binding ZoomOutSummaryCommand}" Width="25" Height="25" Margin="2,0" ToolTip="{l:Loc zoomOutCtrlScroll}"/>
                     <TextBox x:Name="ZoomPercentageTextBox" Width="60" Height="25" Margin="2,0" TextAlignment="Center" VerticalContentAlignment="Center"
                              Text="{Binding SummaryViewZoomLevel, StringFormat='F2', Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                              PreviewMouseWheel="ZoomPercentageTextBox_PreviewMouseWheel"
-                             ToolTip="Current Zoom Level. Editable. Ctrl+Scroll Wheel in image area or Scroll Wheel here to adjust."/>
+                             ToolTip="{l:Loc currentZoomLevel}"/>
                     <TextBlock Text="%" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                    <Button x:Name="ZoomInButton" Content="+" Command="{Binding ZoomInSummaryCommand}" Width="25" Height="25" Margin="2,0" ToolTip="Zoom In (Ctrl+Scroll Wheel)"/>
-                    <CheckBox x:Name="LockZoomCheckBox" Content="Lock Zoom" IsChecked="{Binding SummaryViewIsZoomLocked, Mode=TwoWay}" Margin="10,0,5,0" VerticalAlignment="Center" ToolTip="Lock the current zoom level. If unchecked, zoom adjusts to fit images."/>
-                    <Button x:Name="ResetZoomButton" Content="Reset Zoom" Command="{Binding ResetZoomSummaryCommand}" Margin="5,0,0,0" Padding="5,2" ToolTip="Reset zoom to automatically fit images."/>
+                    <Button x:Name="ZoomInButton" Content="+" Command="{Binding ZoomInSummaryCommand}" Width="25" Height="25" Margin="2,0" ToolTip="{l:Loc zoomInCtrlScroll}"/>
+                    <CheckBox x:Name="LockZoomCheckBox" Content="{l:Loc lockZoom}" IsChecked="{Binding SummaryViewIsZoomLocked, Mode=TwoWay}" Margin="10,0,5,0" VerticalAlignment="Center" ToolTip="{l:Loc lockTheCurrentZoom}"/>
+                    <Button x:Name="ResetZoomButton" Content="{l:Loc resetZoom}" Command="{Binding ResetZoomSummaryCommand}" Margin="5,0,0,0" Padding="5,2" ToolTip="{l:Loc resetZoomToAutomatically}"/>
                 </StackPanel>
             </Grid>
         </Border>

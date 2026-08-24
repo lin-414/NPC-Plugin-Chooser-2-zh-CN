@@ -18,6 +18,7 @@ using System.Reactive.Linq;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using NPC_Plugin_Chooser_2.BackEnd;
+using NPC_Plugin_Chooser_2.Localization;
 using NPC_Plugin_Chooser_2.BackEnd.CharacterViewerHost;
 using NPC_Plugin_Chooser_2.Models;
 using SixLabors.ImageSharp; // For Debug.WriteLine
@@ -27,6 +28,8 @@ namespace NPC_Plugin_Chooser_2.View_Models;
 [DebuggerDisplay("{NpcDisplayName}")]
 public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
 {
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
     public delegate VM_ModsMenuMugshot Factory(
         string imagePath,
         FormKey npcFormKey,
@@ -132,6 +135,7 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
     [Reactive] public ModKey? CurrentSourcePlugin { get; set; }
 
     [Reactive] public bool IsFavorite { get; set; }
+    [Reactive] public string FavoriteMenuItemText { get; set; } = "Add to Favorites";
 
     [Reactive] public bool IsLoading { get; private set; }
     [Reactive] public double LoadingIconRadiusModifier { get; set; } = 0.2;
@@ -236,6 +240,12 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
         IsVisible = true;
 
         IsFavorite = _settings.FavoriteFaces.Contains((this.NpcFormKey, _parentVMModSetting.DisplayName));
+        // Favorites menu item text follows favorite state, in the current UI language
+        this.WhenAnyValue(x => x.IsFavorite)
+            .Subscribe(_ => FavoriteMenuItemText = GetTranslation(
+                IsFavorite ? "removeFromFavorites" : "addToFavorites",
+                IsFavorite ? "Remove from Favorites" : "Add to Favorites"))
+            .DisposeWith(_disposables);
 
         // START MODIFIED SECTION
         // Set initial selection state based on the consistency provider
@@ -561,7 +571,7 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
     {
         if (MugshotSource == null && (string.IsNullOrEmpty(ImagePath) || !File.Exists(ImagePath)))
         {
-            ScrollableMessageBox.ShowWarning("Mugshot image (or placeholder) not found or path is invalid.");
+            ScrollableMessageBox.ShowWarning(TranslationServiceProvider.GetService()?.GetString("msg_mugshotPlaceholderNotFound") ?? TranslationServiceProvider.GetService()?.GetString("msg_mugshotPlaceholderNotFound") ?? "Mugshot image (or placeholder) not found or path is invalid.");
             return;
         }
 
@@ -578,7 +588,7 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
         }
         else
         {
-            ScrollableMessageBox.ShowError("Could not create FullScreenImageView.");
+            ScrollableMessageBox.ShowError(TranslationServiceProvider.GetService()?.GetString("msg_couldNotCreateFullScreenImageView") ?? TranslationServiceProvider.GetService()?.GetString("msg_couldNotCreateFullScreenImageView") ?? "Could not create FullScreenImageView.");
         }
     }
 
@@ -606,7 +616,7 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
 
             if (Locator.Current.GetService<IViewFor<VM_FullScreen3DPreview>>() is not Window window)
             {
-                ScrollableMessageBox.ShowError("Could not create FullScreen3DPreviewView.");
+                ScrollableMessageBox.ShowError(TranslationServiceProvider.GetService()?.GetString("msg_couldNotCreateFullScreen3DPreviewView") ?? TranslationServiceProvider.GetService()?.GetString("msg_couldNotCreateFullScreen3DPreviewView") ?? "Could not create FullScreen3DPreviewView.");
                 return;
             }
             window.DataContext = fsVm;
@@ -965,7 +975,7 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
                 }
 
                 using var client = new HttpClient();
-                var imageData = await client.GetByteArrayAsync(faceData.ImageUrl, _cancellationToken);
+var imageData = await client.GetByteArrayAsync(faceData.ImageUrl, _cancellationToken);
                 await HandleSuccessfulDownload(imageData, faceData, baseSavePath, _cancellationToken);
                 return true;
             }

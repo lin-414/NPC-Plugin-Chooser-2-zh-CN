@@ -6,9 +6,10 @@
         xmlns:vm="clr-namespace:NPC_Plugin_Chooser_2.View_Models"
         xmlns:themes="clr-namespace:NPC_Plugin_Chooser_2.Themes"
         xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
         mc:Ignorable="d"
         d:DataContext="{d:DesignInstance Type=vm:VM_ValidationResultsWindow}"
-        Title="Validate Output — Results"
+        Title="{l:Loc validateOutputResults}"
         Height="640" Width="1120"
         MinHeight="400" MinWidth="700"
         WindowStartupLocation="CenterOwner"
@@ -47,21 +48,21 @@
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="Filter:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <TextBlock Grid.Column="0" Text="{l:Loc filter}" VerticalAlignment="Center" Margin="0,0,6,0"/>
             <TextBox Grid.Column="1"
                      Text="{Binding FilterText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                      VerticalContentAlignment="Center"
-                     ToolTip="Filter rows by any column"/>
+                     ToolTip="{l:Loc filterRowsByAny}"/>
             <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
-                <CheckBox Content="Error" IsChecked="{Binding ShowErrors, Mode=TwoWay}"
+                <CheckBox Content="{l:Loc error}" IsChecked="{Binding ShowErrors, Mode=TwoWay}"
                           VerticalAlignment="Center"
-                          ToolTip="Show findings where the chosen appearance will not be what shows in-game"/>
-                <CheckBox Content="Warning" IsChecked="{Binding ShowWarnings, Mode=TwoWay}"
+                          ToolTip="{l:Loc showFindingsWhereThe}"/>
+                <CheckBox Content="{l:Loc warning}" IsChecked="{Binding ShowWarnings, Mode=TwoWay}"
                           VerticalAlignment="Center" Margin="12,0,0,0"
-                          ToolTip="Show likely problems worth a look"/>
-                <CheckBox Content="Info" IsChecked="{Binding ShowInfo, Mode=TwoWay}"
+                          ToolTip="{l:Loc showLikelyProblemsWorth}"/>
+                <CheckBox Content="{l:Loc info}" IsChecked="{Binding ShowInfo, Mode=TwoWay}"
                           VerticalAlignment="Center" Margin="12,0,0,0"
-                          ToolTip="Show informational rows (expected behaviour / context)"/>
+                          ToolTip="{l:Loc showInformationalRowsExpected}"/>
             </StackPanel>
         </Grid>
 
@@ -90,9 +91,9 @@
                   VerticalGridLinesBrush="{DynamicResource BorderBrush}">
             <DataGrid.ContextMenu>
                 <ContextMenu>
-                    <MenuItem Header="Copy selected cells"
+                    <MenuItem Header="{l:Loc copySelectedCells}"
                               Command="ApplicationCommands.Copy"
-                              InputGestureText="Ctrl+C"/>
+                              InputGestureText="{l:Loc ctrlC}"/>
                 </ContextMenu>
             </DataGrid.ContextMenu>
             <DataGrid.ColumnHeaderStyle>
@@ -133,27 +134,27 @@
                 </Style>
             </DataGrid.RowStyle>
             <DataGrid.Columns>
-                <DataGridTextColumn Header="Severity" Binding="{Binding SeverityText}" Width="80"/>
-                <DataGridTextColumn Header="Check" Binding="{Binding CheckText}" Width="90"/>
-                <DataGridTextColumn Header="NPC" Binding="{Binding NpcDisplayName}" Width="160"/>
-                <DataGridTextColumn Header="FormKey" Binding="{Binding NpcFormKey}" Width="150"/>
-                <DataGridTextColumn Header="FormID" Binding="{Binding NpcFormId}" Width="80"/>
-                <DataGridTextColumn Header="Selected Mod" Binding="{Binding SelectedMod}" Width="150"/>
-                <DataGridTextColumn Header="Issue" Binding="{Binding Issue}" Width="2*">
+                <DataGridTextColumn Header="{l:Loc severity}" Binding="{Binding SeverityText}" Width="80"/>
+                <DataGridTextColumn Header="{l:Loc check}" Binding="{Binding CheckText}" Width="90"/>
+                <DataGridTextColumn Header="{l:Loc nPC}" Binding="{Binding NpcDisplayName}" Width="160"/>
+                <DataGridTextColumn Header="{l:Loc formKey}" Binding="{Binding NpcFormKey}" Width="150"/>
+                <DataGridTextColumn Header="{l:Loc formID}" Binding="{Binding NpcFormId}" Width="80"/>
+                <DataGridTextColumn Header="{l:Loc selectedMod}" Binding="{Binding SelectedMod}" Width="150"/>
+                <DataGridTextColumn Header="{l:Loc issue}" Binding="{Binding Issue}" Width="2*">
                     <DataGridTextColumn.ElementStyle>
                         <Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
                             <Setter Property="TextWrapping" Value="Wrap"/>
                         </Style>
                     </DataGridTextColumn.ElementStyle>
                 </DataGridTextColumn>
-                <DataGridTextColumn Header="Winning Source" Binding="{Binding WinningSource}" Width="180">
+                <DataGridTextColumn Header="{l:Loc winningSource}" Binding="{Binding WinningSource}" Width="180">
                     <DataGridTextColumn.ElementStyle>
                         <Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
                             <Setter Property="TextWrapping" Value="Wrap"/>
                         </Style>
                     </DataGridTextColumn.ElementStyle>
                 </DataGridTextColumn>
-                <DataGridTextColumn Header="Details" Binding="{Binding Details}" Width="1*">
+                <DataGridTextColumn Header="{l:Loc details}" Binding="{Binding Details}" Width="1*">
                     <DataGridTextColumn.ElementStyle>
                         <Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
                             <Setter Property="TextWrapping" Value="Wrap"/>
@@ -164,10 +165,10 @@
         </DataGrid>
 
         <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-            <Button Content="Copy to Clipboard (TSV)" Command="{Binding CopyTsvCommand}" Height="30" Padding="12,0"
-                    ToolTip="Copy the visible rows as tab-separated text; paste directly into Excel."/>
-            <Button Content="Save CSV..." Command="{Binding SaveCsvCommand}" Height="30" Padding="12,0" Margin="10,0,0,0"/>
-            <Button Content="Close" Click="CloseButton_Click" Height="30" Width="100" Margin="10,0,0,0" IsCancel="True"/>
+            <Button Content="{l:Loc copyToClipboardTSV}" Command="{Binding CopyTsvCommand}" Height="30" Padding="12,0"
+                    ToolTip="{l:Loc copyTheVisibleRows}"/>
+            <Button Content="{l:Loc saveCSV}" Command="{Binding SaveCsvCommand}" Height="30" Padding="12,0" Margin="10,0,0,0"/>
+            <Button Content="{l:Loc close}" Click="CloseButton_Click" Height="30" Width="100" Margin="10,0,0,0" IsCancel="True"/>
         </StackPanel>
     </Grid>
 </Window>

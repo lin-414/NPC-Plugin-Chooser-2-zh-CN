@@ -13,6 +13,7 @@
              xmlns:xctk="http://schemas.xceed.com/wpf/xaml/toolkit"
              xmlns:dd="urn:gong-wpf-dragdrop"
              xmlns:System="clr-namespace:System;assembly=mscorlib"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
              mc:Ignorable="d"
              x:TypeArguments="vm:VM_Settings"
              d:DataContext="{d:DesignInstance Type=vm:VM_Settings}"
@@ -61,7 +62,7 @@
                                               FontWeight="SemiBold"
                                               Cursor="Hand"
                                               HorizontalContentAlignment="Stretch"
-                                              ToolTip="Click to show or hide this section. Sections stay as you leave them next time you launch.">
+                                              ToolTip="{l:Loc clickToShow}">
                                     <ToggleButton.Template>
                                         <ControlTemplate TargetType="ToggleButton">
                                             <Border x:Name="HeaderBorder"
@@ -125,68 +126,104 @@
         <StackPanel>
 
             <!-- Section 1: Game Environment -->
-            <Expander Header="Game Environment" Style="{StaticResource SettingsSectionExpander}"
+            <Expander Header="{l:Loc gameEnvironment}" Style="{StaticResource SettingsSectionExpander}"
                       IsExpanded="{Binding SectionGameEnvironment.IsExpanded, Mode=TwoWay}">
                 <StackPanel>
                     <!-- Skyrim Game Path -->
-                    <TextBlock Text="Skyrim Game Data Path (Optional - Auto-detects if blank):" Margin="0,0,0,2"/>
+                    <TextBlock Text="{l:Loc skyrimGameDataPath}" Margin="0,0,0,2"/>
                     <Grid Margin="0,0,0,2">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <TextBox Grid.Column="0" Text="{Binding SkyrimGamePath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,5,0"/>
-                        <Button Grid.Column="1" Content="Browse..." Command="{Binding SelectGameFolderCommand}"/>
+                        <Button Grid.Column="1" Content="{l:Loc browse}" Command="{Binding SelectGameFolderCommand}"/>
                     </Grid>
-                    <TextBlock Text="Leave blank to attempt auto-detection based on the selected Skyrim version." FontSize="10" Foreground="{DynamicResource HintForeground}" Margin="0,0,0,10"/>
+                    <TextBlock Text="{l:Loc leaveBlankToAttempt}" FontSize="10" Foreground="{DynamicResource HintForeground}" Margin="0,0,0,10"/>
 
                     <!-- Skyrim Version -->
-                    <TextBlock Text="Skyrim Version:" Margin="0,0,0,2"/>
+                    <TextBlock Text="{l:Loc skyrimVersion}" Margin="0,0,0,2"/>
                     <ComboBox ItemsSource="{Binding Source={StaticResource SkyrimReleaseEnumValues}}"
                               SelectedItem="{Binding SkyrimRelease, Mode=TwoWay}" Margin="0,0,0,2"/>
-                    <TextBlock Text="Ensure this matches the game version you are modding." FontSize="10" Foreground="{DynamicResource HintForeground}" Margin="0,0,0,10"/>
+                    <TextBlock Text="{l:Loc ensureThisMatchesThe}" FontSize="10" Foreground="{DynamicResource HintForeground}" Margin="0,0,0,10"/>
 
                     <!-- Environment Status -->
-                    <TextBlock Text="Environment Status:" FontWeight="Bold" Margin="0,5,0,2"/>
+                    <TextBlock Text="{l:Loc environment}" FontWeight="Bold" Margin="0,5,0,2"/>
                     <TextBlock>
-                        <Run Text="Mutagen Environment Status: "/>
-                        <Run FontWeight="Bold">
+                        <Run Text="{l:Loc mutagenEnvironmentStatus}"/>
+                        <Run FontWeight="Bold" Text="{l:Loc envStatusValid}" Foreground="{DynamicResource StatusValidForeground}">
+                                <Run.Style>
+                                    <Style TargetType="Run">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding EnvironmentStatus}" Value="Invalid">
+                                                <Setter Property="Text" Value=""/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding EnvironmentStatus}" Value="Pending">
+                                                <Setter Property="Text" Value=""/>
+                                            </DataTrigger>
+                                            <!-- Valid + vanilla-only load order: hide this so the
+                                                 dedicated "no mod plugins" Run below shows instead. -->
+                                            <MultiDataTrigger>
+                                                <MultiDataTrigger.Conditions>
+                                                    <Condition Binding="{Binding EnvironmentStatus}" Value="Valid"/>
+                                                    <Condition Binding="{Binding EnvironmentLoadOrderIsVanillaOnly}" Value="True"/>
+                                                </MultiDataTrigger.Conditions>
+                                                <Setter Property="Text" Value=""/>
+                                            </MultiDataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Run.Style>
+                            </Run>
+                            <Run FontWeight="Bold" Text="{l:Loc envStatusInvalid}" Foreground="{DynamicResource StatusErrorForeground}">
+                                <Run.Style>
+                                    <Style TargetType="Run">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding EnvironmentStatus}" Value="Valid">
+                                                <Setter Property="Text" Value=""/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding EnvironmentStatus}" Value="Pending">
+                                                <Setter Property="Text" Value=""/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Run.Style>
+                            </Run>
+                            <Run FontWeight="Bold" Text="{l:Loc envStatusPending}" Foreground="{DynamicResource StatusPendingForeground}">
+                                <Run.Style>
+                                    <Style TargetType="Run">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding EnvironmentStatus}" Value="Valid">
+                                                <Setter Property="Text" Value=""/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding EnvironmentStatus}" Value="Invalid">
+                                                <Setter Property="Text" Value=""/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Run.Style>
+                            </Run>
+                        <Run Text="{l:Loc validNoModPluginsFound}" Foreground="{DynamicResource StatusWarningForeground}">
                             <Run.Style>
                                 <Style TargetType="Run">
-                                    <Setter Property="Text" Value="{Binding EnvironmentStatus, Mode=OneWay}"/>
                                     <Style.Triggers>
-                                        <DataTrigger Binding="{Binding EnvironmentStatus}" Value="Valid">
-                                            <Setter Property="Foreground" Value="{DynamicResource StatusValidForeground}"/>
-                                        </DataTrigger>
                                         <DataTrigger Binding="{Binding EnvironmentStatus}" Value="Invalid">
-                                            <Setter Property="Foreground" Value="{DynamicResource StatusErrorForeground}"/>
+                                            <Setter Property="Text" Value=""/>
                                         </DataTrigger>
                                         <DataTrigger Binding="{Binding EnvironmentStatus}" Value="Pending">
-                                            <Setter Property="Foreground" Value="{DynamicResource StatusPendingForeground}"/>
+                                            <Setter Property="Text" Value=""/>
                                         </DataTrigger>
-                                        <!-- Valid, but the load order holds no mod plugins at all. Declared
-                                             last so it overrides the plain Valid trigger above. -->
-                                        <MultiDataTrigger>
-                                            <MultiDataTrigger.Conditions>
-                                                <Condition Binding="{Binding EnvironmentStatus}" Value="Valid"/>
-                                                <Condition Binding="{Binding EnvironmentLoadOrderIsVanillaOnly}" Value="True"/>
-                                            </MultiDataTrigger.Conditions>
-                                            <Setter Property="Foreground" Value="{DynamicResource StatusWarningForeground}"/>
-                                            <Setter Property="Text" Value="Valid (no mod plugins found)"/>
-                                        </MultiDataTrigger>
+                                        <DataTrigger Binding="{Binding EnvironmentLoadOrderIsVanillaOnly}" Value="False">
+                                            <Setter Property="Text" Value=""/>
+                                        </DataTrigger>
                                     </Style.Triggers>
                                 </Style>
                             </Run.Style>
                         </Run>
                         <Run Text=" - "/>
-                        <Run FontSize="10">
-                            <Run.Text>
-                                <MultiBinding StringFormat="{}{0} Plugins in Load Order ({1} Active)">
-                                    <Binding Path="NumPluginsInEnvironment" Mode="OneWay" />
-                                    <Binding Path="NumActivePluginsInEnvironment" Mode="OneWay" />
-                                </MultiBinding>
-                            </Run.Text>
-                        </Run>
+                        <Run Text="{l:Loc pluginsInLoadOrderPrefix}" FontSize="10"/>
+                        <Run Text="{Binding NumPluginsInEnvironment, Mode=OneWay}" FontSize="10"/>
+                        <Run Text="{l:Loc pluginsInLoadOrderSuffix}" FontSize="10"/>
+                        <Run Text="{Binding NumActivePluginsInEnvironment, Mode=OneWay}" FontSize="10"/>
                     </TextBlock>
                     <!-- Advisory (not an error - the environment is usable): the resolved load order
                          contains only base-game / Creation Club plugins. Nearly always means N.P.C.2 was
@@ -198,11 +235,11 @@
                     <TextBlock TextWrapping="Wrap" Margin="0,4,0,0"
                                ToolTipService.ShowDuration="60000"
                                Foreground="{DynamicResource StatusWarningForeground}"
-                               Text="Your load order contains only base game and Creation Club plugins. Relaunch N.P.C.2 through your mod manager, and check that the Skyrim Game Data Path above matches the one set in your mod manager's settings.">
+                               Text="{l:Loc yourLoadOrderContains}">
                         <TextBlock.ToolTip>
                             <ToolTip>
                                 <TextBlock TextWrapping="Wrap" MaxWidth="460"
-                                           Text="N.P.C.2 reads the load order from Windows' own Plugins.txt (path shown below). Mod managers such as MO2 and Vortex redirect that file to the active profile's load order, but only for programs launched through them - otherwise the Skyrim launcher's own list is used instead.&#10;&#10;Your appearance mods are still detected, since those are read directly from the Mods folder. What breaks is everything that depends on the load order: the output plugin will not be patched against the correct conflict winners, and NPCs from anything other than the base game and Creation Club will not appear in the NPCs menu."/>
+                                           Text="{l:Loc nPC2}"/>
                             </ToolTip>
                         </TextBlock.ToolTip>
                         <TextBlock.Style>
@@ -247,7 +284,7 @@
                             </Style>
                         </TextBlock.Style>
                         <Hyperlink Command="{Binding ShowFullEnvironmentErrorCommand}">
-                            <Run Text="Click to display whole error" FontSize="11"/>
+                            <Run Text="{l:Loc clickToDisplayWhole}" FontSize="11"/>
                         </Hyperlink>
                     </TextBlock>
 
@@ -258,22 +295,30 @@
                          load order. -->
                     <StackPanel Margin="0,8,0,0">
                         <TextBlock FontSize="10" Foreground="{DynamicResource SecondaryForeground}" TextWrapping="Wrap">
-                            <Run Text="Data Folder: " FontWeight="Bold"/>
+                            <Run Text="{l:Loc dataFolder}" FontWeight="Bold"/>
                             <Run Text="{Binding EnvironmentDataFolderPath, Mode=OneWay}"/>
                         </TextBlock>
                         <TextBlock FontSize="10" Foreground="{DynamicResource SecondaryForeground}" TextWrapping="Wrap">
-                            <Run Text="plugins.txt: " FontWeight="Bold"/>
+                            <Run Text="{l:Loc pluginsTxt}" FontWeight="Bold"/>
                             <Run Text="{Binding EnvironmentLoadOrderFilePath, Mode=OneWay}"/>
                             <Run Text=" ("/>
-                            <Run>
+                            <Run Text="{l:Loc exists}" Foreground="{DynamicResource StatusValidForeground}">
                                 <Run.Style>
                                     <Style TargetType="Run">
-                                        <Setter Property="Text" Value="missing"/>
-                                        <Setter Property="Foreground" Value="{DynamicResource StatusErrorForeground}"/>
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding EnvironmentLoadOrderFileExists}" Value="False">
+                                                <Setter Property="Text" Value=""/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Run.Style>
+                            </Run>
+                            <Run Text="{l:Loc missing}" Foreground="{DynamicResource StatusErrorForeground}">
+                                <Run.Style>
+                                    <Style TargetType="Run">
                                         <Style.Triggers>
                                             <DataTrigger Binding="{Binding EnvironmentLoadOrderFileExists}" Value="True">
-                                                <Setter Property="Text" Value="exists"/>
-                                                <Setter Property="Foreground" Value="{DynamicResource StatusValidForeground}"/>
+                                                <Setter Property="Text" Value=""/>
                                             </DataTrigger>
                                         </Style.Triggers>
                                     </Style>
@@ -282,22 +327,46 @@
                             <Run Text=")"/>
                         </TextBlock>
                         <TextBlock FontSize="10" Foreground="{DynamicResource SecondaryForeground}" TextWrapping="Wrap">
-                            <Run Text="Skyrim.ccc: " FontWeight="Bold"/>
+                            <Run Text="{l:Loc skyrimCcc}" FontWeight="Bold"/>
                             <Run Text="{Binding EnvironmentCreationClubListingsFilePath, Mode=OneWay}"/>
                             <Run Text=" ("/>
-                            <Run>
+                            <Run Text="{l:Loc fromMutagen}" Foreground="{DynamicResource StatusValidForeground}">
                                 <Run.Style>
                                     <Style TargetType="Run">
-                                        <Setter Property="Text" Value="not found"/>
-                                        <Setter Property="Foreground" Value="{DynamicResource StatusErrorForeground}"/>
                                         <Style.Triggers>
-                                            <DataTrigger Binding="{Binding EnvironmentCreationClubListingsSource}" Value="Mutagen">
-                                                <Setter Property="Text" Value="from Mutagen"/>
-                                                <Setter Property="Foreground" Value="{DynamicResource StatusValidForeground}"/>
+                                            <DataTrigger Binding="{Binding EnvironmentCreationClubListingsSource}" Value="NotFound">
+                                                <Setter Property="Text" Value=""/>
                                             </DataTrigger>
                                             <DataTrigger Binding="{Binding EnvironmentCreationClubListingsSource}" Value="Fallback">
-                                                <Setter Property="Text" Value="from fallback probe"/>
-                                                <Setter Property="Foreground" Value="{DynamicResource StatusPendingForeground}"/>
+                                                <Setter Property="Text" Value=""/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Run.Style>
+                            </Run>
+                            <Run Text="{l:Loc fromFallbackProbe}" Foreground="{DynamicResource StatusPendingForeground}">
+                                <Run.Style>
+                                    <Style TargetType="Run">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding EnvironmentCreationClubListingsSource}" Value="NotFound">
+                                                <Setter Property="Text" Value=""/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding EnvironmentCreationClubListingsSource}" Value="Mutagen">
+                                                <Setter Property="Text" Value=""/>
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Run.Style>
+                            </Run>
+                            <Run Text="{l:Loc notFound}" Foreground="{DynamicResource StatusErrorForeground}">
+                                <Run.Style>
+                                    <Style TargetType="Run">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding EnvironmentCreationClubListingsSource}" Value="Mutagen">
+                                                <Setter Property="Text" Value=""/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding EnvironmentCreationClubListingsSource}" Value="Fallback">
+                                                <Setter Property="Text" Value=""/>
                                             </DataTrigger>
                                         </Style.Triggers>
                                     </Style>
@@ -306,39 +375,36 @@
                             <Run Text=")"/>
                         </TextBlock>
                         <TextBlock FontSize="10" Foreground="{DynamicResource SecondaryForeground}">
-                            <Run>
-                                <Run.Text>
-                                    <MultiBinding StringFormat="{}CC plugins detected: {0} (of which {1} are in the resolved load order)">
-                                        <Binding Path="EnvironmentCreationClubPluginsCount" Mode="OneWay"/>
-                                        <Binding Path="EnvironmentCreationClubPluginsInLoadOrderCount" Mode="OneWay"/>
-                                    </MultiBinding>
-                                </Run.Text>
-                            </Run>
+                            <Run Text="{l:Loc ccPluginsDetectedPrefix}"/>
+                                <Run Text="{Binding EnvironmentCreationClubPluginsCount, Mode=OneWay}"/>
+                                <Run Text="{l:Loc ccPluginsDetectedMiddle}"/>
+                                <Run Text="{Binding EnvironmentCreationClubPluginsInLoadOrderCount, Mode=OneWay}"/>
+                                <Run Text="{l:Loc ccPluginsDetectedSuffix}"/>
                         </TextBlock>
                     </StackPanel>
                 </StackPanel>
             </Expander>
 
             <!-- Section 2: Mod Environment -->
-            <Expander Header="Mod Environment" Style="{StaticResource SettingsSectionExpander}"
+            <Expander Header="{l:Loc modEnvironment}" Style="{StaticResource SettingsSectionExpander}"
                       IsExpanded="{Binding SectionModEnvironment.IsExpanded, Mode=TwoWay}">
                 <StackPanel>
-                    <TextBlock Text="Mods Folder (e.g., MO2 Mods Path):" Margin="0,0,0,2"/>
+                    <TextBlock Text="{l:Loc modsFolderEG}" Margin="0,0,0,2"/>
                     <Grid Margin="0,0,0,2">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <TextBox Grid.Column="0" Text="{Binding ModsFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,5,0"/>
-                        <Button Grid.Column="1" Content="Browse..." Command="{Binding SelectModsFolderCommand}"/>
+                        <Button Grid.Column="1" Content="{l:Loc browse}" Command="{Binding SelectModsFolderCommand}"/>
                     </Grid>
-                    <TextBlock Text="Specify the root folder where your mods are installed (used for Mod linking)."
+                    <TextBlock Text="{l:Loc specifyTheRootFolder}"
                                FontSize="10" Foreground="{DynamicResource HintForeground}" Margin="0,0,0,10"/>
 
                     <!-- MO2 Modlist Filter -->
-                    <CheckBox Content="Filter by active mods (MO2)"
+                    <CheckBox Content="{l:Loc filterByActiveMods}"
                               IsChecked="{Binding FilterByActiveModsMO2, Mode=TwoWay}"
-                              ToolTip="When enabled, only mod folders corresponding to enabled entries in the selected MO2 modlist.txt will be imported."
+                              ToolTip="{l:Loc whenEnabledOnlyMod}"
                               Margin="0,0,0,5"/>
 
                     <Grid Margin="15,0,0,5"
@@ -349,43 +415,43 @@
                         </Grid.ColumnDefinitions>
                         <TextBox Grid.Column="0" Text="{Binding MO2ModlistPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                  IsReadOnly="True" Margin="0,0,5,0"/>
-                        <Button Grid.Column="1" Content="Browse..." Command="{Binding SelectMO2ModlistCommand}"/>
+                        <Button Grid.Column="1" Content="{l:Loc browse}" Command="{Binding SelectMO2ModlistCommand}"/>
                     </Grid>
-                    <TextBlock Text="Select your MO2 profile's modlist.txt to filter which mod folders are imported."
+                    <TextBlock Text="{l:Loc selectYourMO2Profile}"
                                FontSize="10" Foreground="{DynamicResource HintForeground}" Margin="15,0,0,5"
                                Visibility="{Binding FilterByActiveModsMO2, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                 </StackPanel>
             </Expander>
 
             <!-- Section 3: Output Settings -->
-            <Expander Header="Output Settings" Style="{StaticResource SettingsSectionExpander}"
+            <Expander Header="{l:Loc outputSettings}" Style="{StaticResource SettingsSectionExpander}"
                       IsExpanded="{Binding SectionOutputSettings.IsExpanded, Mode=TwoWay}">
                 <StackPanel>
                     <!-- Output Directory (New) -->
-                    <TextBlock Text="Output Directory:" Margin="0,0,0,2"/>
+                    <TextBlock Text="{l:Loc outputDirectory}" Margin="0,0,0,2"/>
                     <Grid Margin="0,0,0,2">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <TextBox Grid.Column="0" Text="{Binding OutputDirectory, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,5,0"/>
-                        <Button Grid.Column="1" Content="Browse..." Command="{Binding SelectOutputDirectoryCommand}"/>
+                        <Button Grid.Column="1" Content="{l:Loc browse}" Command="{Binding SelectOutputDirectoryCommand}"/>
                     </Grid>
-                    <TextBlock Text="Directory where the generated plugin and related files will be saved." FontSize="10" Foreground="{DynamicResource HintForeground}" Margin="0,0,0,5"/>
+                    <TextBlock Text="{l:Loc directoryWhereTheGenerated}" FontSize="10" Foreground="{DynamicResource HintForeground}" Margin="0,0,0,5"/>
 
                     <!-- Append Date/Time Stamp (New) -->
-                    <CheckBox Content="Append Date/Time Stamp to Output Directory"
+                    <CheckBox Content="{l:Loc appendDateTimeStamp}"
                               IsChecked="{Binding AppendTimestampToOutputDirectory, Mode=TwoWay}"
                               Margin="0,0,0,10"
-                              ToolTip="If checked, a timestamp (YYYYMMDD_HHMMSS) will be appended to the Output Directory name upon generation."/>
+                              ToolTip="{l:Loc ifCheckedATimestamp}"/>
 
                     <!-- Output Plugin Name (Was Output Mod Name) -->
-                    <TextBlock Text="Output Plugin Name:" Margin="0,0,0,2"/>
+                    <TextBlock Text="{l:Loc outputPluginName}" Margin="0,0,0,2"/>
                     <TextBox Text="{Binding TargetPluginName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,10"/>
                     <!-- Output Mod Name (Conceptual - No UI Element Needed, value comes from model default) -->
 
                     <!-- Patching Mode (New) -->
-                    <TextBlock Text="Patching Mode:" Margin="0,0,0,2"/>
+                    <TextBlock Text="{l:Loc patchingMode}" Margin="0,0,0,2"/>
                     <Grid Margin="0,0,0,10">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
@@ -398,29 +464,29 @@
                         <Button Grid.Column="1" Content="?" Command="{Binding ShowPatchingModeHelpCommand}" Padding="6,2"/>
                     </Grid>
 
-                    <TextBlock Text="Override Handling Mode:" Margin="0,5,0,2"/>
+                    <TextBlock Text="{l:Loc overrideHandlingMode}" Margin="0,5,0,2"/>
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
                         <ComboBox ItemsSource="{Binding RecordOverrideHandlingModes}"
                                   SelectedItem="{Binding SelectedRecordOverrideHandlingMode, Mode=TwoWay}"
                                   MinWidth="120"
-                                  ToolTip="Determines how overriden records of other plugins are handled."/>
+                                  ToolTip="{l:Loc determinesHowOverridenRecords}"/>
                         <Button Content="?" Command="{Binding ShowOverrideHandlingModeHelpCommand}" Padding="6,2" Margin="5,0,0,0"/>
                         
                         <!-- Override Handling Sub-options (inline) -->
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="15,0,0,0"
                                     Visibility="{Binding IsDefaultOverrideHandlingControlsVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
-                            <TextBlock Text="Max Nested Search Layers:" VerticalAlignment="Center" Margin="0,0,5,0"
+                            <TextBlock Text="{l:Loc maxNestedSearch}" VerticalAlignment="Center" Margin="0,0,5,0"
                                        Visibility="{Binding IsDefaultMaxNestedIntervalDepthVisible, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                             <TextBox Text="{Binding DefaultMaxNestedIntervalDepth, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" 
                                      Width="40" VerticalAlignment="Center"
-                                     ToolTip="How many layers deep to keep searching for overridden records between finding relevant ones. This is not a total depth limit — the count resets every time a record from the mod is found, so a continuous chain of the mod's records is always followed all the way down. Default is 2, which is what lets the search cross one unrelated record (e.g. a vanilla outfit) to reach the mod's edits below it. Higher values find more obscure overrides but take exponentially longer."
+                                     ToolTip="{l:Loc howManyLayersDeep}"
                                      PreviewTextInput="IntegerTextBox_PreviewTextInput"
                                      DataObject.Pasting="IntegerTextBox_Pasting"
                                      Visibility="{Binding IsDefaultMaxNestedIntervalDepthVisible, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                            <CheckBox Content="Include All"
+                            <CheckBox Content="{l:Loc includeAll}"
                                       IsChecked="{Binding DefaultIncludeAllOverrides, Mode=TwoWay}"
                                       VerticalAlignment="Center" Margin="15,0,0,0"
-                                      ToolTip="If checked, grabs ALL override records from the plugins rather than searching by NPC dependencies. Use with caution."/>
+                                      ToolTip="{l:Loc ifChecked}"/>
 
                             <!-- Default for every mod that has not set its own. Hidden under
                                  "Include All", which does not traverse from the NPC at all. -->
@@ -431,38 +497,30 @@
                                     Visibility="{Binding IsDefaultMaxNestedIntervalDepthVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
                                 <Button.ToolTip>
                                     <ToolTip>
-                                        <TextBlock TextWrapping="Wrap" Width="320">
-                                            The default choice of which NPC-record fields the search for a mod's
-                                            overridden records may start from. Individual mods can override this
-                                            from their own "Override Roots" button.
-                                            <LineBreak/><LineBreak/>
-                                            A selected field is followed as deep as it goes, through any kind of
-                                            record. This does not limit which record types can be merged in — only
-                                            where the search begins.
-                                        </TextBlock>
+                                        <TextBlock TextWrapping="Wrap" Width="320" Text="{l:Loc settingsDefaultOverrideRootsTooltip}"/>
                                     </ToolTip>
                                 </Button.ToolTip>
                             </Button>
                         </StackPanel>
                     </StackPanel>
 
-                    <CheckBox Content="SkyPatcher Mode"
+                    <CheckBox Content="{l:Loc skyPatcherMode}"
                               IsChecked="{Binding UseSkyPatcherMode, Mode=TwoWay}"
                               Margin="0,5,0,0"
-                              ToolTip="Generates a SkyPatcher .ini file for runtime patching instead of a traditional ESP. This is an advanced feature that may conflict with other runtime patchers."/>
+                              ToolTip="{l:Loc generatesASkyPatcherIni}"/>
 
-                    <CheckBox Content="Auto-ESLify If Possible"
+                    <CheckBox Content="{l:Loc autoESLifyIfPossible}"
                               IsChecked="{Binding AutoEslIfy, Mode=TwoWay}"
                               Margin="0,5,0,0"
-                              ToolTip="When writing the output plugin, checks if it can be ESLified and performs the ESLification proccess"/>
-                    <CheckBox Content="Auto-split if over the master limit"
+                              ToolTip="{l:Loc whenWritingTheOutput}"/>
+                    <CheckBox Content="{l:Loc autoSplitIfOver}"
                               IsChecked="{Binding AutoSplitOutput, Mode=TwoWay}"
                               Margin="0,5,0,0"
-                              ToolTip="If the output plugin would exceed Skyrim's 255-master limit, automatically split it into multiple files (e.g. &quot;MyPatch.esp&quot;, &quot;MyPatch_2.esp&quot;, ...). Only triggers on overflow - a normal-sized patch stays a single plugin. When it does split, ALL of the resulting plugins must be enabled in your load order. Also applies per-plugin when 'Split Output' is on."/>
+                              ToolTip="{l:Loc ifTheOutputPlugin}"/>
 
                     <StackPanel Orientation="Horizontal" Margin="0,8,0,0" VerticalAlignment="Center">
-                        <CheckBox Content="Split Output" IsChecked="{Binding SplitOutput, Mode=TwoWay}" VerticalAlignment="Center"
-                                  ToolTip="Splits the generated patch into multiple smaller plugins based on the criteria to the right."/>
+                        <CheckBox Content="{l:Loc splitOutput}" IsChecked="{Binding SplitOutput, Mode=TwoWay}" VerticalAlignment="Center"
+                                  ToolTip="{l:Loc splitsTheGeneratedPatch}"/>
 
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="10,0,0,0">
                             <StackPanel.Style>
@@ -476,12 +534,12 @@
                                 </Style>
                             </StackPanel.Style>
                             
-                            <TextBlock Text="by" VerticalAlignment="Center" Margin="0,0,10,0" FontStyle="Italic"/>
-                            <CheckBox Content="Gender" IsChecked="{Binding SplitOutputByGender, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                            <CheckBox Content="Race" IsChecked="{Binding SplitOutputByRace, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                            <TextBlock Text="{l:Loc by}" VerticalAlignment="Center" Margin="0,0,10,0" FontStyle="Italic"/>
+                            <CheckBox Content="{l:Loc gender}" IsChecked="{Binding SplitOutputByGender, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                            <CheckBox Content="{l:Loc race}" IsChecked="{Binding SplitOutputByRace, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,10,0"/>
                             <TextBox Text="{Binding SplitOutputMaxNpcs, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged, TargetNullValue=''}" Width="50" VerticalContentAlignment="Center"
-                                     ToolTip="Maximum number of NPCs to place in a single split plugin."/>
-                            <TextBlock Text="Max # NPCs" VerticalAlignment="Center" Margin="5,0,0,0"/>
+                                     ToolTip="{l:Loc maximumNumberOfNPCs}"/>
+                            <TextBlock Text="{l:Loc maxNPCs}" VerticalAlignment="Center" Margin="5,0,0,0"/>
                         </StackPanel>
                     </StackPanel>
 
@@ -489,25 +547,14 @@
                          template's face or gets its own copy (Settings.TemplateHandlingMode).
                          Applies to record and SkyPatcher output alike. -->
                     <StackPanel Orientation="Horizontal" Margin="0,10,0,0" VerticalAlignment="Center">
-                        <TextBlock Text="Templated NPCs:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                        <TextBlock Text="{l:Loc templated}" VerticalAlignment="Center" Margin="0,0,8,0"/>
                         <ComboBox ItemsSource="{Binding TemplateHandlingModes}"
                                   SelectedValuePath="Key" DisplayMemberPath="Value"
                                   SelectedValue="{Binding SelectedTemplateHandlingMode, Mode=TwoWay}"
                                   MinWidth="220" VerticalAlignment="Center">
                             <ComboBox.ToolTip>
                                 <ToolTip>
-                                    <TextBlock TextWrapping="Wrap" Width="340">
-                                        Some NPCs copy their face from another NPC instead of having one of their own
-                                        (the NPC menu marks them with a Template icon).
-                                        <LineBreak/><LineBreak/>
-                                        Use the template's appearance (default): they keep showing the other NPC's face,
-                                        and any appearance you pick for them is ignored.
-                                        <LineBreak/><LineBreak/>
-                                        Give each NPC its own copy: your choice is applied to each of them individually,
-                                        so NPCs that share a template can look different. Adds one copy of the face files
-                                        per NPC. NPCs whose face the game picks at random from a levelled list keep
-                                        inheriting either way.
-                                    </TextBlock>
+                                    <TextBlock TextWrapping="Wrap" Width="340" Text="{l:Loc settingsTemplateNpcsTooltip}"/>
                                 </ToolTip>
                             </ComboBox.ToolTip>
                         </ComboBox>
@@ -516,11 +563,11 @@
                     <!-- Head Editing: wig/antler handling defaults + the manual antler
                          designation scope. Nested under Output Settings because these
                          only affect what the patcher writes. -->
-                    <Expander Header="Head Editing" Style="{StaticResource SettingsSectionExpander}"
+                    <Expander Header="{l:Loc headEditing}" Style="{StaticResource SettingsSectionExpander}"
                               Margin="0,10,0,0"
                               IsExpanded="{Binding SectionHeadEditing.IsExpanded, Mode=TwoWay}">
                         <StackPanel>
-                            <TextBlock Text="Default Wig Handling Mode:" Margin="0,0,0,2"/>
+                            <TextBlock Text="{l:Loc defaultWigHandlingMode}" Margin="0,0,0,2"/>
                             <ComboBox ItemsSource="{Binding WigHandlingModes}"
                                       SelectedValuePath="Key" DisplayMemberPath="Value"
                                       SelectedValue="{Binding SelectedDefaultWigHandlingMode, Mode=TwoWay}"
@@ -528,40 +575,12 @@
                                       Margin="0,0,0,10">
                                 <ComboBox.ToolTip>
                                     <ToolTip>
-                                        <TextBlock TextWrapping="Wrap" Width="340">
-                                            How detected wigs are handled during patching. Wigs come from two places: hair-slot
-                                            wig armors in a mod's Default Outfits, and hair meshes carried directly in an NPC's
-                                            skin (worn armor — the High Poly NPC Overhaul pattern). Applies in Create and Patch
-                                            mode and in SkyPatcher mode; individual mods can override this in the Mods menu when
-                                            a wig is detected. Antlers are controlled separately (below).
-                                            <LineBreak/><LineBreak/>
-                                            Forward To Skin: an outfit wig becomes part of the NPC's skin (WornArmor), so it
-                                            shows no matter what outfit the NPC wears (falls back to Forward To Outfit if the
-                                            appearance plugin assigns no WornArmor). A skin-carried wig is already in this
-                                            state and is left as-is.
-                                            <LineBreak/><LineBreak/>
-                                            Forward To Outfit: the outfit the NPC actually wears in game is duplicated and
-                                            the wig added to the duplicate (no change if it already contains the wig). A
-                                            skin-carried wig is moved into that outfit as a generated wig armor.
-                                            <LineBreak/><LineBreak/>
-                                            Convert To Headparts (EXPERIMENTAL): the wig armor is discarded entirely and the
-                                            wig becomes the NPC's hair — new head part records are generated and the wig mesh
-                                            is baked into the FaceGen file (HDT-SMP physics is preserved). Survives outfit
-                                            changes and helmets hide it like normal hair. Works for outfit wigs AND
-                                            skin-carried wigs (the 3D preview's "Set Wig Meshes" button corrects which skin
-                                            meshes count as wigs). An outfit wig falls back to Forward To Skin per NPC when
-                                            the bake would be unsafe (e.g. the appearance mod ships no baked hair to
-                                            replace); a skin-carried wig is left as-is instead.
-                                            <LineBreak/><LineBreak/>
-                                            Leave As Is: wigs are treated like any other outfit/skin element — an outfit wig is
-                                            forwarded only if Include Outfits is selected; a skin-carried wig stays in the
-                                            skin.
-                                        </TextBlock>
+                                        <TextBlock TextWrapping="Wrap" Width="340" Text="{l:Loc settingsWigHandlingTooltip}"/>
                                     </ToolTip>
                                 </ComboBox.ToolTip>
                             </ComboBox>
 
-                            <TextBlock Text="Converted Wig Hair Color:" Margin="0,0,0,2"/>
+                            <TextBlock Text="{l:Loc convertedWigHair}" Margin="0,0,0,2"/>
                             <ComboBox ItemsSource="{Binding WigHairTintModes}"
                                       SelectedValuePath="Key" DisplayMemberPath="Value"
                                       SelectedValue="{Binding SelectedDefaultWigHairTintMode, Mode=TwoWay}"
@@ -569,48 +588,23 @@
                                       Margin="0,0,0,10">
                                 <ComboBox.ToolTip>
                                     <ToolTip>
-                                        <TextBlock TextWrapping="Wrap" Width="340">
-                                            Only applies to wigs handled with Convert To Headparts. Many wig meshes are
-                                            authored with a near-black placeholder hair color because they expect RaceMenu
-                                            to recolor them in game (RaceMenu automatically tints worn hair-slot items — it
-                                            is why some mods, notably High Poly NPC Overhaul, give every NPC black hair
-                                            until RaceMenu is installed). Once a wig is baked into the FaceGen file it is no
-                                            longer a worn item, so RaceMenu stops recoloring it and the placeholder becomes
-                                            permanent. This setting bakes the NPC's own hair color in instead, which is what
-                                            the Creation Kit does for normal hair.
-                                            <LineBreak/><LineBreak/>
-                                            Auto: recolor only wigs that carry a placeholder tint. Wigs whose textures are
-                                            already colored by their author (a neutral white tint) are left alone. The
-                                            default, and the safe choice.
-                                            <LineBreak/><LineBreak/>
-                                            Always: recolor every converted wig with the NPC's hair color, exactly as
-                                            RaceMenu would have done to the original worn wig.
-                                            <LineBreak/><LineBreak/>
-                                            Never: leave the wig's baked hair color untouched.
-                                        </TextBlock>
+                                        <TextBlock TextWrapping="Wrap" Width="340" Text="{l:Loc settingsWigColorTooltip}"/>
                                     </ToolTip>
                                 </ComboBox.ToolTip>
                             </ComboBox>
 
-                            <CheckBox Content="Preview worn wigs the way RaceMenu tints them"
+                            <CheckBox Content="{l:Loc previewWornWigsThe}"
                                       IsChecked="{Binding EmulateRaceMenuHairSlotTint, Mode=TwoWay}"
                                       Margin="0,0,0,10">
                                 <CheckBox.ToolTip>
                                     <ToolTip>
-                                        <TextBlock TextWrapping="Wrap" Width="340">
-                                            Affects mugshots and the 3D preview only — never the patch output. RaceMenu
-                                            automatically recolors worn hair-slot items that use the Hair Tint shader,
-                                            which the base game does not; wig meshes are usually authored with a
-                                            near-black placeholder color that relies on it. With this on, wigs are
-                                            previewed using the NPC's hair color, matching what you see in game with
-                                            RaceMenu installed. Turn it off if you don't use RaceMenu — then the black
-                                            hair shown here is what the game really renders.
-                                        </TextBlock>
-                                    </ToolTip>
-                                </CheckBox.ToolTip>
-                            </CheckBox>
+                                                                            <TextBlock TextWrapping="Wrap" Width="340"
+                                                                                       Text="{l:Loc affectsMugshotsAndThe}"/>
+                                                                        </ToolTip>
+                                                                    </CheckBox.ToolTip>
+                                                                </CheckBox>
 
-                            <TextBlock Text="Manual Wig Designation Scope:" Margin="0,0,0,2"/>
+                            <TextBlock Text="{l:Loc manualWigDesignationScope}" Margin="0,0,0,2"/>
                             <ComboBox ItemsSource="{Binding WigBlockScopes}"
                                       SelectedValuePath="Key" DisplayMemberPath="Value"
                                       SelectedValue="{Binding SelectedWigBlockScope, Mode=TwoWay}"
@@ -618,24 +612,12 @@
                                       Margin="0,0,0,10">
                                 <ComboBox.ToolTip>
                                     <ToolTip>
-                                        <TextBlock TextWrapping="Wrap" Width="340">
-                                            How broadly a skin-carried hair mesh you manually mark as a wig — or as NOT a
-                                            wig — (via the 3D preview's "Set Wig Meshes" button) applies. This controls
-                                            scope only — a wig is still converted only when its mod's Wig Handling Mode
-                                            is Convert To Head Parts.
-                                            <LineBreak/><LineBreak/>
-                                            All NPCs (any mod): apply the designation to that mesh's EditorID wherever it
-                                            appears (the default).
-                                            <LineBreak/><LineBreak/>
-                                            Same mod only: apply it only in the mod it was designated in.
-                                            <LineBreak/><LineBreak/>
-                                            Specific NPC(s) only: apply it only on the NPC(s) it was designated on.
-                                        </TextBlock>
+                                        <TextBlock TextWrapping="Wrap" Width="340" Text="{l:Loc settingsWigScopeTooltip}"/>
                                     </ToolTip>
                                 </ComboBox.ToolTip>
                             </ComboBox>
 
-                            <TextBlock Text="Default Antler Handling Mode:" Margin="0,0,0,2"/>
+                            <TextBlock Text="{l:Loc defaultAntlerHandlingMode}" Margin="0,0,0,2"/>
                             <ComboBox ItemsSource="{Binding AntlerHandlingModes}"
                                       SelectedValuePath="Key" DisplayMemberPath="Value"
                                       SelectedValue="{Binding SelectedDefaultAntlerHandlingMode, Mode=TwoWay}"
@@ -643,73 +625,29 @@
                                       Margin="0,0,0,10">
                                 <ComboBox.ToolTip>
                                     <ToolTip>
-                                        <TextBlock TextWrapping="Wrap" Width="340">
-                                            How detected antler armors/head parts are handled during patching. Applies in
-                                            Create and Patch mode and in SkyPatcher mode; individual mods can override this
-                                            in the Mods menu when an antler is detected.
-                                            <LineBreak/><LineBreak/>
-                                            Forward To Skin: the antler becomes part of the NPC's skin (WornArmor), so it shows
-                                            no matter what outfit the NPC wears. Falls back to Forward To Outfit if the
-                                            appearance plugin assigns no WornArmor. (The pre-split default — leave this to keep
-                                            existing behavior.)
-                                            <LineBreak/><LineBreak/>
-                                            Forward To Outfit: the outfit the NPC actually wears in game is duplicated and
-                                            the antler added to the duplicate.
-                                            <LineBreak/><LineBreak/>
-                                            Remove: keep the antler OFF the NPC entirely — stripped from a forwarded outfit,
-                                            from the worn armor, and from the FaceGen (keyword-detected antler head parts).
-                                            Antlers baked into an outfit the load order owns (not forwarded) can't be reached.
-                                            <LineBreak/><LineBreak/>
-                                            Leave As Is: the antler is treated like any other outfit element — forwarded only if
-                                            Include Outfits is selected.
-                                        </TextBlock>
+                                        <TextBlock TextWrapping="Wrap" Width="340" Text="{l:Loc settingsAntlerHandlingTooltip}"/>
                                     </ToolTip>
                                 </ComboBox.ToolTip>
                             </ComboBox>
 
-                            <TextBlock Text="Manual Antler Block Scope:" Margin="0,0,0,2"/>
+                            <TextBlock Text="{l:Loc manualAntlerBlockScope}" Margin="0,0,0,2"/>
                             <ComboBox ItemsSource="{Binding AntlerBlockScopes}"
                                       SelectedValuePath="Key" DisplayMemberPath="Value"
                                       SelectedValue="{Binding SelectedAntlerBlockScope, Mode=TwoWay}"
                                       MinWidth="120" HorizontalAlignment="Left">
                                 <ComboBox.ToolTip>
                                     <ToolTip>
-                                        <TextBlock TextWrapping="Wrap" Width="340">
-                                            How broadly a head part you manually designate as an antler (via the 3D preview's
-                                            "Set Antler Head Parts" button) is blocked. This controls scope only — a head part
-                                            is still removed only when its mod's Antler Handling Mode is Remove.
-                                            <LineBreak/><LineBreak/>
-                                            All NPCs (any mod): block that head part's EditorID wherever it appears (the default).
-                                            <LineBreak/><LineBreak/>
-                                            Same mod only: block it only in the mod it was designated in.
-                                            <LineBreak/><LineBreak/>
-                                            Specific NPC(s) only: block it only on the NPC(s) it was designated on, regardless
-                                            of which mod supplies that NPC's appearance.
-                                        </TextBlock>
+                                        <TextBlock TextWrapping="Wrap" Width="340" Text="{l:Loc settingsAntlerScopeTooltip}"/>
                                     </ToolTip>
                                 </ComboBox.ToolTip>
                             </ComboBox>
 
-                            <CheckBox Content="Publish forwarded outfits to SkyPatcher/SPID"
+                            <CheckBox Content="{l:Loc publishForwardedOutfitsTo}"
                                       IsChecked="{Binding PublishForwardedOutfitsToDistributors, Mode=TwoWay}"
                                       Margin="0,10,0,0">
                                 <CheckBox.ToolTip>
                                     <ToolTip>
-                                        <TextBlock TextWrapping="Wrap" Width="340">
-                                            Some NPCs have their outfit assigned at runtime by SkyPatcher or SPID rather
-                                            than by a plugin record. For those NPCs a wig or antler forwarded to the
-                                            outfit would be wiped out in game, because the distributor overwrites the
-                                            outfit the patch assigned.
-                                            <LineBreak/><LineBreak/>
-                                            With this on, the patcher writes its own config for exactly those NPCs — a
-                                            SkyPatcher entry when a SkyPatcher config contests the outfit, a generated
-                                            *_DISTR.ini when a SPID config does — pointing at the duplicated outfit that
-                                            carries the wig/antler, so it survives. Nothing is written for NPCs whose
-                                            outfit no distributor touches.
-                                            <LineBreak/><LineBreak/>
-                                            With this off, those NPCs are only warned about in the patch log and the
-                                            forwarded wig/antler will most likely not appear in game.
-                                        </TextBlock>
+                                        <TextBlock TextWrapping="Wrap" Width="340" Text="{l:Loc settingsRuntimeOutfitTooltip}"/>
                                     </ToolTip>
                                 </CheckBox.ToolTip>
                             </CheckBox>
@@ -718,26 +656,26 @@
                 </StackPanel>
             </Expander>
 
-            <Expander Header="Mugshot Settings" Style="{StaticResource SettingsSectionExpander}"
+            <Expander Header="{l:Loc mugshotSettings}" Style="{StaticResource SettingsSectionExpander}"
                       IsExpanded="{Binding SectionMugshotSettings.IsExpanded, Mode=TwoWay}">
                 <StackPanel>
-                    <TextBlock Text="Mugshots Folder:" Margin="0,0,0,2"/>
+                    <TextBlock Text="{l:Loc mugshotsFolder}" Margin="0,0,0,2"/>
                     <Grid Margin="0,0,0,2">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <TextBox Grid.Column="0" Text="{Binding MugshotsFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,5,0"/>
-                        <Button Grid.Column="1" Content="Browse..." Command="{Binding SelectMugshotsFolderCommand}"/>
+                        <Button Grid.Column="1" Content="{l:Loc browse}" Command="{Binding SelectMugshotsFolderCommand}"/>
                     </Grid>
-                    <TextBlock Text="Folder containing subfolders for each mod's NPC preview images."
+                    <TextBlock Text="{l:Loc folderContainingSubfoldersFor}"
                                FontSize="10" Foreground="{DynamicResource HintForeground}" Margin="0,0,0,10"/>
 
                     <!-- Mugshot Source Priority: drag-to-reorder. Disabled sources stay in the
                          list but are greyed out via BooleanToOpacityConverter and skipped at
                          runtime. Persistence is wired in VM_Settings via CollectionChanged. -->
-                    <TextBlock Text="Mugshot Source Priority:" Margin="0,0,0,2"/>
-                    <TextBlock Text="Drag to reorder. Disabled sources are skipped at runtime."
+                    <TextBlock Text="{l:Loc mugshotSourcePriority}" Margin="0,0,0,2"/>
+                    <TextBlock Text="{l:Loc dragToReorderDisabled}"
                                FontSize="10" Foreground="{DynamicResource HintForeground}" Margin="0,0,0,4"/>
                     <ListBox ItemsSource="{Binding MugshotSourcePriority}"
                              dd:DragDrop.IsDragSource="True"
@@ -777,7 +715,7 @@
                     <Border Margin="15,5,0,5" BorderBrush="Gray" BorderThickness="1" CornerRadius="3"
                             Visibility="{Binding UseFaceFinderFallback, Converter={StaticResource BooleanToVisibilityConverter}}">
                         <StackPanel Margin="5">
-                            <TextBlock Text="FaceFinder Cache Folder:" Margin="0,5,0,2"/>
+                            <TextBlock Text="{l:Loc faceFinderCacheFolder}" Margin="0,5,0,2"/>
                             <Grid Margin="0,0,0,2">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*"/>
@@ -787,40 +725,40 @@
                                 <TextBox Grid.Column="0"
                                          Text="{Binding FaceFinderMugshotsFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                          Margin="0,0,5,0"
-                                         ToolTip="Folder where FaceFinder downloads are cached. Defaults to a 'FaceFinder Cache' folder next to the application."/>
-                                <Button Grid.Column="1" Content="Browse..."
+                                         ToolTip="{l:Loc folderWhereFaceFinderDownloads}"/>
+                                <Button Grid.Column="1" Content="{l:Loc browse}"
                                         Command="{Binding SelectFaceFinderMugshotsFolderCommand}"/>
-                                <Button Grid.Column="2" Content="Reset" Margin="5,0,0,0"
+                                <Button Grid.Column="2" Content="{l:Loc reset}" Margin="5,0,0,0"
                                         Command="{Binding ResetFaceFinderMugshotsFolderCommand}"
-                                        ToolTip="Reset to the default FaceFinder cache folder."/>
+                                        ToolTip="{l:Loc resetToTheDefault}"/>
                             </Grid>
-                            <TextBlock Text="FaceFinder downloads are cached here, in subfolders per mod."
+                            <TextBlock Text="{l:Loc faceFinderDownloadsAreCached}"
                                        FontSize="10" Foreground="{DynamicResource HintForeground}" Margin="0,0,0,5"/>
 
-                            <CheckBox Content="Cache downloaded images locally"
+                            <CheckBox Content="{l:Loc cacheDownloadedImagesLocally}"
                                       IsChecked="{Binding CacheFaceFinderImages, Mode=TwoWay}"
                                       Margin="0,10,0,0"
-                                      ToolTip="If checked, images downloaded from FaceFinder are saved and checked for updates. If unchecked, images are downloaded fresh every time."
+                                      ToolTip="{l:Loc ifCheckedImagesDownloaded}"
                                       Visibility="{Binding UseFaceFinderFallback, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                             
-                            <CheckBox Content="Log API Requests/Responses"
+                            <CheckBox Content="{l:Loc logAPIRequestsResponses}"
                                       IsChecked="{Binding LogFaceFinderRequests, Mode=TwoWay}"
                                       Margin="0,5,0,0"
-                                      ToolTip="Writes API traffic to FaceFinderLog.html in the application directory (open it in any web browser). Each request is a collapsible entry with its status, headers, and full response body."
+                                      ToolTip="{l:Loc writesAPITrafficTo}"
                                       Visibility="{Binding UseFaceFinderFallback, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                             
                             <StackPanel Orientation="Horizontal" Margin="0,10,0,0"
                                         HorizontalAlignment="Left"
                                         Visibility="{Binding UseFaceFinderFallback, Converter={StaticResource BooleanToVisibilityConverter}}">
-                                <Button Content="Link Mod Names to FaceFinder"
+                                <Button Content="{l:Loc linkModNamesTo}"
                                         Command="{Binding OpenModLinkerCommand}"
                                         Padding="10,5"
-                                        ToolTip="Manually link local mod names to their corresponding entry on the FaceFinder server."/>
-                                <Button Content="Batch Download Mugshots"
+                                        ToolTip="{l:Loc manuallyLinkLocalMod}"/>
+                                <Button Content="{l:Loc batchDownloadMugshots}"
                                         Command="{Binding BatchDownloadFaceFinderMugshotsCommand}"
                                         Padding="10,5"
                                         Margin="15,0,0,0"
-                                        ToolTip="Iterates every mod's NPCs and queries the FaceFinder API for an available mugshot. When image caching is on, hits are downloaded and persisted; when off, only availability is checked. Independent of the local-renderer 'Generate All Mugshots' batch — neither falls back to the other."/>
+                                        ToolTip="{l:Loc iteratesEveryModS}"/>
                             </StackPanel>
 
                             <Grid Margin="0,10,0,0">
@@ -830,10 +768,10 @@
                                     <ColumnDefinition Width="*"/>
                                 </Grid.ColumnDefinitions>
 
-                                <Button Grid.Column="0" Content="Delete All Cached FaceFinder Images"
+                                <Button Grid.Column="0" Content="{l:Loc deleteAllCachedFaceFinder}"
                                         Command="{Binding DeleteCachedFaceFinderImagesCommand}"
                                         Padding="10,5"
-                                        ToolTip="Permanently deletes all cached FaceFinder images and their metadata files."
+                                        ToolTip="{l:Loc permanentlyDeletesAllCached}"
                                         Visibility="{Binding UseFaceFinderFallback, Converter={StaticResource BooleanToVisibilityConverter}}">
                                     <Button.Style>
                                         <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
@@ -849,24 +787,24 @@
                                 </Button>
 
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="15,0,0,0" VerticalAlignment="Center">
-                                    <TextBlock Text="Search Mode:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                    <TextBlock Text="{l:Loc searchMode}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                                     <ComboBox ItemsSource="{Binding MugshotSearchModes}"
                                               SelectedItem="{Binding SelectedMugshotSearchModeFF, Mode=TwoWay}"
                                               MinWidth="120"
-                                              ToolTip="Fast: Uses cached list of generated mugshots (recommended). Comprehensive: Scans all mugshot folders and reads metadata."/>
+                                              ToolTip="{l:Loc fastUsesCachedList}"/>
                                 </StackPanel>
                             </Grid>
                         </StackPanel>
                     </Border>
                     
-                    <CheckBox Content="Auto-Generate missing mugshots"
+                    <CheckBox Content="{l:Loc autoGenerateMissingMugshots}"
                               IsChecked="{Binding UsePortraitCreatorFallback, Mode=TwoWay}"
                               Margin="0,5,0,0"/>
 
                     <!-- Renderer selection: Internal (in-process) vs Legacy NPC Portrait Creator subprocess -->
                     <StackPanel Orientation="Horizontal" Margin="15,5,0,5"
                                 Visibility="{Binding UsePortraitCreatorFallback, Converter={StaticResource BooleanToVisibilityConverter}}">
-                        <TextBlock Text="Renderer:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                        <TextBlock Text="{l:Loc renderer}" VerticalAlignment="Center" Margin="0,0,8,0"/>
                         <ComboBox ItemsSource="{Binding RendererChoices}"
                                   SelectedItem="{Binding SelectedRenderer, Mode=TwoWay}"
                                   Width="260" />
@@ -875,7 +813,7 @@
                     <!-- Auto-Generated Mugshots folder selector -->
                     <StackPanel Margin="15,5,0,5"
                                 Visibility="{Binding UsePortraitCreatorFallback, Converter={StaticResource BooleanToVisibilityConverter}}">
-                        <TextBlock Text="Auto-Generated Mugshots Folder:" Margin="0,0,0,2"/>
+                        <TextBlock Text="{l:Loc autoGeneratedMugshotsFolder}" Margin="0,0,0,2"/>
                         <Grid Margin="0,0,0,2">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
@@ -885,14 +823,13 @@
                             <TextBox Grid.Column="0"
                                      Text="{Binding AutogenMugshotsFolder, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                      Margin="0,0,5,0"
-                                     ToolTip="Folder where rendered mugshots are saved. Defaults to an 'AutoGen Mugshots' folder next to the application."/>
-                            <Button Grid.Column="1" Content="Browse..."
-                                    Command="{Binding SelectAutogenMugshotsFolderCommand}"/>
-                            <Button Grid.Column="2" Content="Reset" Margin="5,0,0,0"
+                                     ToolTip="{l:Loc folderWhereRenderedMugshots}"/>
+                            <Button Grid.Column="1" Content="{l:Loc browse}" Command="{Binding SelectAutogenMugshotsFolderCommand}"/>
+                            <Button Grid.Column="2" Content="{l:Loc reset}" Margin="5,0,0,0"
                                     Command="{Binding ResetAutogenMugshotsFolderCommand}"
-                                    ToolTip="Reset to the default auto-generated mugshots folder."/>
+                                    ToolTip="{l:Loc resetToThe}"/>
                         </Grid>
-                        <TextBlock Text="Internal/Legacy renderer output is saved here, in subfolders per mod."
+                        <TextBlock Text="{l:Loc internalLegacyRendererOutput}"
                                    FontSize="10" Foreground="{DynamicResource HintForeground}" Margin="0,0,0,5"/>
                     </StackPanel>
 
@@ -900,11 +837,11 @@
                          mod) + the generate button + the asset-validated toggle. -->
                     <StackPanel Orientation="Horizontal" Margin="15,5,0,5"
                                 Visibility="{Binding UsePortraitCreatorFallback, Converter={StaticResource BooleanToVisibilityConverter}}">
-                        <Button Content="Batch Generate Mugshots"
+                        <Button Content="{l:Loc batchGenerateMugshots}"
                                 Command="{Binding GenerateAllMugshotsCommand}"
                                 Padding="10,5"
                                 Margin="0,0,8,0"
-                                ToolTip="Generates a mugshot for each local NPC that doesn't already have one, using the renderer selected above and the scope chosen in the dropdown to the right. NPCs are grouped by sex and shared NPC-record assets (race, worn armor, head parts, hair) so the renderer reuses meshes and textures across consecutive frames. FaceFinder downloads are handled separately via the FaceFinder section's 'Batch Download Mugshots' button."/>
+                                ToolTip="{l:Loc generatesAMugshotFor}"/>
                         <ComboBox x:Name="MugshotGenerationModComboBox"
                                   ItemsSource="{Binding MugshotGenerationModOptions}"
                                   SelectedItem="{Binding SelectedMugshotGenerationMod, Mode=TwoWay}"
@@ -912,12 +849,12 @@
                                   MinWidth="140" MaxWidth="260"
                                   VerticalAlignment="Center"
                                   Margin="0,0,8,0"
-                                  ToolTip="Choose which mod to generate mugshots for. 'All' processes every data-containing (non-mugshot-only) mod; selecting a specific mod limits the batch to that mod's NPCs."/>
-                        <CheckBox Content="Asset-Validated Only"
+                                  ToolTip="{l:Loc chooseWhichModTo}"/>
+                        <CheckBox Content="{l:Loc assetValidatedOnly}"
                                   IsChecked="{Binding AssetValidatedMugshotsOnly, Mode=TwoWay}"
                                   VerticalAlignment="Center"
                                   Margin="10,0,0,0"
-                                  ToolTip="When checked, an Internal-renderer mugshot whose render reports any missing meshes or textures is skipped — no PNG is written — so the batch only persists complete renders. Uncheck to save the wireframe / placeholder-textured result anyway. Per-tile clicks ignore this toggle and always render."/>
+                                  ToolTip="{l:Loc whenCheckedAnInternal}"/>
                     </StackPanel>
 
                     <!-- Internal renderer settings panel -->
@@ -963,31 +900,55 @@
                                  lives here (rather than in the preview UC's toolbar) so it
                                  stays reachable when the preview is hidden. -->
                             <DockPanel LastChildFill="False" Margin="0,0,0,5">
-                                <TextBlock Text="Internal Renderer (in-process CharacterViewer)"
+                                <TextBlock Text="{l:Loc internalRendererInProcess}"
                                            FontWeight="Bold" VerticalAlignment="Center"
                                            DockPanel.Dock="Left"/>
                                 <!-- "Log Render Logic" docks first so it ends up at
                                      the rightmost edge (DockPanel right-docks in
                                      declaration order: first child = rightmost). -->
-                                <CheckBox Content="Log Render Logic"
+                                <CheckBox Content="{l:Loc logRenderLogic}"
                                           IsChecked="{Binding InternalLogRenderLogic, Mode=TwoWay}"
                                           DockPanel.Dock="Right"
                                           VerticalAlignment="Center" Margin="6,0,0,0"
-                                          ToolTip="When checked, every Internal-renderer load writes its full asset-resolution + renderer trace to &lt;ExeDir&gt;\RenderLogs\: live previews go to Preview_&lt;ModName&gt;_&lt;FormKey&gt;.txt, mugshot tile generations go to Mugshot_&lt;ModName&gt;_&lt;FormKey&gt;.txt. Use to diff a working preview against a tile that fails to render. Forces verbose logging on for the duration of the captured render."/>
-                                <Button Content="Reset Settings"
+                                          ToolTip="{l:Loc whenCheckedEveryInternal}"/>
+                                <Button Content="{l:Loc resetSettings}"
                                         Command="{Binding InternalMugshotPreviewVM.ResetCommand}"
                                         Padding="10,3" DockPanel.Dock="Right" Margin="6,0,0,0"
-                                        ToolTip="Restore Internal-renderer settings to defaults. Preserves your saved lighting layouts / color schemes."/>
+                                        ToolTip="{l:Loc restoreInternalRendererSettings}"/>
                                 <Button Command="{Binding ToggleInternalShowPreviewCommand}"
                                         Padding="10,3" DockPanel.Dock="Right"
-                                        ToolTip="Toggle the live preview viewport's visibility. Hide it to claw back vertical space when you're tweaking framing / asset-resolution settings without needing to see the rendered output.">
+                                        ToolTip="{l:Loc toggleTheLivePreview}">
                                     <Button.Style>
                                         <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-                                            <Setter Property="Content" Value="Show Preview"/>
+                                            <Setter Property="Content">
+                                                <Setter.Value>
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Text="{l:Loc showPreview}">
+                                                            <TextBlock.Style>
+                                                                <Style TargetType="TextBlock">
+                                                                    <Style.Triggers>
+                                                                        <DataTrigger Binding="{Binding InternalShowPreview}" Value="True">
+                                                                            <Setter Property="Visibility" Value="Collapsed"/>
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </TextBlock.Style>
+                                                        </TextBlock>
+                                                        <TextBlock Text="{l:Loc hidePreview}" Visibility="Collapsed">
+                                                            <TextBlock.Style>
+                                                                <Style TargetType="TextBlock">
+                                                                    <Style.Triggers>
+                                                                        <DataTrigger Binding="{Binding InternalShowPreview}" Value="True">
+                                                                            <Setter Property="Visibility" Value="Visible"/>
+                                                                        </DataTrigger>
+                                                                    </Style.Triggers>
+                                                                </Style>
+                                                            </TextBlock.Style>
+                                                        </TextBlock>
+                                                    </StackPanel>
+                                                </Setter.Value>
+                                            </Setter>
                                             <Style.Triggers>
-                                                <DataTrigger Binding="{Binding InternalShowPreview}" Value="True">
-                                                    <Setter Property="Content" Value="Hide Preview"/>
-                                                </DataTrigger>
                                             </Style.Triggers>
                                         </Style>
                                     </Button.Style>
@@ -997,11 +958,11 @@
                             <!-- Camera mode + auto-mode tunables on a single horizontal line that wraps. -->
                             <WrapPanel Orientation="Horizontal" ItemHeight="28">
                                 <StackPanel Orientation="Horizontal" Margin="0,0,12,0">
-                                    <TextBlock Text="Camera Mode:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                    <TextBlock Text="{l:Loc cameraMode}" VerticalAlignment="Center" Margin="0,0,4,0"/>
                                     <ComboBox ItemsSource="{Binding InternalCameraModeChoices}"
                                               SelectedItem="{Binding InternalCameraMode, Mode=TwoWay}"
                                               Width="100" VerticalAlignment="Center"
-                                              ToolTip="Auto: hair-aware framing (head + hair-above-head). Manual: use the saved orbit camera state from the live preview."/>
+                                              ToolTip="{l:Loc autoHairAwareFraming}"/>
                                 </StackPanel>
 
                                 <!-- Auto-mode tunables - same row, hidden when Manual is selected. -->
@@ -1017,49 +978,49 @@
                                         </Style>
                                     </StackPanel.Style>
 
-                                    <TextBlock Text="Frame Top:" VerticalAlignment="Center" Margin="0,0,4,0"
-                                               ToolTip="Vertical position the TOP of the head bounding box is mapped to, expressed as a fraction of the rendered frame height (1.0 = frame top edge, 0.0 = frame bottom edge). Examples: 0.95 leaves a 5% margin above the head top; 1.0 puts the head top exactly at the frame's top edge; values above 1.0 push the head top above the frame for an ultra-tight crop where the top of the head is clipped."/>
+                                    <TextBlock Text="{l:Loc frameTop}" VerticalAlignment="Center" Margin="0,0,4,0"
+                                               ToolTip="{l:Loc verticalPositionTheTOP}"/>
                                     <xctk:DoubleUpDown Width="70" Minimum="-0.5" Maximum="1.5" Increment="0.05"
                                                        Value="{Binding InternalHeadTopFraction, Mode=TwoWay}"
                                                        VerticalAlignment="Center"
                                                        FormatString="0.00"
-                                                       ToolTip="Vertical position the TOP of the head bounding box is mapped to, expressed as a fraction of the rendered frame height (1.0 = frame top edge, 0.0 = frame bottom edge). Examples: 0.95 leaves a 5% margin above the head top; 1.0 puts the head top exactly at the frame's top edge; values above 1.0 push the head top above the frame for an ultra-tight crop where the top of the head is clipped."/>
+                                                       ToolTip="{l:Loc verticalPositionTheTOP}"/>
 
-                                    <TextBlock Text="Bottom:" VerticalAlignment="Center" Margin="10,0,4,0"
-                                               ToolTip="Vertical position the BOTTOM of the head bounding box is mapped to, expressed as a fraction of the rendered frame height (1.0 = frame top edge, 0.0 = frame bottom edge). Examples: 0.10 leaves a 10% margin below the head bottom; 0.0 puts the head bottom exactly at the frame's bottom edge; negative values (e.g. -0.1) push the head bottom below the frame for an ultra-tight crop where the chin / neck is clipped. Values above the Frame Top setting are nonsensical (head bottom above head top)."/>
+                                    <TextBlock Text="{l:Loc bottom}" VerticalAlignment="Center" Margin="10,0,4,0"
+                                               ToolTip="{l:Loc verticalPositionTheBOTTOM}"/>
                                     <xctk:DoubleUpDown Width="70" Minimum="-0.5" Maximum="1.5" Increment="0.05"
                                                        Value="{Binding InternalHeadBottomFraction, Mode=TwoWay}"
                                                        VerticalAlignment="Center"
                                                        FormatString="0.00"
-                                                       ToolTip="Vertical position the BOTTOM of the head bounding box is mapped to, expressed as a fraction of the rendered frame height (1.0 = frame top edge, 0.0 = frame bottom edge). Examples: 0.10 leaves a 10% margin below the head bottom; 0.0 puts the head bottom exactly at the frame's bottom edge; negative values (e.g. -0.1) push the head bottom below the frame for an ultra-tight crop where the chin / neck is clipped."/>
+                                                       ToolTip="{l:Loc verticalPositionThe}"/>
 
-                                    <TextBlock Text="Yaw:" VerticalAlignment="Center" Margin="10,0,4,0"
-                                               ToolTip="Camera yaw in degrees. 180 = facing camera."/>
+                                    <TextBlock Text="{l:Loc yaw}" VerticalAlignment="Center" Margin="10,0,4,0"
+                                               ToolTip="{l:Loc cameraYawInDegrees}"/>
                                     <TextBox Text="{Binding InternalYaw, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                              Width="55" VerticalAlignment="Center"
                                              PreviewTextInput="FloatTextBox_PreviewTextInput"
                                              DataObject.Pasting="FloatTextBox_Pasting"/>
 
-                                    <TextBlock Text="Pitch:" VerticalAlignment="Center" Margin="10,0,4,0"/>
+                                    <TextBlock Text="{l:Loc pitch}" VerticalAlignment="Center" Margin="10,0,4,0"/>
                                     <TextBox Text="{Binding InternalPitch, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                              Width="55" VerticalAlignment="Center"
                                              PreviewTextInput="FloatTextBox_PreviewTextInput"
                                              DataObject.Pasting="FloatTextBox_Pasting"/>
 
-                                    <TextBlock Text="Hair pad:" VerticalAlignment="Center" Margin="10,0,4,0"/>
+                                    <TextBlock Text="{l:Loc hairPad}" VerticalAlignment="Center" Margin="10,0,4,0"/>
                                     <TextBox Text="{Binding InternalHairAbovePadding, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                              Width="55" VerticalAlignment="Center"
                                              PreviewTextInput="FloatTextBox_PreviewTextInput"
                                              DataObject.Pasting="FloatTextBox_Pasting"
-                                             ToolTip="Hair-above-head padding (world units)."/>
+                                             ToolTip="{l:Loc hairAboveHeadPadding}"/>
                                 </StackPanel>
                             </WrapPanel>
 
                             <!-- Decode-cache budget: how much RAM the in-process renderer's decoded-texture
                                  and parsed-mesh caches may use during mugshot generation. -->
                             <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
-                                <TextBlock Text="Texture/geometry cache:" VerticalAlignment="Center" Margin="0,0,4,0"
-                                           ToolTip="How the in-process renderer sizes its decoded-texture and parsed-mesh RAM caches during mugshot generation. '% Free RAM' (default) grows the cache into a share of spare system memory; 'Fixed RAM' caps the total at the budget below; 'Disabled' turns caching off (renders decode fresh each time — slower, minimal RAM). Takes effect within a few renders; no restart needed."/>
+                                <TextBlock Text="{l:Loc textureGeometryCache}" VerticalAlignment="Center" Margin="0,0,4,0"
+                                           ToolTip="{l:Loc howTheInProcess}"/>
                                 <ComboBox ItemsSource="{Binding MugshotCacheModeChoices}"
                                           SelectedItem="{Binding MugshotCacheMode, Mode=TwoWay}"
                                           Width="130" VerticalAlignment="Center">
@@ -1071,7 +1032,7 @@
                                 </ComboBox>
                                 <!-- Free-RAM percentage field: shown only when % Free RAM is selected. -->
                                 <StackPanel Orientation="Horizontal" Margin="12,0,0,0"
-                                            ToolTip="Total share of free RAM the decode caches may use together (they keep their fixed 75:9:1 ratio). 85 is the default; higher caches more aggressively, lower frees RAM for other work. Takes effect within a few renders; no restart needed.">
+                                            ToolTip="{l:Loc totalShareOfFree}">
                                     <StackPanel.Style>
                                         <Style TargetType="StackPanel">
                                             <Setter Property="Visibility" Value="Collapsed"/>
@@ -1082,11 +1043,11 @@
                                             </Style.Triggers>
                                         </Style>
                                     </StackPanel.Style>
-                                    <TextBlock Text="Free RAM %:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                    <TextBlock Text="{l:Loc freeRAM}" VerticalAlignment="Center" Margin="0,0,4,0"/>
                                     <xctk:DoubleUpDown Width="75" Minimum="0" Maximum="100" Increment="5"
                                                        Value="{Binding MugshotCacheFreeRamPercent, Mode=TwoWay}"
                                                        FormatString="0.##" VerticalAlignment="Center"
-                                                       ToolTip="Total share of free RAM (0-100) the renderer's decode caches may collectively use in % Free RAM mode."/>
+                                                       ToolTip="{l:Loc totalShareOf}"/>
                                 </StackPanel>
                                 <StackPanel Orientation="Horizontal" Margin="12,0,0,0">
                                     <StackPanel.Style>
@@ -1099,11 +1060,11 @@
                                             </Style.Triggers>
                                         </Style>
                                     </StackPanel.Style>
-                                    <TextBlock Text="Budget (GB):" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                    <TextBlock Text="{l:Loc budgetGB}" VerticalAlignment="Center" Margin="0,0,4,0"/>
                                     <xctk:DoubleUpDown Width="75" Minimum="0.25" Maximum="256" Increment="0.5"
                                                        Value="{Binding MugshotCacheFixedGB, Mode=TwoWay}"
                                                        FormatString="0.##" VerticalAlignment="Center"
-                                                       ToolTip="Approximate total RAM (GB) the renderer's decode caches may use in Fixed RAM mode."/>
+                                                       ToolTip="{l:Loc approximateTotalRAMGB}"/>
                                 </StackPanel>
                             </StackPanel>
 
@@ -1118,30 +1079,30 @@
                                         </Style.Triggers>
                                     </Style>
                                 </StackPanel.Style>
-                                <CheckBox Content="Include hair / brows / mouth in framing"
+                                <CheckBox Content="{l:Loc includeHairBrowsMouth}"
                                           IsChecked="{Binding InternalIncludeAccessories, Mode=TwoWay}"
-                                          ToolTip="When enabled, hair-above-head and other facial accessories help frame the shot - but floor-length braids are clipped at the head's lower bound so they don't blow out the frame."/>
+                                          ToolTip="{l:Loc whenEnabledHairAbove}"/>
                             </StackPanel>
 
                             <!-- Background RGB + Output resolution share a single wrap row. -->
                             <WrapPanel Orientation="Horizontal" Margin="0,8,0,0" ItemHeight="28">
                                 <StackPanel Orientation="Horizontal" Margin="0,0,16,0">
-                                    <TextBlock Text="Background:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                    <TextBlock Text="{l:Loc background}" VerticalAlignment="Center" Margin="0,0,4,0"/>
                                     <Border BorderBrush="Black" BorderThickness="1" Width="60" Height="22"
                                             Background="{Binding InternalBackgroundColor}" CornerRadius="2"
                                             VerticalAlignment="Center"/>
-                                    <Button Content="Change..." Margin="6,0,0,0" Padding="6,1"
+                                    <Button Content="{l:Loc change}" Margin="6,0,0,0" Padding="6,1"
                                             VerticalAlignment="Center"
                                             Command="{Binding SelectInternalBackgroundColorCommand}"/>
                                 </StackPanel>
 
                                 <StackPanel Orientation="Horizontal">
-                                    <TextBlock Text="Output:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                    <TextBlock Text="{l:Loc output}" VerticalAlignment="Center" Margin="0,0,4,0"/>
                                     <TextBox Text="{Binding InternalOutputWidth, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                              Width="55" VerticalAlignment="Center"
                                              PreviewTextInput="IntegerTextBox_PreviewTextInput"
                                              DataObject.Pasting="IntegerTextBox_Pasting"/>
-                                    <TextBlock Text=" x " VerticalAlignment="Center" Margin="3,0"/>
+                                    <TextBlock Text="{l:Loc x3}" VerticalAlignment="Center" Margin="3,0"/>
                                     <TextBox Text="{Binding InternalOutputHeight, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                              Width="55" VerticalAlignment="Center"
                                              PreviewTextInput="IntegerTextBox_PreviewTextInput"
@@ -1156,15 +1117,15 @@
                                  wireframe) live in the renderer's UC_CharacterViewerRenderPanel
                                  inside the live-preview toolbar - shared with SynthEBD. -->
                             <WrapPanel Orientation="Horizontal" Margin="0,8,0,0">
-                                <TextBlock Text="Asset Resolution:" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                                <CheckBox Content="BSA &lt; loose"
+                                <TextBlock Text="{l:Loc assetResolution}" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <CheckBox Content="{l:Loc bSALtLoose}"
                                           IsChecked="{Binding InternalVanillaLooseOverridesBsa, Mode=TwoWay}"
                                           VerticalAlignment="Center" Margin="0,0,12,0"
-                                          ToolTip="When on (default), a loose copy of an asset under your Skyrim Data folder takes precedence over any BSA copy of the same path - including BSAs scoped to a non-vanilla mod. Mirrors the engine's actual rule that loose Data files override BSA-packed ones. Turn off for strict-BSA mode (preview the original mod content without your installed loose-file overrides)."/>
-                                <CheckBox Content="Mod loose &lt; Data loose"
+                                          ToolTip="{l:Loc whenOnDefaultA}"/>
+                                <CheckBox Content="{l:Loc modLooseLtData}"
                                           IsChecked="{Binding InternalVanillaLooseOverridesModLoose, Mode=TwoWay}"
                                           VerticalAlignment="Center"
-                                          ToolTip="When on, a loose copy of an asset in your Skyrim Data folder takes precedence over the same path in any mod folder, letting your installed body / skin / texture replacers leak into mod-specific previews. FaceGen NIFs and FaceTint DDS are excluded so the mod's actual face overrides aren't replaced by vanilla copies. Off by default."/>
+                                          ToolTip="{l:Loc whenOnALoose}"/>
                             </WrapPanel>
 
                             <!-- Re-render triggers: each toggle gates one staleness check -
@@ -1174,23 +1135,23 @@
                                  that class of automatic regeneration. Backing gates live in
                                  MugshotStalenessChecker (Internal) / PortraitCreator (Legacy). -->
                             <WrapPanel Orientation="Horizontal" Margin="0,8,0,0">
-                                <TextBlock Text="Re-render When:" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                                <CheckBox Content="Newer renderer version"
+                                <TextBlock Text="{l:Loc reRenderWhen}" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <CheckBox Content="{l:Loc newerRendererVersion}"
                                           IsChecked="{Binding AutoUpdateOldMugshots, Mode=TwoWay}"
                                           VerticalAlignment="Center" Margin="0,0,12,0"
-                                          ToolTip="When on (default), a mugshot produced by an older version of the renderer (Internal) or the NPC Portrait Creator (Legacy) is treated as stale and re-rendered, so it picks up rendering fixes and improvements from the current version. Turn off to keep older-version mugshots in place."/>
-                                <CheckBox Content="Stale Conditions"
+                                          ToolTip="{l:Loc whenOnDefault}"/>
+                                <CheckBox Content="{l:Loc staleConditions}"
                                           IsChecked="{Binding AutoUpdateStaleMugshots, Mode=TwoWay}"
                                           VerticalAlignment="Center" Margin="0,0,12,0"
-                                          ToolTip="When on (default), a mugshot is re-rendered when the settings it was generated with - lighting, camera / framing, background, resolution and render options - no longer match your current settings. Turn off to keep existing mugshots in place even after you change these settings."/>
-                                <CheckBox Content="Missing NPC Assets"
+                                          ToolTip="{l:Loc whenOn}"/>
+                                <CheckBox Content="{l:Loc missingNPCAssets}"
                                           IsChecked="{Binding AutoUpdateMugshotsWithMissingAssets, Mode=TwoWay}"
                                           VerticalAlignment="Center" Margin="0,0,12,0"
-                                          ToolTip="When on (default), a previously-generated mugshot whose stamped metadata records missing BASE NPC assets — the NPC's own head/body/hair meshes or textures, or a FaceGen mismatch — is treated as stale and re-rendered on the next session, giving newly-installed assets a chance to fill in the wireframe / placeholder areas automatically. Turn off to keep the existing PNG in place even when it depicts an incomplete model."/>
-                                <CheckBox Content="Missing Outfit Assets"
+                                          ToolTip="{l:Loc when}"/>
+                                <CheckBox Content="{l:Loc missingOutfitAssets}"
                                           IsChecked="{Binding AutoUpdateMugshotsWithMissingOutfitAssets, Mode=TwoWay}"
                                           VerticalAlignment="Center"
-                                          ToolTip="When on (default), a mugshot whose stamped metadata records missing outfit/headgear meshes or textures is re-rendered on the next session so newly-installed attire assets fill in the wireframe / placeholder areas. (Broken outfit physics links are excluded: nothing you install can fix a stale link inside the mod.) Turn off to keep the existing PNG in place."/>
+                                          ToolTip="{l:Loc whenOnDefaultAMugshot2}"/>
                             </WrapPanel>
 
                             <!-- Warning-icon visibility: each gates one mugshot-tile warning
@@ -1198,12 +1159,12 @@
                                  metadata. Unchecking re-renders exactly the mugshots that
                                  were displaying that icon so they come back clean. -->
                             <WrapPanel Orientation="Horizontal" Margin="0,8,0,0">
-                                <TextBlock Text="Warning Icons:" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                                <CheckBox Content="Show Missing NPC Assets Icon"
+                                <TextBlock Text="{l:Loc warningIcons}" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <CheckBox Content="{l:Loc showMissingNPCAssets}"
                                           IsChecked="{Binding InternalShowMissingNpcAssetsIcon, Mode=TwoWay}"
                                           VerticalAlignment="Center" Margin="0,0,12,0"
-                                          ToolTip="When on (default), a mugshot rendered with missing meshes/textures (or a detected FaceGen mismatch) shows the missing-asset warning icon, and that state is recorded in the PNG so the icon survives restarts. Unchecking hides the icon and re-renders the affected mugshots once so their recorded state is cleared. Note: while off, newly-rendered mugshots record no missing assets, so the 'Re-render When: Missing Assets' option has nothing to act on for them."/>
-                                <CheckBox Content="Show Missing Outfit Assets Icon"
+                                          ToolTip="{l:Loc whenOnDefaultAMugshot3}"/>
+                                <CheckBox Content="{l:Loc showMissingOutfitAssets}"
                                           IsChecked="{Binding InternalShowMissingOutfitAssetsIcon, Mode=TwoWay}"
                                           VerticalAlignment="Center" Margin="0,0,12,0"
                                           ToolTip="When on (default), a mugshot whose outfit/headgear is missing meshes or textures — or references a physics config that doesn't exist (a broken SMP/HDT link inside the mod; the render itself is correct) — shows the outfit-assets warning icon, recorded in the PNG so it survives restarts. The missing meshes/textures re-render when you install the assets (via 'Re-render When: Missing Assets'); the broken physics link is informational. Unchecking hides the icon and re-renders the affected mugshots once so their recorded state is cleared."/>
@@ -1217,16 +1178,16 @@
                                  the 3D preview. The full-screen 3D preview exposes the
                                  same two toggles as non-persistent per-view overrides. -->
                             <WrapPanel Orientation="Horizontal" Margin="0,8,0,0">
-                                <TextBlock Text="Attire:" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                                <CheckBox Content="Include default outfit"
+                                <TextBlock Text="{l:Loc attire}" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <CheckBox Content="{l:Loc includeDefault}"
                                           IsChecked="{Binding InternalIncludeDefaultOutfit, Mode=TwoWay}"
                                           VerticalAlignment="Center" Margin="0,0,12,0"
-                                          ToolTip="When on, render the NPC's default outfit in mugshots and the 3D preview. Body-covering armor hides the nude body underneath. On by default."/>
-                                <CheckBox Content="Include headgear"
+                                          ToolTip="{l:Loc whenOnRenderThe}"/>
+                                <CheckBox Content="{l:Loc includeHeadgear2}"
                                           IsChecked="{Binding InternalIncludeHeadgear, Mode=TwoWay}"
                                           Visibility="{Binding InternalIncludeDefaultOutfit, Converter={StaticResource BooleanToVisibilityConverter}}"
                                           VerticalAlignment="Center"
-                                          ToolTip="When on, render worn/outfit head gear (helmets/hoods/circlets); hair is hidden under headgear, as in game. Off by default — the sensible choice for a face-picking tool."/>
+                                          ToolTip="{l:Loc whenOnRenderWorn}"/>
                             </WrapPanel>
 
                             <!-- Live preview - wrapped in a Grid so its Visibility binding
@@ -1258,46 +1219,41 @@
                             </Style>
                         </Border.Style>
                         <StackPanel>
-                            <TextBlock Text="Max Parallel Portrait Renders" FontWeight="Bold" Margin="0,5,0,0"/>
-                            <TextBlock TextWrapping="Wrap" Margin="0,0,0,5" Opacity="0.8">
-                                Controls how many CPU-intensive portrait generation processes can run at once.
-                                Lower values reduce system load during image generation.
-                            </TextBlock>
+                            <TextBlock Text="{l:Loc maxParallelPortraitRenders}" FontWeight="Bold" Margin="0,5,0,0"/>
+                            <TextBlock TextWrapping="Wrap" Margin="0,0,0,5" Opacity="0.8"
+                                                       Text="{l:Loc controlsHowManyCPU}"/>
                             <TextBox Text="{Binding MaxParallelPortraitRenders}" 
                                      Width="60" HorizontalAlignment="Left"
                                      PreviewTextInput="IntegerTextBox_PreviewTextInput"
                                      DataObject.Pasting="IntegerTextBox_Pasting" />
 
-                            <TextBlock Text="Mugshot Background Color" FontWeight="Bold" Margin="0,15,0,0"/>
+                            <TextBlock Text="{l:Loc mugshotBackgroundColor}" FontWeight="Bold" Margin="0,15,0,0"/>
                             <StackPanel Orientation="Horizontal" Margin="0,2,0,5">
                                 <Border BorderBrush="Black" BorderThickness="1" Width="100" Height="25"
                                         Background="{Binding MugshotBackgroundColor}" CornerRadius="2"/>
-                                <Button Content="Change..." Margin="10,0,0,0"
+                                <Button Content="{l:Loc change}" Margin="10,0,0,0"
                                         Command="{Binding SelectBackgroundColorCommand}" VerticalAlignment="Center"/>
                             </StackPanel>
                             
-                            <CheckBox Content="Enable Normal Map Hack"
-                                      IsChecked="{Binding EnableNormalMapHack, Mode=TwoWay}"
-                                      Margin="0,10,0,0">
-                                <CheckBox.ToolTip>
-                                    <TextBlock TextWrapping="Wrap" MaxWidth="400">
-                                        The normal maps as loaded by the Nif model don't produce maximal brightness when illuminated directly, but rather at an angle. This seems physically incorrect, since things should generally look brightest when illuminated head-on. This hack explicitly rotates non-model-space normals to maximally illuminate in the direction of the incident light, making things like eyes and hair look brighter. I think this is more accurate than default, but you can disable this if you think the generated portraits have too much glare.
-                                    </TextBlock>
-                                </CheckBox.ToolTip>
-                            </CheckBox>
+                            <CheckBox Content="{l:Loc enableNormalMapHack}"
+                                                                  IsChecked="{Binding EnableNormalMapHack, Mode=TwoWay}"
+                                                                  Margin="0,10,0,0">
+                                                            <CheckBox.ToolTip>
+                                                                <TextBlock TextWrapping="Wrap" MaxWidth="400"
+                                                                           Text="{l:Loc theNormalMapsAs}"/>
+                                                            </CheckBox.ToolTip>
+                                                        </CheckBox>
                             
-                            <CheckBox Content="Use Modded Fallback Textures"
-                                      IsChecked="{Binding UseModdedFallbackTextures, Mode=TwoWay}"
-                                      Margin="0,10,0,0">
-                                <CheckBox.ToolTip>
-                                    <TextBlock TextWrapping="Wrap" MaxWidth="400">
-                                        If enabled (default), missing textures will search ALL files (loose or BSA) in the base game Data folder as a last resort. For example, vanilla skinned NPCs will use your installed skin textures.
-                                        If disabled, this fallback search is restricted to ONLY vanilla Skyrim and Creation Club BSAs, preventing loose or mod-added BSA textures in the base Data folder from overwriting the base game.
-                                    </TextBlock>
-                                </CheckBox.ToolTip>
-                            </CheckBox>
+                                                        <CheckBox Content="{l:Loc useModdedFallbackTextures}"
+                                                                  IsChecked="{Binding UseModdedFallbackTextures, Mode=TwoWay}"
+                                                                  Margin="0,10,0,0">
+                                                            <CheckBox.ToolTip>
+                                                                <TextBlock TextWrapping="Wrap" MaxWidth="400"
+                                                                           Text="{l:Loc ifEnabledDefaultMissing}"/>
+                                                            </CheckBox.ToolTip>
+                                                        </CheckBox>
                             
-                            <TextBlock Text="Lighting Profile (JSON)" FontWeight="Bold" Margin="0,10,0,0"/>
+                                                        <TextBlock Text="{l:Loc lightingProfileJSON}" FontWeight="Bold" Margin="0,10,0,0"/>
                             <TextBox Text="{Binding DefaultLightingJsonString, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                      AcceptsReturn="True" TextWrapping="Wrap" MaxHeight="200"
                                      VerticalScrollBarVisibility="Auto" FontFamily="Consolas">
@@ -1315,28 +1271,28 @@
                                 </TextBox.Style>
                             </TextBox>
                             
-                            <TextBlock Text="Camera Position:" Margin="0,15,0,2"/>
+                            <TextBlock Text="{l:Loc cameraPosition}" Margin="0,15,0,2"/>
                             <ComboBox ItemsSource="{Binding CameraModes}" SelectedItem="{Binding SelectedCameraMode, Mode=TwoWay}" Margin="0,0,0,10"/>
 
                             <!-- NEW: FOV control (always visible) -->
-            <TextBlock Text="Vertical Field of View (degrees):" Margin="0,0,0,2"/>
+            <TextBlock Text="{l:Loc verticalFieldOfView}" Margin="0,0,0,2"/>
             <TextBox Text="{Binding VerticalFOV, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,5"
                      PreviewTextInput="FloatTextBox_PreviewTextInput"
                      DataObject.Pasting="FloatTextBox_Pasting"
-                     ToolTip="Camera vertical field of view in degrees. Default is 25."/>
+                     ToolTip="{l:Loc cameraVerticalFieldOf}"/>
 
             <!-- NEW: Euler angle controls (always visible) -->
-            <TextBlock Text="Camera Pitch (degrees):" Margin="0,5,0,2"/>
+            <TextBlock Text="{l:Loc cameraPitchDegrees}" Margin="0,5,0,2"/>
             <TextBox Text="{Binding CamPitch, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,5"
                      PreviewTextInput="FloatTextBox_PreviewTextInput"
                      DataObject.Pasting="FloatTextBox_Pasting"/>
 
-            <TextBlock Text="Camera Yaw (degrees):" Margin="0,0,0,2"/>
+            <TextBlock Text="{l:Loc cameraYawDegrees}" Margin="0,0,0,2"/>
             <TextBox Text="{Binding CamYaw, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,5"
                      PreviewTextInput="FloatTextBox_PreviewTextInput"
                      DataObject.Pasting="FloatTextBox_Pasting"/>
 
-            <TextBlock Text="Camera Roll (degrees):" Margin="0,0,0,2"/>
+            <TextBlock Text="{l:Loc cameraRollDegrees}" Margin="0,0,0,2"/>
             <TextBox Text="{Binding CamRoll, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,10"
                      PreviewTextInput="FloatTextBox_PreviewTextInput"
                      DataObject.Pasting="FloatTextBox_Pasting"/>
@@ -1353,11 +1309,11 @@
                     </Style.Triggers>
                 </Style>
             </StackPanel.Style>
-            <TextBlock Text="Head Top Offset (%):" Margin="0,0,0,2"/>
+            <TextBlock Text="{l:Loc headTopOffset}" Margin="0,0,0,2"/>
             <TextBox Text="{Binding HeadTopOffset, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,5"
                      PreviewTextInput="FloatTextBox_PreviewTextInput"
                      DataObject.Pasting="FloatTextBox_Pasting"/>
-            <TextBlock Text="Head Bottom Offset (%):" Margin="0,0,0,2"/>
+            <TextBlock Text="{l:Loc headBottomOffset}" Margin="0,0,0,2"/>
             <TextBox Text="{Binding HeadBottomOffset, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,5"
                      PreviewTextInput="FloatTextBox_PreviewTextInput"
                      DataObject.Pasting="FloatTextBox_Pasting"/>
@@ -1375,25 +1331,25 @@
                     </Style.Triggers>
                 </Style>
             </StackPanel.Style>
-            <TextBlock Text="Camera X:" Margin="0,0,0,2"/>
+            <TextBlock Text="{l:Loc cameraX}" Margin="0,0,0,2"/>
             <TextBox Text="{Binding CamX, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,5"
                      PreviewTextInput="FloatTextBox_PreviewTextInput"
                      DataObject.Pasting="FloatTextBox_Pasting"/>
-            <TextBlock Text="Camera Y:" Margin="0,0,0,2"/>
+            <TextBlock Text="{l:Loc cameraY}" Margin="0,0,0,2"/>
             <TextBox Text="{Binding CamY, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,5"
                      PreviewTextInput="FloatTextBox_PreviewTextInput"
                      DataObject.Pasting="FloatTextBox_Pasting"/>
-            <TextBlock Text="Camera Z:" Margin="0,0,0,2"/>
+            <TextBlock Text="{l:Loc cameraZ}" Margin="0,0,0,2"/>
             <TextBox Text="{Binding CamZ, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,5"
                      PreviewTextInput="FloatTextBox_PreviewTextInput"
                      DataObject.Pasting="FloatTextBox_Pasting"/>
         </StackPanel>
-                            <TextBlock Text="Output Resolution:" Margin="0,10,0,2"/>
+                            <TextBlock Text="{l:Loc outputResolution}" Margin="0,10,0,2"/>
                             <StackPanel Orientation="Horizontal">
                                 <TextBox Text="{Binding ImageXRes, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="50"
                                          PreviewTextInput="IntegerTextBox_PreviewTextInput"
                                          DataObject.Pasting="IntegerTextBox_Pasting"/>
-                                <TextBlock Text=" x " VerticalAlignment="Center" Margin="5,0"/>
+                                <TextBlock Text="{l:Loc x3}" VerticalAlignment="Center" Margin="5,0"/>
                                 <TextBox Text="{Binding ImageYRes, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="50"
                                          PreviewTextInput="IntegerTextBox_PreviewTextInput"
                                          DataObject.Pasting="IntegerTextBox_Pasting"/>
@@ -1417,10 +1373,10 @@
                         </Grid.ColumnDefinitions>
 
                         <Button Grid.Column="0"
-                                Content="Delete All Auto-Generated Mugshots"
+                                Content="{l:Loc deleteAllAutoGenerated}"
                                 Command="{Binding DeleteAutoGeneratedMugshotsCommand}"
                                 Padding="10,5"
-                                ToolTip="Permanently deletes all auto-generated portrait images and cleans up empty folders. Detects mugshots from both the Internal and Legacy renderers via the &quot;Parameters&quot; PNG metadata chunk.">
+                                ToolTip="{l:Loc permanentlyDeletesAllAuto}">
                             <Button.Style>
                                 <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
                                     <Setter Property="Background" Value="#FFE57373"/>
@@ -1435,24 +1391,24 @@
                         </Button>
 
                         <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="15,0,0,0" VerticalAlignment="Center">
-                            <TextBlock Text="Search Mode:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                            <TextBlock Text="{l:Loc searchMode}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                             <ComboBox ItemsSource="{Binding MugshotSearchModes}"
                                       SelectedItem="{Binding SelectedMugshotSearchModePC, Mode=TwoWay}"
                                       MinWidth="120"
-                                      ToolTip="Fast: Uses cached list of generated mugshots (recommended). Comprehensive: Scans all mugshot folders and reads metadata."/>
+                                      ToolTip="{l:Loc fastUsesCachedList}"/>
                         </StackPanel>
                     </Grid>
 
-                    <CheckBox Content="Normalize Image Dimensions"
+                    <CheckBox Content="{l:Loc normalizeImageDimensions}"
                               IsChecked="{Binding NormalizeImageDimensions, Mode=TwoWay}"
                               Margin="0,5,0,0"
-                              ToolTip="If checked, all images will be cropped and resized to the most common dimensions for a uniform appearance. This may slightly increase load times."/> 
+                              ToolTip="{l:Loc ifCheckedAllImages}"/> 
                     
                     <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
-                        <TextBlock Text="Max # Mugshots To Fit On Screen:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                        <TextBlock Text="{l:Loc maxMugshotsToFit}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                         <TextBox Text="{Binding MaxMugshotsToFit, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" 
                                  Width="50"
-                                 ToolTip="The maximum number of mugshots to fit on-screen when auto-sizing. A lower number results in larger images."/>
+                                 ToolTip="{l:Loc theMaximumNumberOf}"/>
                     </StackPanel>
                 </StackPanel>
             </Expander>
@@ -1462,13 +1418,13 @@
                  visible tile that lacks cached stats — first view of each
                  mod's FaceGen costs ~10 ms. Subsequent views hit the
                  SHA-keyed cache in Settings.json. -->
-            <Expander Header="FaceGen Analysis" Style="{StaticResource SettingsSectionExpander}"
+            <Expander Header="{l:Loc faceGenAnalysis}" Style="{StaticResource SettingsSectionExpander}"
                       IsExpanded="{Binding SectionFaceGenAnalysis.IsExpanded, Mode=TwoWay}">
                 <StackPanel>
-                    <CheckBox Content="Enable FaceGen Analysis"
+                    <CheckBox Content="{l:Loc enableFaceGenAnalysis}"
                               IsChecked="{Binding EnableFaceGenAnalysis, Mode=TwoWay}"
-                              ToolTip="Analyze each tile's FaceGen NIF to show polycount / vertex / size info on the mugshot. First view of each FaceGen costs ~10ms; results are cached SHA-keyed across runs."/>
-                    <TextBlock Text="When enabled, each mugshot's FaceGen NIF is parsed (or just stat'd for size-only) to surface authoring metrics. Useful for spotting absurdly heavy hair / head meshes."
+                              ToolTip="{l:Loc analyzeEachTileS}"/>
+                    <TextBlock Text="{l:Loc whenEnabledEachMugshot}"
                                FontSize="10" Foreground="{DynamicResource HintForeground}"
                                TextWrapping="Wrap" Margin="0,2,0,5"/>
 
@@ -1487,27 +1443,27 @@
                             </Style>
                         </Border.Resources>
                         <StackPanel>
-                            <TextBlock Text="Reporting Metrics" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                            <TextBlock Text="{l:Loc reportingMetrics}" FontWeight="SemiBold" Margin="0,0,0,4"/>
                             <WrapPanel Orientation="Horizontal" Margin="0,0,0,8">
-                                <CheckBox Content="File Size" IsChecked="{Binding ReportFaceGenSize, Mode=TwoWay}" Margin="0,0,16,0"/>
-                                <CheckBox Content="Polygons" IsChecked="{Binding ReportFaceGenPolys, Mode=TwoWay}" Margin="0,0,16,0"
-                                          ToolTip="Triangle count summed across all shapes in the FaceGen NIF."/>
-                                <CheckBox Content="Vertices" IsChecked="{Binding ReportFaceGenVerts, Mode=TwoWay}"
-                                          ToolTip="Vertex count summed across all shapes."/>
+                                <CheckBox Content="{l:Loc fileSize}" IsChecked="{Binding ReportFaceGenSize, Mode=TwoWay}" Margin="0,0,16,0"/>
+                                <CheckBox Content="{l:Loc polygons}" IsChecked="{Binding ReportFaceGenPolys, Mode=TwoWay}" Margin="0,0,16,0"
+                                          ToolTip="{l:Loc triangleCountSummedAcross}"/>
+                                <CheckBox Content="{l:Loc vertices}" IsChecked="{Binding ReportFaceGenVerts, Mode=TwoWay}"
+                                          ToolTip="{l:Loc vertexCountSummedAcross}"/>
                             </WrapPanel>
 
                             <WrapPanel Orientation="Horizontal" Margin="0,0,0,8">
-                                <TextBlock Text="Display Mode:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                <TextBlock Text="{l:Loc displayMode}" VerticalAlignment="Center" Margin="0,0,6,0"/>
                                 <ComboBox ItemsSource="{Binding FaceGenDisplayModes}"
                                           SelectedItem="{Binding FaceGenDisplayMode, Mode=TwoWay}"
                                           MinWidth="130"
-                                          ToolTip="Text Overlay draws the numbers directly on the mugshot. Tooltip shows a small dot — hover for the same info."/>
+                                          ToolTip="{l:Loc textOverlayDrawsThe}"/>
                             </WrapPanel>
 
                             <!-- Text-overlay only: text-height % of mugshot height. -->
                             <WrapPanel Orientation="Horizontal" Margin="0,0,0,8"
                                        Visibility="{Binding FaceGenDisplayMode, Converter={StaticResource EnumToVisibilityConverter}, ConverterParameter=TextOverlay}">
-                                <TextBlock Text="Text Height (% of mugshot):" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                <TextBlock Text="{l:Loc textHeightOfMugshot}" VerticalAlignment="Center" Margin="0,0,6,0"/>
                                 <xctk:DoubleUpDown Value="{Binding FaceGenTextHeightPercent, Mode=TwoWay}"
                                                    Minimum="3" Maximum="30" Increment="0.5" FormatString="0.#" Width="70"/>
                             </WrapPanel>
@@ -1515,18 +1471,18 @@
                             <!-- Tooltip only: indicator position. -->
                             <WrapPanel Orientation="Horizontal" Margin="0,0,0,8"
                                        Visibility="{Binding FaceGenDisplayMode, Converter={StaticResource EnumToVisibilityConverter}, ConverterParameter=Tooltip}">
-                                <TextBlock Text="Indicator Position:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                <TextBlock Text="{l:Loc indicatorPosition}" VerticalAlignment="Center" Margin="0,0,6,0"/>
                                 <ComboBox ItemsSource="{Binding FaceGenTooltipPositions}"
                                           SelectedItem="{Binding FaceGenTooltipPosition, Mode=TwoWay}"
                                           MinWidth="130"/>
                             </WrapPanel>
 
-                            <TextBlock Text="Highlight Criterion" FontWeight="SemiBold" Margin="0,4,0,4"/>
+                            <TextBlock Text="{l:Loc highlightCriterion}" FontWeight="SemiBold" Margin="0,4,0,4"/>
                             <WrapPanel Orientation="Horizontal" Margin="0,0,0,8">
                                 <ComboBox ItemsSource="{Binding FaceGenHighlightCriteria}"
                                           SelectedItem="{Binding FaceGenHighlightCriterion, Mode=TwoWay}"
                                           MinWidth="130" Margin="0,0,8,0"
-                                          ToolTip="Top % marks the heaviest N% of visible tiles per metric. Std Dev marks tiles whose value exceeds mean + N*stddev. Spectrum maps every tile along a Low→Mid→High gradient using min/max of visible tiles."/>
+                                          ToolTip="{l:Loc topMarksTheHeaviest}"/>
                                 <xctk:DoubleUpDown Value="{Binding FaceGenHighlightThreshold, Mode=TwoWay}"
                                                    Minimum="0" Maximum="100" Increment="1" FormatString="0.##" Width="70"
                                                    Visibility="{Binding IsSpectrumMode, Converter={StaticResource BooleanToVisibilityConverter}, ConverterParameter=Invert}"/>
@@ -1535,20 +1491,20 @@
                             <WrapPanel Orientation="Horizontal" Margin="0,0,0,8"
                                        Visibility="{Binding IsSpectrumMode, Converter={StaticResource BooleanToVisibilityConverter}, ConverterParameter=Invert}">
                                 <StackPanel Orientation="Horizontal" Margin="0,0,16,0">
-                                    <TextBlock Text="Highlight color:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                    <TextBlock Text="{l:Loc highlightColor}" VerticalAlignment="Center" Margin="0,0,4,0"/>
                                     <Border BorderBrush="Black" BorderThickness="1" Width="60" Height="22"
                                             Background="{Binding FaceGenHighlightColor}" CornerRadius="2"
                                             VerticalAlignment="Center"/>
-                                    <Button Content="Change..." Margin="6,0,0,0" Padding="6,1"
+                                    <Button Content="{l:Loc change}" Margin="6,0,0,0" Padding="6,1"
                                             VerticalAlignment="Center"
                                             Command="{Binding SelectFaceGenHighlightColorCommand}"/>
                                 </StackPanel>
                                 <StackPanel Orientation="Horizontal">
-                                    <TextBlock Text="Normal color:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                    <TextBlock Text="{l:Loc normalColor}" VerticalAlignment="Center" Margin="0,0,4,0"/>
                                     <Border BorderBrush="Black" BorderThickness="1" Width="60" Height="22"
                                             Background="{Binding FaceGenNoHighlightColor}" CornerRadius="2"
                                             VerticalAlignment="Center"/>
-                                    <Button Content="Change..." Margin="6,0,0,0" Padding="6,1"
+                                    <Button Content="{l:Loc change}" Margin="6,0,0,0" Padding="6,1"
                                             VerticalAlignment="Center"
                                             Command="{Binding SelectFaceGenNoHighlightColorCommand}"/>
                                 </StackPanel>
@@ -1557,71 +1513,71 @@
                             <WrapPanel Orientation="Horizontal" Margin="0,0,0,8"
                                        Visibility="{Binding IsSpectrumMode, Converter={StaticResource BooleanToVisibilityConverter}}">
                                 <StackPanel Orientation="Horizontal" Margin="0,0,16,0">
-                                    <TextBlock Text="Low color:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                    <TextBlock Text="{l:Loc lowColor}" VerticalAlignment="Center" Margin="0,0,4,0"/>
                                     <Border BorderBrush="Black" BorderThickness="1" Width="60" Height="22"
                                             Background="{Binding FaceGenSpectrumLowColor}" CornerRadius="2"
                                             VerticalAlignment="Center"/>
-                                    <Button Content="Change..." Margin="6,0,0,0" Padding="6,1"
+                                    <Button Content="{l:Loc change}" Margin="6,0,0,0" Padding="6,1"
                                             VerticalAlignment="Center"
                                             Command="{Binding SelectFaceGenSpectrumLowColorCommand}"/>
                                 </StackPanel>
                                 <StackPanel Orientation="Horizontal" Margin="0,0,16,0">
-                                    <TextBlock Text="Mid color:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                    <TextBlock Text="{l:Loc midColor}" VerticalAlignment="Center" Margin="0,0,4,0"/>
                                     <Border BorderBrush="Black" BorderThickness="1" Width="60" Height="22"
                                             Background="{Binding FaceGenSpectrumMidColor}" CornerRadius="2"
                                             VerticalAlignment="Center"/>
-                                    <Button Content="Change..." Margin="6,0,0,0" Padding="6,1"
+                                    <Button Content="{l:Loc change}" Margin="6,0,0,0" Padding="6,1"
                                             VerticalAlignment="Center"
                                             Command="{Binding SelectFaceGenSpectrumMidColorCommand}"/>
                                 </StackPanel>
                                 <StackPanel Orientation="Horizontal">
-                                    <TextBlock Text="High color:" VerticalAlignment="Center" Margin="0,0,4,0"/>
+                                    <TextBlock Text="{l:Loc highColor}" VerticalAlignment="Center" Margin="0,0,4,0"/>
                                     <Border BorderBrush="Black" BorderThickness="1" Width="60" Height="22"
                                             Background="{Binding FaceGenSpectrumHighColor}" CornerRadius="2"
                                             VerticalAlignment="Center"/>
-                                    <Button Content="Change..." Margin="6,0,0,0" Padding="6,1"
+                                    <Button Content="{l:Loc change}" Margin="6,0,0,0" Padding="6,1"
                                             VerticalAlignment="Center"
                                             Command="{Binding SelectFaceGenSpectrumHighColorCommand}"/>
                                 </StackPanel>
                             </WrapPanel>
 
-                            <Button Content="Clear FaceGen Analysis Cache"
+                            <Button Content="{l:Loc clearFaceGenAnalysisCache}"
                                     Command="{Binding ClearFaceGenAnalysisCacheCommand}"
                                     Padding="10,3" HorizontalAlignment="Left"
-                                    ToolTip="Forgets every cached FaceGen stat. Next view of each tile will re-parse its NIF."/>
+                                    ToolTip="{l:Loc forgetsEveryCachedFaceGen}"/>
                         </StackPanel>
                     </Border>
                 </StackPanel>
             </Expander>
             
             <!-- Section: Display Settings -->
-            <Expander Header="Display Settings" Style="{StaticResource SettingsSectionExpander}"
+            <Expander Header="{l:Loc displaySettings}" Style="{StaticResource SettingsSectionExpander}"
                       IsExpanded="{Binding SectionDisplaySettings.IsExpanded, Mode=TwoWay}">
                 <StackPanel>
                     <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
-                        <TextBlock Text="Theme:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                        <TextBlock Text="{l:Loc theme}" VerticalAlignment="Center" Margin="0,0,8,0"/>
                         <ComboBox ItemsSource="{Binding AvailableThemes}"
                                   SelectedItem="{Binding SelectedThemeName, Mode=TwoWay}"
                                   MinWidth="160"/>
-                        <TextBlock Text="Tab Style:" VerticalAlignment="Center" Margin="20,0,8,0"/>
+                        <TextBlock Text="{l:Loc tabStyle}" VerticalAlignment="Center" Margin="20,0,8,0"/>
                         <ComboBox ItemsSource="{Binding AvailableTabStyles}"
                                   SelectedItem="{Binding SelectedTabStyle, Mode=TwoWay}"
                                   MinWidth="100"/>
-                        <TextBlock Text="NPC Selection Label:" VerticalAlignment="Center" Margin="20,0,8,0"/>
+                        <TextBlock Text="{l:Loc nPCSelectionLabel}" VerticalAlignment="Center" Margin="20,0,8,0"/>
                         <ComboBox ItemsSource="{Binding AvailableNpcSelectionIndicators}"
                                   SelectedItem="{Binding SelectedNpcSelectionIndicator, Mode=TwoWay}"
                                   MinWidth="100"
-                                  ToolTip="Show a colored indicator on NPCs with saved selections. Green = has data, Purple = mugshot only, Red = not in load order."/>
+                                  ToolTip="{l:Loc showAColoredIndicator}"/>
                     </StackPanel>
 
                     <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
-                        <CheckBox Content="Auto-advance after selection" IsChecked="{Binding AutoAdvanceAfterSelection, Mode=TwoWay}"
+                        <CheckBox Content="{l:Loc autoAdvanceAfterSelection}" IsChecked="{Binding AutoAdvanceAfterSelection, Mode=TwoWay}"
                                   VerticalAlignment="Center"
-                                  ToolTip="Automatically advance to the next NPC in the list after selecting a mugshot."/>
+                                  ToolTip="{l:Loc automaticallyAdvanceToThe}"/>
                     </StackPanel>
 
                     <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
-                        <CheckBox Content="Enable Localization"
+                        <CheckBox Content="{l:Loc enableLocalization}"
                                   IsChecked="{Binding IsLocalizationEnabled, Mode=TwoWay}"
                                   VerticalAlignment="Center"/>
 
@@ -1632,93 +1588,159 @@
                                   Visibility="{Binding IsLocalizationEnabled, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                         
                         <CheckBox Margin="5 0 0 0" IsChecked="{Binding FixGarbledText}" 
-                                  Visibility="{Binding IsLocalizationEnabled, Converter={StaticResource BooleanToVisibilityConverter}}"
-                                  ToolTip="If your localized NPC names look garbled, try checking this box to enable the fix.">Fix Encoding</CheckBox>
-                    </StackPanel>
+                                                          Visibility="{Binding IsLocalizationEnabled, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                                          ToolTip="{l:Loc ifYourLocalizedNPC}" Content="{l:Loc fixEncoding}"/>
+                                            </StackPanel>
+
+                                            <!-- UI Language -->
+                                                                                        <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
+                                                                                            <TextBlock Text="{l:Loc uiLanguage}"
+                                                                                                       VerticalAlignment="Center"/>
+                                                                                            <ComboBox ItemsSource="{Binding AvailableUiLanguages}"
+                                                                                                      SelectedItem="{Binding SelectedUiLanguage, Mode=TwoWay}"
+                                                                                                      MinWidth="120"
+                                                                                                      Margin="10,0,0,0"/>
+                                                                                        </StackPanel>
+
+
                     
-                    <CheckBox Content="Don't show me popup warnings for actions with potential side effects"
+                    <CheckBox Content="{l:Loc donTShowMe}"
                               IsChecked="{Binding SuppressPopupWarnings, Mode=TwoWay}"
                               Margin="0,5,0,0"
-                              ToolTip="If checked, confirmation dialogs for potentially risky settings will be suppressed. Only check this if you're sure you understand what you're doing."/>
+                              ToolTip="{l:Loc ifCheckedConfirmationDialogs}"/>
                     
                     <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-                        <TextBlock Text="NPC List Display:" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                        <CheckBox Content="Name" IsChecked="{Binding ShowNpcNameInList, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,10,0" ToolTip="Show the NPC's in-game name."/>
-                        <CheckBox Content="EditorID" IsChecked="{Binding ShowNpcEditorIdInList, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,10,0" ToolTip="Show the NPC's editor ID."/>
-                        <CheckBox Content="FormKey" IsChecked="{Binding ShowNpcFormKeyInList, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,10,0" ToolTip="Show the NPC's FormKey (e.g., 000123AB:Skyrim.esm)."/>
-                        <CheckBox Content="FormID" IsChecked="{Binding ShowNpcFormIdInList, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,10,0" ToolTip="Show the NPC's full FormID based on your load order (e.g., 010123AB)."/>
-                        <CheckBox Content="Template Status" IsChecked="{Binding ShowTemplateStatusInList, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,5,0"
-                                  ToolTip="Show template status icons (T / !) next to NPCs that are used as appearance templates by other NPCs or mods."/>
+                        <TextBlock Text="{l:Loc nPCListDisplay}" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                        <CheckBox Content="{l:Loc name}" IsChecked="{Binding ShowNpcNameInList, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,10,0" ToolTip="{l:Loc showTheNPCS}"/>
+                        <CheckBox Content="{l:Loc editorID}" IsChecked="{Binding ShowNpcEditorIdInList, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,10,0" ToolTip="{l:Loc showTheNPC}"/>
+                        <CheckBox Content="{l:Loc formKey}" IsChecked="{Binding ShowNpcFormKeyInList, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,10,0" ToolTip="{l:Loc showThe}"/>
+                        <CheckBox Content="{l:Loc formID}" IsChecked="{Binding ShowNpcFormIdInList, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,10,0" ToolTip="{l:Loc show}"/>
+                        <CheckBox Content="{l:Loc templateStatus}" IsChecked="{Binding ShowTemplateStatusInList, Mode=TwoWay}" VerticalAlignment="Center" Margin="0,0,5,0"
+                                  ToolTip="{l:Loc showTemplateStatusIcons}"/>
                         <ComboBox ItemsSource="{Binding TemplateIconPositions}"
                                   SelectedItem="{Binding TemplateIconPosition, Mode=TwoWay}"
                                   MinWidth="60" VerticalAlignment="Center" Margin="0,0,10,0"
-                                  ToolTip="Choose whether template icons appear to the left or right of the NPC name."
+                                  ToolTip="{l:Loc chooseWhetherTemplateIcons}"
                                   Visibility="{Binding ShowTemplateStatusInList, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                        <TextBlock Text="Separator:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                        <TextBlock Text="{l:Loc separator}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                         <TextBox Text="{Binding NpcListSeparator, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="30" VerticalAlignment="Center"/>
                     </StackPanel>
                 </StackPanel>
             </Expander>
 
+            <!-- Section: Other Settings -->
+            <Expander Header="{l:Loc otherSettings}" Style="{StaticResource SettingsSectionExpander}"
+                      IsExpanded="{Binding SectionOtherSettings.IsExpanded, Mode=TwoWay}">
+                <StackPanel>
+                    <!-- Pre-translate descriptions to cache -->
+                    <Button Content="{l:Loc preCacheDescriptions}"
+                            Command="{Binding PreCacheDescriptionsCommand}"
+                            HorizontalAlignment="Left"
+                            Margin="0,8,0,0"
+                            Padding="8,3"
+                            ToolTip="{l:Loc preCacheDescriptionsTip}"/>
+
+                    <!-- Backup / restore Settings.json -->
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <Button Content="{l:Loc backupSettings}"
+                                Command="{Binding BackupSettingsCommand}"
+                                HorizontalAlignment="Left"
+                                Padding="8,3"
+                                ToolTip="{l:Loc backupSettingsTip}"/>
+                        <Button Content="{l:Loc restoreSettings}"
+                                Command="{Binding RestoreSettingsCommand}"
+                                HorizontalAlignment="Left"
+                                Margin="8,0,0,0"
+                                Padding="8,3"
+                                ToolTip="{l:Loc restoreSettingsTip}"/>
+                    </StackPanel>
+
+                    <!-- Manual translation: CSV export / import -->
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                        <TextBlock Text="{l:Loc exportGenderFilter}"
+                                   VerticalAlignment="Center"/>
+                        <ComboBox ItemsSource="{Binding ExportGenderFilterOptions}"
+                                  SelectedValuePath="Key"
+                                  DisplayMemberPath="Value"
+                                  SelectedValue="{Binding ExportGenderFilter, Mode=TwoWay}"
+                                  MinWidth="90"
+                                  Margin="8,0,0,0"
+                                  VerticalAlignment="Center"/>
+                        <Button Content="{l:Loc exportDescriptions}"
+                                Command="{Binding ExportDescriptionsCsvCommand}"
+                                HorizontalAlignment="Left"
+                                Margin="8,0,0,0"
+                                Padding="8,3"
+                                ToolTip="{l:Loc exportDescriptionsTip}"/>
+                        <Button Content="{l:Loc importTranslations}"
+                                Command="{Binding ImportTranslationsCsvCommand}"
+                                HorizontalAlignment="Left"
+                                Margin="8,0,0,0"
+                                Padding="8,3"
+                                ToolTip="{l:Loc importTranslationsTip}"/>
+                    </StackPanel>
+                </StackPanel>
+            </Expander>
+
             <!-- Section 4: EasyNPC Transfer -->
-            <Expander Header="EasyNPC Transfer" Style="{StaticResource SettingsSectionExpander}"
+            <Expander Header="{l:Loc easyNPCTransfer}" Style="{StaticResource SettingsSectionExpander}"
                       IsExpanded="{Binding SectionEasyNpcTransfer.IsExpanded, Mode=TwoWay}">
                 <StackPanel>
                     <!-- Import Button -->
-                    <Button Content="Import NPC Appearance Choices from EasyNPC Profile"
+                    <Button Content="{l:Loc importNPCAppearanceChoices}"
                             Command="{Binding ImportEasyNpcCommand}"
                             HorizontalAlignment="Left" Margin="0,0,0,5"
-                            ToolTip="Import settings from a standard EasyNPC profile text file."/>
+                            ToolTip="{l:Loc importSettingsFromA}"/>
 
                     <!-- Export Button -->
-                    <Button Content="Export NPC Appearance Choices To New EasyNPC Profile"
+                    <Button Content="{l:Loc exportNPCAppearanceChoices}"
                             Command="{Binding ExportEasyNpcCommand}"
                             HorizontalAlignment="Left" Margin="0,0,0,5"
-                            ToolTip="Export current settings to a new EasyNPC profile text file."/>
+                            ToolTip="{l:Loc exportCurrentSettingsTo}"/>
 
                     <!-- *** NEW: Update Profile Controls *** -->
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,15">
-                        <Button Content="Update Existing EasyNPC Profile"
+                        <Button Content="{l:Loc updateExistingEasyNPCProfile}"
                                 Command="{Binding UpdateEasyNpcProfileCommand}"
                                 CommandParameter="{Binding AddMissingNpcsOnUpdate}"
-                                ToolTip="Update an existing EasyNPC profile file with current selections."
+                                ToolTip="{l:Loc updateAnExistingEasyNPC}"
                                 VerticalAlignment="Center"/>
-                        <CheckBox Content="Add Missing NPCs?"
+                        <CheckBox Content="{l:Loc addMissingNPCs}"
                                   IsChecked="{Binding AddMissingNpcsOnUpdate, Mode=TwoWay}"
                                   Margin="10,0,0,0"
                                   VerticalAlignment="Center"
-                                  ToolTip="If checked, NPCs selected here but not found in the file will be added."/>
+                                  ToolTip="{l:Loc ifCheckedNPCsSelected}"/>
                     </StackPanel>
                     <!-- *** END: Update Profile Controls *** -->
 
 
                     <!-- NPC Default Plugin Exclusions (Unchanged) -->
-                    <TextBlock Text="NPC Default Plugin Exclusions:" Margin="0,0,0,2"/>
+                    <TextBlock Text="{l:Loc nPCDefaultPluginExclusions}" Margin="0,0,0,2"/>
                     <local:ModSelectorView DataContext="{Binding ExclusionSelectorViewModel}"
                                            Height="180"
                                            Margin="0,0,0,10"
-                                           ToolTip="Select plugins to exclude when determining the 'default' appearance plugin in EasyNPC-like mode."/>
-                    <TextBlock Text="Plugins selected here will be ignored when assigning conflict-winning overrides to EasyNPC's Default Plugin selections" FontSize="10" Foreground="{DynamicResource HintForeground}" TextWrapping="Wrap"/>
+                                           ToolTip="{l:Loc selectPluginsToExclude}"/>
+                    <TextBlock Text="{l:Loc pluginsSelectedHereWill}" FontSize="10" Foreground="{DynamicResource HintForeground}" TextWrapping="Wrap"/>
                 </StackPanel>
             </Expander>
-            <Expander Header="Load Order Import Settings" Style="{StaticResource SettingsSectionExpander}"
+            <Expander Header="{l:Loc loadOrderImportSettings}" Style="{StaticResource SettingsSectionExpander}"
                       IsExpanded="{Binding SectionLoadOrderImport.IsExpanded, Mode=TwoWay}">
                 <StackPanel>
-                    <TextBlock Text="Import Choices from Load Order Exclusions:" Margin="0,0,0,2"/>
+                    <TextBlock Text="{l:Loc importChoicesFromLoad}" Margin="0,0,0,2"/>
                     <local:ModSelectorView DataContext="{Binding ImportFromLoadOrderExclusionSelectorViewModel}"
                                            Height="180"
                                            Margin="0,0,0,10"
-                                           ToolTip="Select plugins to exclude when using the 'Import Choices from Load Order' feature."/>
-                    <TextBlock Text="When importing choices from your load order, winning override plugins selected here will be ignored, and the next available override will be chosen instead." FontSize="10" Foreground="{DynamicResource HintForeground}" TextWrapping="Wrap"/>
+                                           ToolTip="{l:Loc selectPluginsTo}"/>
+                    <TextBlock Text="{l:Loc whenImportingChoicesFrom}" FontSize="10" Foreground="{DynamicResource HintForeground}" TextWrapping="Wrap"/>
                 </StackPanel>
             </Expander>
-            <Expander Header="Mod Import Settings" Style="{StaticResource SettingsSectionExpander}"
+            <Expander Header="{l:Loc modImportSettings}" Style="{StaticResource SettingsSectionExpander}"
                       Margin="0,5,0,10"
                       IsExpanded="{Binding SectionModImport.IsExpanded, Mode=TwoWay}">
                 <StackPanel>
-                    <TextBlock Text="Non-Appearance Mods:" Margin="0,0,0,2"/>
+                    <TextBlock Text="{l:Loc nonAppearanceMods}" Margin="0,0,0,2"/>
 
-                    <TextBlock Text="The highlighted mods could not be scanned due to missing masters. Install the listed masters as separate mod folders and click the refresh button to re-scan."
+                    <TextBlock Text="{l:Loc theHighlightedModsCould}"
                                Foreground="{DynamicResource StatusErrorForeground}"
                                TextWrapping="Wrap"
                                FontStyle="Italic"
@@ -1726,7 +1748,7 @@
                                Margin="0,0,0,4"
                                Visibility="{Binding HasMissingMasterMods, Converter={StaticResource BooleanToVisibilityConverter}}"/>
 
-                    <TextBox Text="{Binding NonAppearanceModFilterText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,3" ToolTip="Filter the list of non-appearance mods below."/>
+                    <TextBox Text="{Binding NonAppearanceModFilterText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,3" ToolTip="{l:Loc filterTheListOfNon2}"/>
 
                           <ListBox ItemsSource="{Binding FilteredNonAppearanceMods}" Height="150" HorizontalContentAlignment="Stretch" BorderThickness="1">
                 <ListBox.ItemTemplate>
@@ -1757,7 +1779,7 @@
                                     Content="🔄"
                                     Command="{Binding DataContext.RescanCachedModCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
                                     CommandParameter="{Binding Path}"
-                                    ToolTip="Re-scan this folder to check if it is now an appearance mod"
+                                    ToolTip="{l:Loc reScanThisFolder}"
                                     FontWeight="Bold"
                                     Cursor="Hand"
                                     Margin="10,0,0,0"
@@ -1804,9 +1826,7 @@
                 </ListBox.ItemTemplate>
             </ListBox>
 
-                    <TextBlock Text="These mods have been auto-determined to not provide NPC replacers.
-Mouse over each entry to see the reason.
-Delete a mod if you want to re-scan it."
+                    <TextBlock Text="{l:Loc theseModsHaveBeen}"
                                FontSize="10" 
                                Foreground="{DynamicResource HintForeground}" 
                   
@@ -1815,8 +1835,8 @@ Delete a mod if you want to re-scan it."
 
                     <Separator Margin="0,12,0,8"/>
 
-                    <TextBlock Text="Ignored Mods:" Margin="0,0,0,2"/>
-                    <TextBox Text="{Binding IgnoredModFilterText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,3" ToolTip="Filter the list of ignored mods below."/>
+                    <TextBlock Text="{l:Loc ignoredMods}" Margin="0,0,0,2"/>
+                    <TextBox Text="{Binding IgnoredModFilterText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,3" ToolTip="{l:Loc filterTheListOfIgnored2}"/>
 
                     <ListBox ItemsSource="{Binding FilteredIgnoredMods}" Height="150" HorizontalContentAlignment="Stretch" BorderThickness="1">
                         <ListBox.ItemTemplate>
@@ -1860,14 +1880,13 @@ Delete a mod if you want to re-scan it."
                         </ListBox.ItemTemplate>
                     </ListBox>
 
-                    <Button Content="Add Folder(s)..."
+                    <Button Content="{l:Loc addFolderS}"
                             Command="{Binding AddIgnoredModCommand}"
                             Margin="0,4,0,0"
                             HorizontalAlignment="Left"
                             Padding="10,3"
-                            ToolTip="Select folder(s) to ignore during mod import"/>
-                    <TextBlock Text="Mods added here will be skipped during import. If a mod is already loaded, it will be removed.
-Remove a mod from this list to allow it to be imported again."
+                            ToolTip="{l:Loc selectFolderSTo}"/>
+                    <TextBlock Text="{l:Loc modsAddedHereWill}"
                                FontSize="10"
                                Foreground="{DynamicResource HintForeground}"
                                TextWrapping="Wrap"
@@ -1879,24 +1898,24 @@ Remove a mod from this list to allow it to be imported again."
                          explains the outcome of the mod import the rest of this section configures.
                          Reads the "Rejected NPCs" folder written during mod analysis; the read is
                          deferred until this expander is first opened (see VM_Settings). -->
-                    <Expander Header="Rejected NPCs" Style="{StaticResource SettingsSectionExpander}"
+                    <Expander Header="{l:Loc rejectedNPCs}" Style="{StaticResource SettingsSectionExpander}"
                               Margin="0,0,0,0"
                               IsExpanded="{Binding SectionRejectedNpcs.IsExpanded, Mode=TwoWay}">
                         <StackPanel DataContext="{Binding RejectedNpcs}">
                             <TextBlock TextWrapping="Wrap" FontSize="10"
                                        Foreground="{DynamicResource HintForeground}"
                                        Margin="0,0,0,6"
-                                       Text="NPCs that were discarded while analyzing your mods, and why. Select a mod or an NPC on the left to see the reason on the right. Re-scan your mods and click Refresh to bring this up to date."/>
+                                       Text="{l:Loc nPCsThatWereDiscarded}"/>
 
                             <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
-                                <Button Content="Refresh"
+                                <Button Content="{l:Loc refresh}"
                                         Command="{Binding RefreshCommand}"
                                         Padding="10,3"
-                                        ToolTip="Re-read the 'Rejected NPCs' folder."/>
-                                <Button Content="Open Folder"
+                                        ToolTip="{l:Loc reReadTheRejected}"/>
+                                <Button Content="{l:Loc openFolder}"
                                         Command="{Binding OpenFolderCommand}"
                                         Padding="10,3" Margin="6,0,0,0"
-                                        ToolTip="Open the 'Rejected NPCs' folder (next to the application) in Explorer."/>
+                                        ToolTip="{l:Loc openTheRejectedNPCs}"/>
                                 <TextBlock Text="{Binding StatusText}"
                                            VerticalAlignment="Center" Margin="10,0,0,0"
                                            TextWrapping="Wrap"
@@ -1905,7 +1924,7 @@ Remove a mod from this list to allow it to be imported again."
 
                             <TextBox Text="{Binding FilterText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged, Delay=250}"
                                      Margin="0,0,0,3"
-                                     ToolTip="Filter by mod name, NPC name / EditorID / FormKey, or rejection reason."/>
+                                     ToolTip="{l:Loc filterByModName}"/>
 
                             <Grid Height="320">
                                 <Grid.ColumnDefinitions>
@@ -2056,7 +2075,7 @@ Remove a mod from this list to allow it to be imported again."
                                         BorderThickness="1"
                                         Padding="8">
                                     <Grid>
-                                        <TextBlock Text="Select a mod or an NPC on the left to see why it was rejected."
+                                        <TextBlock Text="{l:Loc selectAModOr}"
                                                    Foreground="{DynamicResource HintForeground}"
                                                    TextWrapping="Wrap"
                                                    Visibility="{Binding HasNoSelection, Converter={StaticResource BooleanToVisibilityConverter}}"/>
@@ -2090,56 +2109,56 @@ Remove a mod from this list to allow it to be imported again."
                 </StackPanel>
             </Expander>
 
-            <Expander Header="Spawn Bat File Options" Style="{StaticResource SettingsSectionExpander}"
+            <Expander Header="{l:Loc spawnBatFileOptions}" Style="{StaticResource SettingsSectionExpander}"
                       IsExpanded="{Binding SectionSpawnBatFile.IsExpanded, Mode=TwoWay}">
                 <StackPanel>
-                    <TextBlock Text="Console Commands Before Spawning:" Margin="0,0,0,2"/>
+                    <TextBlock Text="{l:Loc consoleCommandsBeforeSpawning}" Margin="0,0,0,2"/>
                     <TextBox 
                         Text="{Binding BatFilePreCommands, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                         AcceptsReturn="True"
                         TextWrapping="Wrap"
                         Height="80"
                         VerticalScrollBarVisibility="Auto"
-                        ToolTip="Enter any console commands you want to execute BEFORE the player.placeatme commands in the generated file."/>
+                        ToolTip="{l:Loc enterAnyConsoleCommands}"/>
 
-                    <TextBlock Text="Console Commands After Spawning:" Margin="0,10,0,2"/>
+                    <TextBlock Text="{l:Loc consoleCommandsAfterSpawning}" Margin="0,10,0,2"/>
                     <TextBox 
                         Text="{Binding BatFilePostCommands, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                         AcceptsReturn="True"
                         TextWrapping="Wrap"
                         Height="80"
                         VerticalScrollBarVisibility="Auto"
-                        ToolTip="Enter any console commands you want to execute AFTER the player.placeatme commands."/>
+                        ToolTip="{l:Loc enterAnyConsole}"/>
                 </StackPanel>
             </Expander>
             
-            <Expander Header="Logging" Style="{StaticResource SettingsSectionExpander}"
+            <Expander Header="{l:Loc logging}" Style="{StaticResource SettingsSectionExpander}"
                       IsExpanded="{Binding SectionLogging.IsExpanded, Mode=TwoWay}">
                 <StackPanel>
-                    <CheckBox Content="Log Activity"
+                    <CheckBox Content="{l:Loc logActivity}"
                               IsChecked="{Binding LogActivity, Mode=TwoWay}"
-                              ToolTip="Enables detailed logging of application activity to EventLog.html (next to the .exe) to help diagnose issues. Open the file in any web browser."/>
-                    <CheckBox Content="Log Startup"
+                              ToolTip="{l:Loc enablesDetailedLoggingOf}"/>
+                    <CheckBox Content="{l:Loc logStartup}"
                               IsChecked="{Binding LogStartup, Mode=TwoWay}"
                               Margin="0,5,0,0"
-                              ToolTip="Logs detailed startup operations to StartupLog.html on next launch (open it in any web browser). Useful for diagnosing startup hangs. Can also be triggered by placing a LogStartup.txt file next to the .exe."/>
-                    <CheckBox Content="Log Record Provenance"
+                              ToolTip="{l:Loc logsDetailedStartupOperations}"/>
+                    <CheckBox Content="{l:Loc logRecordProvenance}"
                               IsChecked="{Binding LogRecordProvenance, Mode=TwoWay}"
                               Margin="0,5,0,0"
-                              ToolTip="When on, a patch run writes RecordProvenance.csv next to the .exe: one row per record merged into the output plugin (excluding the patched NPC records themselves) — its FormKey, EditorID, record type, and the full chain of references that pulled it in, from the root NPC down to the record. Open in a spreadsheet and sort/filter by any column. Takes effect on the next Run — no restart needed. Useful for tracing why a particular record ended up in your output plugin."/>
-                    <CheckBox Content="Log Asset Provenance"
+                              ToolTip="{l:Loc whenOnAPatch}"/>
+                    <CheckBox Content="{l:Loc logAssetProvenance}"
                               IsChecked="{Binding LogAssetProvenance, Mode=TwoWay}"
                               Margin="0,5,0,0"
-                              ToolTip="When on, a patch run writes AssetProvenance.csv next to the .exe: one row per asset file copied into the output — which NPC, mod, and (for plugin-referenced assets) which record pulled it in, plus its source (loose or BSA). Open in a spreadsheet and sort/filter by any column. Takes effect on the next Run — no restart needed. Useful for tracing why a particular texture/mesh ended up in your output."/>
+                              ToolTip="{l:Loc whenOnA}"/>
 
                     <Separator Margin="0,10,0,8"/>
 
-                    <TextBlock Text="Per-NPC Patch / Validation Logs" FontWeight="Bold"/>
+                    <TextBlock Text="{l:Loc perNPCPatchValidation}" FontWeight="Bold"/>
                     <TextBlock TextWrapping="Wrap" Opacity="0.8" Margin="0,2,0,6"
-                               Text="For each NPC in the list below, the Validator and Patcher write a full activity trace — every change to the NPC record plus the dependency merge-in logic (discovered records, abort conditions) — to 'NPC Logs\{NPC}.html' next to the application (open it in any web browser). Files are overwritten at the start of each run. Search the NPCs you've made a selection for (by name, EditorID, or FormKey) and click a result to add it."/>
+                               Text="{l:Loc forEachNPCIn}"/>
 
                     <TextBox Text="{Binding NpcLogSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                             ToolTip="Type to search NPCs you've made a selection for, by name, EditorID, or FormKey."/>
+                             ToolTip="{l:Loc typeToSearchNPCs}"/>
 
                     <!-- Clickable search matches -->
                     <ListBox ItemsSource="{Binding NpcLogSearchResults}"
@@ -2154,7 +2173,7 @@ Remove a mod from this list to allow it to be imported again."
                                         Padding="2,1"
                                         Command="{Binding DataContext.AddNpcToLogCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
                                         CommandParameter="{Binding}"
-                                        ToolTip="Click to add this NPC to the per-NPC log list">
+                                        ToolTip="{l:Loc clickToAddThis}">
                                     <Button.Template>
                                         <ControlTemplate TargetType="Button">
                                             <Border Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
@@ -2204,7 +2223,7 @@ Remove a mod from this list to allow it to be imported again."
                                             Cursor="Hand"
                                             Margin="5,0,0,0"
                                             VerticalAlignment="Center"
-                                            ToolTip="Remove this NPC from the per-NPC log list">
+                                            ToolTip="{l:Loc removeThisNPCFrom}">
                                         <Button.Style>
                                             <Style TargetType="Button">
                                                 <Setter Property="Background" Value="Transparent"/>

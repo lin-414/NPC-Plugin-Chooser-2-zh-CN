@@ -7,9 +7,10 @@
         xmlns:vm="clr-namespace:NPC_Plugin_Chooser_2.View_Models"
         xmlns:themes="clr-namespace:NPC_Plugin_Chooser_2.Themes"
         xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
         mc:Ignorable="d"
         Style="{DynamicResource ThemedWindowStyle}"
-        Title="Randomize Appearances" Height="640" Width="470" MinWidth="380" MinHeight="460"
+        Title="{l:Loc randomizeAppearances}" Height="640" Width="470" MinWidth="380" MinHeight="460"
         WindowStartupLocation="CenterOwner"
         d:DataContext="{d:DesignInstance Type=vm:VM_RandomizeOptions}">
 
@@ -25,14 +26,14 @@
     <DockPanel Margin="12">
         <!-- Action buttons -->
         <DockPanel DockPanel.Dock="Bottom" Margin="0,12,0,0">
-            <Button Content="Clear Randomized NPCs" DockPanel.Dock="Left" HorizontalAlignment="Left" Padding="8,3"
+            <Button Content="{l:Loc clearRandomizedNPCs}" DockPanel.Dock="Left" HorizontalAlignment="Left" Padding="8,3"
                     Command="{Binding ClearRandomizedNpcsCommand}"
-                    ToolTip="Deselect every NPC whose appearance was set by randomization and remove any shared appearance options that randomization added. Manual selections and manual shares are preserved."/>
+                    ToolTip="{l:Loc deselectEveryNPCWhose}"/>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                <Button Content="Randomize" MinWidth="90" Margin="5,0" IsDefault="True"
+                <Button Content="{l:Loc randomize}" MinWidth="90" Margin="5,0" IsDefault="True"
                         Command="{Binding OkCommand}"
                         CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=Window}}"/>
-                <Button Content="Cancel" MinWidth="90" Margin="5,0" IsCancel="True"
+                <Button Content="{l:Loc cancel}" MinWidth="90" Margin="5,0" IsCancel="True"
                         Command="{Binding CancelCommand}"
                         CommandParameter="{Binding RelativeSource={RelativeSource AncestorType=Window}}"/>
             </StackPanel>
@@ -41,11 +42,11 @@
         <!-- Options above the mod list -->
         <StackPanel DockPanel.Dock="Top">
             <!-- Scope -->
-            <TextBlock Text="Apply to:" FontWeight="Bold" Margin="0,0,0,4"/>
+            <TextBlock Text="{l:Loc applyTo}" FontWeight="Bold" Margin="0,0,0,4"/>
             <StackPanel Orientation="Horizontal" Margin="6,0,0,8">
-                <RadioButton Content="Visible (Filtered) NPCs" GroupName="Scope" Margin="0,0,15,0"
+                <RadioButton Content="{l:Loc visibleFilteredNPCs}" GroupName="{l:Loc scope}" Margin="0,0,15,0"
                              IsChecked="{Binding Scope, Converter={StaticResource EnumMatchToBooleanConverter}, ConverterParameter=VisibleNpcs}"/>
-                <RadioButton Content="All NPCs" GroupName="Scope"
+                <RadioButton Content="{l:Loc allNPCs}" GroupName="{l:Loc scope}"
                              IsChecked="{Binding Scope, Converter={StaticResource EnumMatchToBooleanConverter}, ConverterParameter=AllNpcs}"/>
             </StackPanel>
 
@@ -53,44 +54,44 @@
 
             <!-- Base appearance -->
             <CheckBox IsChecked="{Binding AllowBaseMod}" Margin="0,0,0,6"
-                      Content="Allow base appearance"
-                      ToolTip="If unchecked, a non-base (modded) appearance is chosen whenever one exists. Base = the appearance from the NPC's own source plugin (Base Game / Creation Club / the mod that adds the NPC). NPCs with only a base option are left unassigned."/>
+                      Content="{l:Loc allowBaseAppearance}"
+                      ToolTip="{l:Loc ifUncheckedANon}"/>
 
             <!-- Shared appearances -->
             <CheckBox IsChecked="{Binding AllowSharedAppearance}" Margin="0,0,0,4"
-                      Content="Allow shared appearances"
-                      ToolTip="Allow borrowing a face from another NPC (a 'guest'/shared appearance), in addition to the NPC's own faces."/>
+                      Content="{l:Loc allowSharedAppearances}"
+                      ToolTip="{l:Loc allowBorrowingAFace}"/>
 
             <Border Margin="18,0,0,6" Padding="8,6" BorderBrush="Gray" BorderThickness="1" CornerRadius="3"
                     Visibility="{Binding AllowSharedAppearance, Converter={StaticResource BooleanToVisibilityConverter}}">
                 <StackPanel>
                     <CheckBox IsChecked="{Binding ForceSharedAppearance}" Margin="0,0,0,4"
-                              Content="Force shared appearance"
-                              ToolTip="If checked, only borrowed faces from other NPCs are used (the NPC's own faces are excluded)."/>
+                              Content="{l:Loc forceSharedAppearance}"
+                              ToolTip="{l:Loc ifCheckedOnlyBorrowed}"/>
                     <CheckBox IsChecked="{Binding ShareFromSameRace}" Margin="0,0,0,4"
-                              Content="Match race"
-                              ToolTip="Only faces from NPCs of the same race as the target are eligible to be shared. If no same-race face exists among the share sources, the NPC is skipped."/>
+                              Content="{l:Loc matchRace}"
+                              ToolTip="{l:Loc onlyFacesFromNPCs}"/>
                     <CheckBox IsChecked="{Binding ShareFromSameGender}" Margin="0,0,0,4"
-                              Content="Match gender"
-                              ToolTip="Only faces from NPCs of the same gender as the target are eligible to be shared."/>
+                              Content="{l:Loc matchGender}"
+                              ToolTip="{l:Loc onlyFacesFrom}"/>
                     <CheckBox IsChecked="{Binding ShareFromSameWeight}" Margin="0,0,0,4"
-                              Content="Match weight"
-                              ToolTip="Only faces from NPCs whose Weight exactly matches the target are eligible to be shared."/>
+                              Content="{l:Loc matchWeight}"
+                              ToolTip="{l:Loc onlyFaces}"/>
                     <CheckBox IsChecked="{Binding AllowDuplicateShares}"
-                              Content="Allow duplicate shares"
-                              ToolTip="If unchecked, the same source NPC + appearance is shared to at most one target NPC (no two NPCs get the same borrowed face)."/>
+                              Content="{l:Loc allowDuplicateShares}"
+                              ToolTip="{l:Loc ifUncheckedTheSame}"/>
                 </StackPanel>
             </Border>
 
             <!-- Single-option NPCs -->
             <CheckBox IsChecked="{Binding AllowSingleOptionNpcs}" Margin="0,0,0,6"
-                      Content="Allow single-option NPCs"
-                      ToolTip="If unchecked, an NPC that has exactly one eligible appearance under these options is left out of the run entirely — there is nothing to randomize between, so its current selection is kept as-is. If checked, that single appearance is assigned to it."/>
+                      Content="{l:Loc allowSingleOptionNPCs}"
+                      ToolTip="{l:Loc ifUncheckedAnNPC}"/>
 
             <Separator Margin="0,2,0,8"/>
 
             <!-- Appearance source -->
-            <TextBlock Text="Appearance source:" FontWeight="Bold" Margin="0,0,0,4"/>
+            <TextBlock Text="{l:Loc appearanceSource}" FontWeight="Bold" Margin="0,0,0,4"/>
             <ComboBox Margin="6,0,0,8" HorizontalAlignment="Left" MinWidth="200"
                       ItemsSource="{Binding AvailableAppearanceSources}"
                       SelectedValuePath="Value"
@@ -106,20 +107,20 @@
             </Grid.RowDefinitions>
 
             <DockPanel Grid.Row="0" Margin="0,2,0,4">
-                <TextBlock Text="Eligible mods:" FontWeight="Bold" VerticalAlignment="Center" DockPanel.Dock="Left"/>
+                <TextBlock Text="{l:Loc eligibleMods}" FontWeight="Bold" VerticalAlignment="Center" DockPanel.Dock="Left"/>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" DockPanel.Dock="Right">
-                    <Button Content="Select All" Padding="6,1" Margin="0,0,4,0" Command="{Binding SelectAllCommand}"
-                            ToolTip="Check every mod in the list."/>
-                    <Button Content="Select Visible" Padding="6,1" Margin="0,0,4,0" Command="{Binding SelectVisibleCommand}"
-                            ToolTip="Check every mod currently shown by the filter."/>
-                    <Button Content="Select None" Padding="6,1" Command="{Binding SelectNoneCommand}"
-                            ToolTip="Uncheck every mod in the list."/>
+                    <Button Content="{l:Loc selectAll}" Padding="6,1" Margin="0,0,4,0" Command="{Binding SelectAllCommand}"
+                            ToolTip="{l:Loc checkEveryModIn}"/>
+                    <Button Content="{l:Loc selectVisible}" Padding="6,1" Margin="0,0,4,0" Command="{Binding SelectVisibleCommand}"
+                            ToolTip="{l:Loc checkEveryModCurrently}"/>
+                    <Button Content="{l:Loc selectNone}" Padding="6,1" Command="{Binding SelectNoneCommand}"
+                            ToolTip="{l:Loc uncheckEveryModIn}"/>
                 </StackPanel>
             </DockPanel>
 
             <TextBox Grid.Row="1" Margin="0,0,0,4"
                      Text="{Binding ModFilterText, UpdateSourceTrigger=PropertyChanged}"
-                     ToolTip="Filter the mod list below."/>
+                     ToolTip="{l:Loc filterThe}"/>
 
             <Border Grid.Row="2" BorderBrush="Gray" BorderThickness="1" CornerRadius="2">
                 <ListBox ItemsSource="{Binding FilteredMods}"

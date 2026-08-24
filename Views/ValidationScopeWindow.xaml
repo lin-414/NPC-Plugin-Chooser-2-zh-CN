@@ -6,9 +6,10 @@
         xmlns:vm="clr-namespace:NPC_Plugin_Chooser_2.View_Models"
         xmlns:themes="clr-namespace:NPC_Plugin_Chooser_2.Themes"
         xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
         mc:Ignorable="d"
         d:DataContext="{d:DesignInstance Type=vm:VM_ValidationScopeWindow}"
-        Title="Validate Output — Choose NPCs"
+        Title="{l:Loc validateOutputChooseNPCs}"
         Height="560" Width="640"
         WindowStartupLocation="CenterOwner"
         MinHeight="400" MinWidth="480"
@@ -31,11 +32,11 @@
         <TextBlock Grid.Row="0" Text="{Binding SummaryText}" Margin="0,0,0,10" FontWeight="SemiBold"/>
 
         <RadioButton Grid.Row="1" GroupName="Scope"
-                     Content="Validate ALL NPCs with selections"
+                     Content="{l:Loc validateALLNPCsWith}"
                      IsChecked="{Binding ScopeAllSelected, Mode=TwoWay}"
                      Margin="0,0,0,4"/>
         <RadioButton Grid.Row="2" GroupName="Scope"
-                     Content="Validate only the NPCs I pick below"
+                     Content="{l:Loc validateOnlyTheNPCs}"
                      IsChecked="{Binding ScopeSubset, Mode=TwoWay}"
                      Margin="0,0,0,8"/>
 
@@ -49,9 +50,9 @@
             <TextBox Grid.Column="0"
                      Text="{Binding SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                      VerticalContentAlignment="Center"
-                     ToolTip="Filter by NPC name, FormKey, or selected mod"/>
-            <Button Grid.Column="1" Content="Check Visible" Command="{Binding CheckAllVisibleCommand}" Margin="6,0,0,0" Padding="8,2"/>
-            <Button Grid.Column="2" Content="Uncheck Visible" Command="{Binding UncheckAllVisibleCommand}" Margin="6,0,0,0" Padding="8,2"/>
+                     ToolTip="{l:Loc filterByNPCName}"/>
+            <Button Grid.Column="1" Content="{l:Loc checkVisible}" Command="{Binding CheckAllVisibleCommand}" Margin="6,0,0,0" Padding="8,2"/>
+            <Button Grid.Column="2" Content="{l:Loc uncheckVisible}" Command="{Binding UncheckAllVisibleCommand}" Margin="6,0,0,0" Padding="8,2"/>
         </Grid>
 
         <Border Grid.Row="4" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1">
@@ -78,8 +79,8 @@
         </Border>
 
         <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-            <Button Content="Validate" Click="OkButton_Click" Width="100" Height="30" IsDefault="True"/>
-            <Button Content="Cancel" Click="CancelButton_Click" Width="100" Height="30" Margin="10,0,0,0" IsCancel="True"/>
+            <Button Content="{l:Loc validate}" Click="OkButton_Click" Width="100" Height="30" IsDefault="True"/>
+            <Button Content="{l:Loc cancel}" Click="CancelButton_Click" Width="100" Height="30" Margin="10,0,0,0" IsCancel="True"/>
         </StackPanel>
     </Grid>
 </Window>

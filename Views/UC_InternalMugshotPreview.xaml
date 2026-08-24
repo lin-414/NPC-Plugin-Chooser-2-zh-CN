@@ -6,6 +6,7 @@
              xmlns:vm="clr-namespace:NPC_Plugin_Chooser_2.View_Models"
              xmlns:glWpf="clr-namespace:OpenTK.Wpf;assembly=GLWpfControl"
              xmlns:cvrv="clr-namespace:CharacterViewer.Rendering.Views;assembly=CharacterViewer.Rendering"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
              mc:Ignorable="d"
              d:DesignHeight="540" d:DesignWidth="600"
              d:DataContext="{d:DesignInstance Type=vm:VM_InternalMugshotPreview}">
@@ -32,7 +33,7 @@
              fires a re-load via ReloadRequested. -->
         <Border x:Name="SettingsToolbar" Grid.Row="0" Padding="6" BorderBrush="Gray" BorderThickness="0,0,0,1">
             <StackPanel Orientation="Horizontal">
-                <Button Content="Load Selected NPC" Command="{Binding LoadSelectedNpcCommand}" Padding="6,2" Margin="0,0,12,0"/>
+                <Button Content="{l:Loc loadSelectedNPC}" Command="{Binding LoadSelectedNpcCommand}" Padding="6,2" Margin="0,0,12,0"/>
             </StackPanel>
         </Border>
 
@@ -70,7 +71,7 @@
             <!-- Loading dim -->
             <Border Background="#80000000"
                     Visibility="{Binding Viewer.IsLoading, Converter={StaticResource BooleanToVisibilityConverter}, FallbackValue=Collapsed}">
-                <TextBlock Text="Loading…" Foreground="White" FontSize="20"
+                <TextBlock Text="{l:Loc loading}" Foreground="White" FontSize="20"
                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
 
@@ -83,13 +84,13 @@
                 <Border x:Name="AttireTogglePanel"
                         Background="#A0000000" CornerRadius="4" Padding="8,6">
                     <StackPanel Orientation="Vertical">
-                        <CheckBox Content="Include Default Outfit" Foreground="White"
+                        <CheckBox Content="{l:Loc includeDefaultOutfit}" Foreground="White"
                                   IsChecked="{Binding IncludeDefaultOutfit}"
-                                  ToolTip="Render the NPC's default outfit. Body-covering armor hides the nude body."/>
-                        <CheckBox Content="Include headgear" Foreground="White" Margin="0,4,0,0"
+                                  ToolTip="{l:Loc renderTheNPCS}"/>
+                        <CheckBox Content="{l:Loc includeHeadgear2}" Foreground="White" Margin="0,4,0,0"
                                   IsChecked="{Binding IncludeHeadgear}"
                                   Visibility="{Binding IncludeDefaultOutfit, Converter={StaticResource BooleanToVisibilityConverter}}"
-                                  ToolTip="Render worn/outfit head gear (helmets/hoods/circlets). Hair is hidden under headgear."/>
+                                  ToolTip="{l:Loc renderWornOutfitHead}"/>
                     </StackPanel>
                 </Border>
 
@@ -97,7 +98,7 @@
                      the NPC's WornArmor carries no hair-slot ArmorAddons). Unlike
                      the antler selector, auto-detected rows stay toggleable:
                      unchecking one vetoes a scan false positive. -->
-                <Button Content="Set Wig Meshes" Margin="0,6,0,0" HorizontalAlignment="Left" Padding="6,2"
+                <Button Content="{l:Loc setWigMeshes}" Margin="0,6,0,0" HorizontalAlignment="Left" Padding="6,2"
                         Command="{Binding ToggleWigSelectorCommand}"
                         Visibility="{Binding IsWigSelectorAvailable, Converter={StaticResource BooleanToVisibilityConverter}, FallbackValue=Collapsed}"/>
 
@@ -105,11 +106,11 @@
                         Background="#E0202020" CornerRadius="4" Padding="8"
                         Visibility="{Binding ShowWigSelector, Converter={StaticResource BooleanToVisibilityConverter}, FallbackValue=Collapsed}">
                     <DockPanel>
-                        <TextBlock DockPanel.Dock="Top" Text="Skin-carried wig meshes" Foreground="White"
+                        <TextBlock DockPanel.Dock="Top" Text="{l:Loc skinCarriedWigMeshes}" Foreground="White"
                                    FontWeight="Bold" Margin="0,0,0,4"/>
                         <TextBlock DockPanel.Dock="Top" TextWrapping="Wrap" Foreground="#CCCCCC" FontSize="11"
                                    Margin="0,0,0,6"
-                                   Text="Hair meshes carried in this NPC's skin (worn armor). Hover a row to highlight it in the preview. Checked rows are treated as wigs — with this mod's Wig Handling Mode set to Convert To Head Parts they become real hair on the patched NPC. Uncheck an auto-detected row if it is not actually a wig."/>
+                                   Text="{l:Loc hairMeshesCarriedIn}"/>
                         <ListBox ItemsSource="{Binding WigArmatureCandidates}" Background="Transparent"
                                  BorderThickness="0" MaxHeight="300"
                                  ScrollViewer.VerticalScrollBarVisibility="Auto">
@@ -128,12 +129,12 @@
                                         <StackPanel Orientation="Horizontal">
                                             <CheckBox IsChecked="{Binding IsChecked, Mode=TwoWay}"
                                                       VerticalAlignment="Center"
-                                                      ToolTip="Checked = this skin-carried hair mesh is a wig (converted to head parts when the mod's Wig Handling Mode is Convert To Head Parts)."/>
+                                                      ToolTip="{l:Loc checkedThisSkinCarried}"/>
                                             <TextBlock Text="{Binding DisplayName}" Foreground="White"
                                                        Margin="6,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
-                                            <TextBlock Text="(auto)" Foreground="#66CCFF" FontSize="10"
+                                            <TextBlock Text="{l:Loc auto}" Foreground="#66CCFF" FontSize="10"
                                                        Margin="6,0,0,0" VerticalAlignment="Center"
-                                                       ToolTip="Detected by the scan (hair biped slot in the worn armor). Uncheck to mark it as NOT a wig."
+                                                       ToolTip="{l:Loc detectedByTheScan}"
                                                        Visibility="{Binding IsAutoDetected, Converter={StaticResource BooleanToVisibilityConverter}, FallbackValue=Collapsed}"/>
                                         </StackPanel>
                                     </Border>
@@ -145,7 +146,7 @@
 
                 <!-- "Set Antler Head Parts" selector (per-tile 3D popup only; hidden
                      when the NPC has no head parts or on the Settings-tab preview). -->
-                <Button Content="Set Antler Head Parts" Margin="0,6,0,0" HorizontalAlignment="Left" Padding="6,2"
+                <Button Content="{l:Loc setAntlerHeadParts}" Margin="0,6,0,0" HorizontalAlignment="Left" Padding="6,2"
                         Command="{Binding ToggleAntlerSelectorCommand}"
                         Visibility="{Binding IsAntlerSelectorAvailable, Converter={StaticResource BooleanToVisibilityConverter}, FallbackValue=Collapsed}"/>
 
@@ -153,11 +154,11 @@
                         Background="#E0202020" CornerRadius="4" Padding="8"
                         Visibility="{Binding ShowAntlerSelector, Converter={StaticResource BooleanToVisibilityConverter}, FallbackValue=Collapsed}">
                     <DockPanel>
-                        <TextBlock DockPanel.Dock="Top" Text="Antler head parts" Foreground="White"
+                        <TextBlock DockPanel.Dock="Top" Text="{l:Loc antlerHeadParts}" Foreground="White"
                                    FontWeight="Bold" Margin="0,0,0,4"/>
                         <TextBlock DockPanel.Dock="Top" TextWrapping="Wrap" Foreground="#CCCCCC" FontSize="11"
                                    Margin="0,0,0,6"
-                                   Text="Hover a head part or shape to highlight it in the preview. Check a shape to strip it from the output; check a whole head part to remove all of its shapes. This mod's Antler Handling Mode must be Remove for the removal to apply."/>
+                                   Text="{l:Loc hoverAHeadPart}"/>
                         <ListBox ItemsSource="{Binding AntlerHeadPartCandidates}" Background="Transparent"
                                  BorderThickness="0" MaxHeight="300"
                                  ScrollViewer.VerticalScrollBarVisibility="Auto">
@@ -182,14 +183,14 @@
                                                 <CheckBox IsChecked="{Binding IsChecked, Mode=TwoWay}"
                                                           IsThreeState="False"
                                                           IsEnabled="{Binding CanToggle}" VerticalAlignment="Center"
-                                                          ToolTip="Remove the entire head part (its record reference and all baked shapes)."/>
+                                                          ToolTip="{l:Loc removeTheEntireHead}"/>
                                                 <TextBlock Text="{Binding DisplayName}" Foreground="White"
                                                            Margin="6,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
                                                 <TextBlock Text="{Binding TypeLabel}" Foreground="#999999" FontSize="10"
                                                            Margin="6,0,0,0" VerticalAlignment="Center"/>
-                                                <TextBlock Text="(auto)" Foreground="#66CCFF" FontSize="10"
+                                                <TextBlock Text="{l:Loc auto}" Foreground="#66CCFF" FontSize="10"
                                                            Margin="6,0,0,0" VerticalAlignment="Center"
-                                                           ToolTip="Keyword-detected antler — always removed when the mode is Remove."
+                                                           ToolTip="{l:Loc keywordDetectedAntlerAlways}"
                                                            Visibility="{Binding IsAutoDetected, Converter={StaticResource BooleanToVisibilityConverter}, FallbackValue=Collapsed}"/>
                                             </StackPanel>
                                         </Border>
@@ -210,9 +211,9 @@
                                                                       VerticalAlignment="Center"/>
                                                             <TextBlock Text="{Binding DisplayName}" Foreground="#DDDDDD"
                                                                        Margin="6,0,0,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
-                                                            <TextBlock Text="(auto)" Foreground="#66CCFF" FontSize="10"
+                                                            <TextBlock Text="{l:Loc auto}" Foreground="#66CCFF" FontSize="10"
                                                                        Margin="6,0,0,0" VerticalAlignment="Center"
-                                                                       ToolTip="Keyword-detected antler — always removed when the mode is Remove."
+                                                                       ToolTip="{l:Loc keywordDetectedAntlerAlways}"
                                                                        Visibility="{Binding IsAutoDetected, Converter={StaticResource BooleanToVisibilityConverter}, FallbackValue=Collapsed}"/>
                                                         </StackPanel>
                                                     </Border>
@@ -244,7 +245,7 @@
                     <StackPanel Orientation="Horizontal">
                         <Image Source="/NPC Plugin Chooser 2;component/Resources/Missing Outfit Assets.png"
                                Height="16" Margin="0,0,4,0"/>
-                        <TextBlock Text="Some outfit assets couldn't be found" Foreground="White"
+                        <TextBlock Text="{l:Loc someOutfitAssetsCouldn}" Foreground="White"
                                    FontWeight="SemiBold" VerticalAlignment="Center"/>
                     </StackPanel>
                 </Border>
@@ -256,7 +257,7 @@
                         Background="#C0305870" CornerRadius="4" Padding="6,3"
                         ToolTip="{Binding AntlerRemovalNoticeText}"
                         Visibility="{Binding HasAntlerRemovalNotice, Converter={StaticResource BooleanToVisibilityConverter}, FallbackValue=Collapsed}">
-                    <TextBlock Text="Antlers removed (hidden to match output)" Foreground="White"
+                    <TextBlock Text="{l:Loc antlersRemovedHiddenTo}" Foreground="White"
                                FontWeight="SemiBold"/>
                 </Border>
                 <!-- Wig not persisted: this NPC's Default-Outfit wig will not reach

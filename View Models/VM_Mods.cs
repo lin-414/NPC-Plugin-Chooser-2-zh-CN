@@ -28,6 +28,7 @@ using NPC_Plugin_Chooser_2.Models;
 using NPC_Plugin_Chooser_2.Views;
 using ReactiveUI;
 using ReactiveUI.Fody.Helpers;
+using NPC_Plugin_Chooser_2.Localization;
 using Splat; // For Locator
 
 
@@ -35,6 +36,8 @@ namespace NPC_Plugin_Chooser_2.View_Models;
 
 public class VM_Mods : ReactiveObject, ISearchFilterHost
 {
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
     private readonly Settings _settings;
     private readonly EnvironmentStateProvider _environmentStateProvider;
     private readonly VM_NpcSelectionBar _npcSelectionBar; // To access AllNpcs and navigate
@@ -258,12 +261,12 @@ public class VM_Mods : ReactiveObject, ISearchFilterHost
             TotalModsLoadedText = $"{ModSettingsList.Count} mod{(ModSettingsList.Count == 1 ? "" : "s")} loaded";
 
         RefreshAllModsCommand = ReactiveCommand.CreateFromTask(() => RefreshAllModSettingsAsync(null)).DisposeWith(_disposables);
-        RefreshAllModsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error refreshing all mods: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+        RefreshAllModsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorRefreshingAllMods", "Error refreshing all mods: {0}"), ExceptionLogger.GetExceptionStack(ex)))).DisposeWith(_disposables);
 
         ShowMugshotsCommand = ReactiveCommand.CreateFromTask<VM_ModSetting>(ShowMugshotsAsync).DisposeWith(_disposables);
         ShowMugshotsCommand.ThrownExceptions.Subscribe(ex =>
         {
-            ScrollableMessageBox.ShowError($"Error loading mugshots: {ExceptionLogger.GetExceptionStack(ex)}");
+            ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorLoadingMugshots", "Error loading mugshots: {0}"), ExceptionLogger.GetExceptionStack(ex)));
             IsLoadingMugshots = false;
         }).DisposeWith(_disposables);
         
@@ -274,7 +277,7 @@ public class VM_Mods : ReactiveObject, ISearchFilterHost
         }).DisposeWith(_disposables);
         CancelMugshotLoadCommand.ThrownExceptions.Subscribe(ex =>
         {
-            ScrollableMessageBox.ShowError($"Error cancelling mugshot load: {ExceptionLogger.GetExceptionStack(ex)}");
+            ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorCancellingMugshotLoad", "Error cancelling mugshot load: {0}"), ExceptionLogger.GetExceptionStack(ex)));
         }).DisposeWith(_disposables);
         
         CotRKeyword = _settings.CotRKeyword;
@@ -401,7 +404,7 @@ public class VM_Mods : ReactiveObject, ISearchFilterHost
 
         SetGlobalSourcePluginCommand.ThrownExceptions.Subscribe(ex =>
         {
-            ScrollableMessageBox.ShowError($"Error setting global source plugin: {ExceptionLogger.GetExceptionStack(ex)}");
+            ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorSettingGlobalSource", "Error setting global source plugin: {0}"), ExceptionLogger.GetExceptionStack(ex)));
         }).DisposeWith(_disposables);
         // --- END: Source Plugin Disambiguation Logic ---
 
@@ -537,9 +540,10 @@ public class VM_Mods : ReactiveObject, ISearchFilterHost
         // --- NEW: Initialize Batch Action Commands ---
         BatchIncludeOutfitsCommand = ReactiveCommand.Create(() =>
         {
-            const string message = "Modifying NPC outfits on an existing save can lead to NPCs unequipping their outifts entirely. Are you sure you want to enable outfit modification?";
+            string message = GetTranslation("msg_confirmOutfitForwardingAll",
+                "Modifying NPC outfits on an existing save can lead to NPCs unequipping their outifts entirely. Are you sure you want to enable outfit modification for all mods?");
 
-            if (!_settings.SuppressPopupWarnings && !ScrollableMessageBox.Confirm(message, "Confirm Outfit Forwarding"))
+            if (!_settings.SuppressPopupWarnings && !ScrollableMessageBox.Confirm(message, GetTranslation("title_confirmOutfitForwarding", "Confirm Outfit Forwarding")))
             {
                 return;
             }
@@ -564,9 +568,10 @@ public class VM_Mods : ReactiveObject, ISearchFilterHost
         
         BatchEnableInjectedRecordsCommand = ReactiveCommand.Create(() =>
         {
-            const string message = "Searching for injected records makes patching take longer, and most appearance mods don't need it. Are you sure you want to enable this for all mods?";
+            string message = GetTranslation("msg_confirmInjectedRecordsAll",
+                "Searching for injected records makes patching take longer, and most appearance mods don't need it. Are you sure you want to enable this for all mods?");
 
-            if (!_settings.SuppressPopupWarnings && !ScrollableMessageBox.Confirm(message, "Confirm Injected Record Search"))
+            if (!_settings.SuppressPopupWarnings && !ScrollableMessageBox.Confirm(message, GetTranslation("title_confirmInjectedRecordSearch", "Confirm Injected Record Search")))
             {
                 return;
             }
@@ -605,11 +610,12 @@ public class VM_Mods : ReactiveObject, ISearchFilterHost
 
         BatchForceEnableMergeInCommand = ReactiveCommand.Create(() =>
         {
-            const string message = "WARNING: Forcing 'Merge Dependencies' ON for all mods is not recommended.\n\n" +
-                                   "This feature is intended for mods you plan to disable after patching. Merging in large mods that remain in your load order can cause patcher freezes and is unnecessary.\n\n" +
-                                   "Are you sure you want to enable this for all mods, including those automatically flagged as non-appearance mods?";
+            string message = GetTranslation("msg_confirmForceEnableMergeIn",
+                    "WARNING: Forcing 'Merge Dependencies' ON for all mods is not recommended.\n\n" +
+                    "This feature is intended for mods you plan to disable after patching. Merging in large mods that remain in your load order can cause patcher freezes and is unnecessary.\n\n" +
+                    "Are you sure you want to enable this for all mods, including those automatically flagged as non-appearance mods?");
 
-            if (ScrollableMessageBox.Confirm(message, "Confirm Force Enable Merge-in"))
+            if (ScrollableMessageBox.Confirm(message, GetTranslation("title_confirmForceEnableMergeIn", "Confirm Force Enable Merge-in")))
             {
                 foreach (var modSetting in _allModSettingsInternal)
                 {
@@ -638,12 +644,12 @@ public class VM_Mods : ReactiveObject, ISearchFilterHost
         
         BatchDisableCopyAssetsCommand = ReactiveCommand.Create(() =>
         {
-            const string message =
-                "Disabling asset copying for ALL mods means only FaceGen files (.nif/.dds) will be transferred for every NPC.\n\n" +
-                "It becomes your responsibility to ensure that all other required assets (meshes, textures for armor, hair, eyes, etc.) are still available, though you can disable or hide the source mod plugins.\n\n" +
-                "Are you sure you want to disable asset copying for all mods?";
+            string message = GetTranslation("msg_confirmDisableAllAssetCopying",
+                    "Disabling asset copying for ALL mods means only FaceGen files (.nif/.dds) will be transferred for every NPC.\n\n" +
+                    "It becomes your responsibility to ensure that all other required assets (meshes, textures for armor, hair, eyes, etc.) are still available, though you can disable or hide the source mod plugins.\n\n" +
+                    "Are you sure you want to disable asset copying for all mods?");
 
-            if (ScrollableMessageBox.Confirm(message, "Confirm Disable All Asset Copying"))
+            if (ScrollableMessageBox.Confirm(message, GetTranslation("title_confirmDisableAllAssetCopying", "Confirm Disable All Asset Copying")))
             {
                 foreach (var modSetting in _allModSettingsInternal)
                 {
@@ -654,23 +660,23 @@ public class VM_Mods : ReactiveObject, ISearchFilterHost
             }
         }).DisposeWith(_disposables);
         
-        BatchIncludeOutfitsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error including outfits: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
-        BatchExcludeOutfitsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error excluding outfits: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
-        BatchEnableInjectedRecordsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error enabling injected record handling: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
-        BatchDisableInjectedRecordsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error disabling injected record handling: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
-        BatchEnableMergeInCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error enabling merge-in: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
-        BatchForceEnableMergeInCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error force-enabling merge-in: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
-        BatchDisableMergeInCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error disabling merge-in: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
-        BatchEnableCopyAssetsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error enabling asset copying: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
-        BatchDisableCopyAssetsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError($"Error disabling asset copying: {ExceptionLogger.GetExceptionStack(ex)}")).DisposeWith(_disposables);
+        BatchIncludeOutfitsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorIncludingOutfits", "Error including outfits: {0}"), ExceptionLogger.GetExceptionStack(ex)))).DisposeWith(_disposables);
+        BatchExcludeOutfitsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorExcludingOutfits", "Error excluding outfits: {0}"), ExceptionLogger.GetExceptionStack(ex)))).DisposeWith(_disposables);
+        BatchEnableInjectedRecordsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorEnablingInjectedRecords", "Error enabling injected record handling: {0}"), ExceptionLogger.GetExceptionStack(ex)))).DisposeWith(_disposables);
+        BatchDisableInjectedRecordsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorDisablingInjectedRecords", "Error disabling injected record handling: {0}"), ExceptionLogger.GetExceptionStack(ex)))).DisposeWith(_disposables);
+        BatchEnableMergeInCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorEnablingMergeIn", "Error enabling merge-in: {0}"), ExceptionLogger.GetExceptionStack(ex)))).DisposeWith(_disposables);
+        BatchForceEnableMergeInCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorForceEnablingMergeIn", "Error force-enabling merge-in: {0}"), ExceptionLogger.GetExceptionStack(ex)))).DisposeWith(_disposables);
+        BatchDisableMergeInCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorDisablingMergeIn", "Error disabling merge-in: {0}"), ExceptionLogger.GetExceptionStack(ex)))).DisposeWith(_disposables);
+        BatchEnableCopyAssetsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorEnablingAssetCopying", "Error enabling asset copying: {0}"), ExceptionLogger.GetExceptionStack(ex)))).DisposeWith(_disposables);
+        BatchDisableCopyAssetsCommand.ThrownExceptions.Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorDisablingAssetCopying", "Error disabling asset copying: {0}"), ExceptionLogger.GetExceptionStack(ex)))).DisposeWith(_disposables);
         ApplyCotRKeywordCommand = ReactiveCommand.Create(ApplyCotRKeyword).DisposeWith(_disposables);
         ApplyCotRKeywordCommand.ThrownExceptions
-            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error applying CotR keyword: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorApplyingCotRKeyword", "Error applying CotR keyword: {0}"), ExceptionLogger.GetExceptionStack(ex))))
             .DisposeWith(_disposables);
 
         WriteRsvExclusionCommand = ReactiveCommand.Create(WriteRsvExclusion).DisposeWith(_disposables);
         WriteRsvExclusionCommand.ThrownExceptions
-            .Subscribe(ex => ScrollableMessageBox.ShowError($"Error writing RSV exclusion: {ExceptionLogger.GetExceptionStack(ex)}"))
+            .Subscribe(ex => ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_errorWritingRsvExclusion", "Error writing RSV exclusion: {0}"), ExceptionLogger.GetExceptionStack(ex))))
             .DisposeWith(_disposables);
         
         ApplyFilters(); // Apply initial filter
@@ -1176,7 +1182,7 @@ private Task ShowMugshotsAsync(VM_ModSetting selectedModSetting)
             // clear the flag — clear it here so the Cancel button doesn't hang.
             await Application.Current.Dispatcher.InvokeAsync(() => {
                 IsLoadingMugshots = false;
-                ScrollableMessageBox.ShowWarning($"Failed to load mugshot data for {selectedModSetting.DisplayName}:\n{ExceptionLogger.GetExceptionStack(ex)}", "Mugshot Load Error");
+                ScrollableMessageBox.ShowWarning($"Failed to load mugshot data for {selectedModSetting.DisplayName}:\n{ExceptionLogger.GetExceptionStack(ex)}", TranslationServiceProvider.GetService()?.GetString("mugshotLoadError") ?? "Mugshot Load Error");
             });
         }
         // NOTE: no finally clearing IsLoadingMugshots here. On the success path
@@ -1300,7 +1306,7 @@ private VM_ModsMenuMugshot CreateMugshotVmFromData(VM_ModSetting modSetting, str
             else
             {
                 ScrollableMessageBox.ShowWarning(
-                    $"Could not find NPC with FormKey {npcFormKey} in the main NPC list.", "NPC Not Found");
+                    string.Format(GetTranslation("msg_npcNotFoundInList", "Could not find NPC with FormKey {0} in the main NPC list."), npcFormKey), GetTranslation("title_npcNotFound", "NPC Not Found"));
                 // Ensure flag is reset even if NPC not found.
                 if (_npcSelectionBar != null) _npcSelectionBar.IsProgrammaticNavigationInProgress = false;
             }
@@ -1752,7 +1758,7 @@ private VM_ModsMenuMugshot CreateMugshotVmFromData(VM_ModSetting modSetting, str
         catch (Exception ex)
         {
             ScrollableMessageBox.ShowError(
-                $"Failed to refresh '{vmToRefresh.DisplayName}':\n{ExceptionLogger.GetExceptionStack(ex)}");
+                string.Format(GetTranslation("msg_failedToRefreshMod", "Failed to refresh '{0}':\n{1}"), vmToRefresh.DisplayName, ExceptionLogger.GetExceptionStack(ex)));
             return (true, string.Empty); // Treat as valid (don't delete) on exception
         }
         finally
@@ -2743,7 +2749,7 @@ private VM_ModsMenuMugshot CreateMugshotVmFromData(VM_ModSetting modSetting, str
         string modFolderName = Path.GetFileName(modFolderPath);
         if (_allModSettingsInternal.Any(vm => vm.DisplayName.Equals(modFolderName, StringComparison.OrdinalIgnoreCase)))
         {
-            ScrollableMessageBox.ShowWarning($"An appearance mod named '{modFolderName}' already exists. Cannot re-import from cached list.", "Mod Already Exists");
+            ScrollableMessageBox.ShowWarning($"An appearance mod named '{modFolderName}' already exists. Cannot re-import from cached list.", TranslationServiceProvider.GetService()?.GetString("modAlreadyExists") ?? "Mod Already Exists");
             return (false, "Mod already exists in the list");
         }
 
@@ -2797,7 +2803,7 @@ private VM_ModsMenuMugshot CreateMugshotVmFromData(VM_ModSetting modSetting, str
 
             if (warnings.Any())
             {
-                ScrollableMessageBox.ShowWarning(string.Join("\n", warnings), "Mod Settings Population Warning");
+                ScrollableMessageBox.ShowWarning(string.Join("\n", warnings), GetTranslation("title_modSettingsPopulationWarning", "Mod Settings Population Warning"));
             }
         });
     }
@@ -4200,7 +4206,7 @@ private VM_ModsMenuMugshot CreateMugshotVmFromData(VM_ModSetting modSetting, str
         }
         catch (Exception ex)
         {
-            ScrollableMessageBox.ShowError($"An unexpected error occurred during the refresh process:\n\n{ExceptionLogger.GetExceptionStack(ex)}");
+            ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_unexpectedRefreshError", "An unexpected error occurred during the refresh process:\n\n{0}"), ExceptionLogger.GetExceptionStack(ex)));
         }
         finally
         {
@@ -4570,8 +4576,7 @@ private VM_ModsMenuMugshot CreateMugshotVmFromData(VM_ModSetting modSetting, str
             _aux.TemplateChainTerminatesInLeveledNpc(earlyNpcGetter, plugins.Values))
         {
             ScrollableMessageBox.ShowWarning(
-                "This NPC appearance uses a template whose template chain ends with a Leveled NPC. " +
-                "Therefore, you cannot select a unique appearance for it.");
+                GetTranslation("msg_templateChainEndsWithLeveledNpc", "This NPC appearance uses a template whose template chain ends with a Leveled NPC. Therefore, you cannot select a unique appearance for it."));
             return false;
         }
 
@@ -4625,7 +4630,7 @@ private VM_ModsMenuMugshot CreateMugshotVmFromData(VM_ModSetting modSetting, str
                 var newEntry = (leveledNpcGetter.FormKey, Auxilliary.GetLogString(leveledNpcGetter, _settings.LocalizationLanguage, true));
                 templateChain.Add(newEntry);
                 
-                ScrollableMessageBox.ShowWarning("This NPC appearance uses a template whose template chain ends with a Leveled NPC. Therefore, you cannot select a unique appearance for it." 
+                ScrollableMessageBox.ShowWarning(TranslationServiceProvider.GetService()?.GetString("msg_templateChainEndsWithLeveledNpc") ?? "This NPC appearance uses a template whose template chain ends with a Leveled NPC. Therefore, you cannot select a unique appearance for it."
                                                  + Environment.NewLine + $"Template Chain: {string.Join(" -> ", templateChain.Select(x => x.displayName))}");
                 return false;
             }
@@ -4682,19 +4687,19 @@ private VM_ModsMenuMugshot CreateMugshotVmFromData(VM_ModSetting modSetting, str
         {
             StringBuilder message = new();
             message.AppendLine(
-                "This NPC inherits appearance from a template, which means that it needs to come from the same mod as the template.");
+                GetTranslation("msg_templateChainInheritance", "This NPC inherits appearance from a template, which means that it needs to come from the same mod as the template."));
             message.AppendLine($"Template Chain: {string.Join(" -> ", templateChain.Select(x => x.displayName))}");
             message.AppendLine();
             if (errorMessages.Any())
             {
-                message.AppendLine("Note: the following error(s) occured when analyzing the template chain:");
+                message.AppendLine(GetTranslation("msg_templateChainNote", "Note: the following error(s) occured when analyzing the template chain:"));
                 message.AppendLine(string.Join(Environment.NewLine, errorMessages));
             }
 
             message.AppendLine();
-            message.AppendLine("Would you like to apply this mod selection for all NPCs in the chain?");
+            message.AppendLine(GetTranslation("msg_templateChainApplyPrompt", "Would you like to apply this mod selection for all NPCs in the chain?"));
 
-            if (ScrollableMessageBox.Confirm(message.ToString(), "Update template chain?"))
+            if (ScrollableMessageBox.Confirm(message.ToString(), GetTranslation("title_updateTemplateChain", "Update template chain?")))
             {
                 int index = 0;
                 foreach (var entry in templateChain)
@@ -4730,19 +4735,19 @@ private VM_ModsMenuMugshot CreateMugshotVmFromData(VM_ModSetting modSetting, str
 
         if (!pluginListFiles.Any())
         {
-            ScrollableMessageBox.ShowError($"No CotR_Plugins*.txt files found in:\n{baseDirectory}");
+            ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_noCotRPluginFiles", "No CotR_Plugins*.txt files found in:\n{0}"), baseDirectory));
             return;
         }
 
-        const string confirmMessage =
-            "This will apply the Charmers of the Reach keyword to all mods containing a plugin listed in CotR_Plugins.txt.\n\n" +
-            "NPC Plugin Chooser 2 ships with a default CotR_Plugins.txt file containing many of the popular CotR-based replacer mods (in the Resources folder). " +
-            "However, it may be out of date or missing some of the less popular ones.\n\n" +
-            "You can edit this file in NotePad or add the keyword manually to any Mods that aren't in the default list using the Set Keywords button.\n\n" +
-            "You can also create additional files (e.g., CotR_Plugins_Custom.txt) to add more plugins without modifying the original file, making your changes update-safe.\n\n" +
-            "Do you want to proceed?";
+        string confirmMessage = GetTranslation("msg_confirmApplyCotRKeyword",
+                "This will apply the Charmers of the Reach keyword to all mods containing a plugin listed in CotR_Plugins.txt.\n\n" +
+                "NPC Plugin Chooser 2 ships with a default CotR_Plugins.txt file containing many of the popular CotR-based replacer mods (in the Resources folder). " +
+                "However, it may be out of date or missing some of the less popular ones.\n\n" +
+                "You can edit this file in NotePad or add the keyword manually to any Mods that aren't in the default list using the Set Keywords button.\n\n" +
+                "You can also create additional files (e.g., CotR_Plugins_Custom.txt) to add more plugins without modifying the original file, making your changes update-safe.\n\n" +
+                "Do you want to proceed?");
 
-        if (!ScrollableMessageBox.Confirm(confirmMessage, "Apply CotR Keyword"))
+        if (!ScrollableMessageBox.Confirm(confirmMessage, GetTranslation("title_applyCotRKeyword", "Apply CotR Keyword")))
         {
             return;
         }
@@ -4762,14 +4767,14 @@ private VM_ModsMenuMugshot CreateMugshotVmFromData(VM_ModSetting modSetting, str
 
         if (!cotRPluginFileNames.Any())
         {
-            ScrollableMessageBox.ShowWarning("CotR_Plugins*.txt files are empty or contain no valid entries.");
+            ScrollableMessageBox.ShowWarning(TranslationServiceProvider.GetService()?.GetString("msg_cotrPluginsFilesEmpty") ?? TranslationServiceProvider.GetService()?.GetString("msg_cotrPluginsFilesEmpty") ?? "CotR_Plugins*.txt files are empty or contain no valid entries.");
             return;
         }
 
         var keyword = CotRKeyword?.Trim();
         if (string.IsNullOrEmpty(keyword))
         {
-            ScrollableMessageBox.ShowError("CotR Keyword cannot be empty.");
+            ScrollableMessageBox.ShowError(TranslationServiceProvider.GetService()?.GetString("msg_cotrKeywordCannotBeEmpty") ?? TranslationServiceProvider.GetService()?.GetString("msg_cotrKeywordCannotBeEmpty") ?? "CotR Keyword cannot be empty.");
             return;
         }
 
@@ -4791,15 +4796,14 @@ private VM_ModsMenuMugshot CreateMugshotVmFromData(VM_ModSetting modSetting, str
 
         if (taggedModNames.Any())
         {
-            var message = $"Applied '{keyword}' keyword to {taggedModNames.Count} mod setting(s):\n\n" +
-                          string.Join("\n", taggedModNames.OrderBy(n => n));
-            ScrollableMessageBox.Show(message, "CotR Keyword Applied");
+            var message = string.Format(GetTranslation("msg_cotRKeywordApplied", "Applied '{0}' keyword to {1} mod setting(s):\n\n{2}"), keyword, taggedModNames.Count, string.Join("\n", taggedModNames.OrderBy(n => n)));
+            ScrollableMessageBox.Show(message, GetTranslation("title_cotRKeywordApplied", "CotR Keyword Applied"));
         }
         else
         {
             ScrollableMessageBox.Show(
-                "No new mod settings were tagged. All matching mods may already have the keyword.",
-                "CotR Keyword Applied");
+                GetTranslation("msg_noNewModsTagged", "No new mod settings were tagged. All matching mods may already have the keyword."),
+                GetTranslation("title_cotRKeywordApplied", "CotR Keyword Applied"));
         }
     }
 
@@ -4808,7 +4812,7 @@ private VM_ModsMenuMugshot CreateMugshotVmFromData(VM_ModSetting modSetting, str
         var keyword = CotRKeyword?.Trim();
         if (string.IsNullOrEmpty(keyword))
         {
-            ScrollableMessageBox.ShowError("CotR Keyword cannot be empty.");
+            ScrollableMessageBox.ShowError(TranslationServiceProvider.GetService()?.GetString("msg_cotrKeywordCannotBeEmpty") ?? TranslationServiceProvider.GetService()?.GetString("msg_cotrKeywordCannotBeEmpty") ?? "CotR Keyword cannot be empty.");
             return;
         }
 
@@ -4827,7 +4831,7 @@ private VM_ModsMenuMugshot CreateMugshotVmFromData(VM_ModSetting modSetting, str
             }
         }
 
-        ScrollableMessageBox.Show($"Added '{rsvIgnoreKeyword}' keyword to {matchCount} mod setting(s) that had the '{keyword}' keyword.");
+        ScrollableMessageBox.Show(string.Format(GetTranslation("msg_rsvKeywordAdded", "Added '{0}' keyword to {1} mod setting(s) that had the '{2}' keyword."), rsvIgnoreKeyword, matchCount, keyword));
     }
 
     public string GetStatusReport()

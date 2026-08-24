@@ -8,6 +8,7 @@
              xmlns:gong="clr-namespace:GongSolutions.Wpf.DragDrop;assembly=GongSolutions.Wpf.DragDrop"
              xmlns:reactiveui="http://reactiveui.net"
              xmlns:System="clr-namespace:System;assembly=mscorlib"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
              mc:Ignorable="d"
              x:TypeArguments="vm:VM_Mods"
              d:DataContext="{d:DesignInstance Type=vm:VM_Mods}"
@@ -154,34 +155,34 @@
                 <Border Grid.Row="0" BorderBrush="LightGray" BorderThickness="0,0,0,1" Margin="0,0,0,5" Padding="5">
                     <WrapPanel Orientation="Horizontal">
                         <StackPanel Orientation="Horizontal" Margin="0,2,15,2">
-                             <TextBlock Text="Filter Name:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                             <TextBlock Text="{l:Loc filterName}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                              <TextBox Text="{Binding NameFilterText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" MinWidth="120" VerticalAlignment="Center"
-                                      ToolTip="Filter the mod list by display name&#x0a;Ctrl+Shift+C clears all search filters"/>
+                                      ToolTip="{l:Loc filterTheModList}"/>
                         </StackPanel>
                          <StackPanel Orientation="Horizontal" Margin="0,2,15,2">
-                            <TextBlock Text="Filter Plugin:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                            <TextBlock Text="{l:Loc filterPlugin}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                             <TextBox Text="{Binding PluginFilterText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" MinWidth="120" VerticalAlignment="Center"
-                                     ToolTip="Filter the mod list by the plugins each mod owns&#x0a;Ctrl+Shift+C clears all search filters"/>
+                                     ToolTip="{l:Loc filterTheMod}"/>
                         </StackPanel>
                          <StackPanel Orientation="Horizontal" Margin="0,2,15,2">
-                            <TextBlock Text="Filter NPC:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                            <TextBlock Text="{l:Loc filterNPC}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                             <ComboBox ItemsSource="{Binding AvailableNpcSearchTypes}"
                                       SelectedItem="{Binding SelectedNpcSearchType, Mode=TwoWay}"
                                       MinWidth="80" VerticalAlignment="Center" Margin="0,0,5,0"
                                       IsEnabled="{Binding IsLoadingNpcData, Converter={StaticResource BooleanNegationConverter}}"
-                                      ToolTip="Select NPC field to filter by (active after initial load)"/>
+                                      ToolTip="{l:Loc selectNPCFieldTo}"/>
                             <TextBox Text="{Binding NpcSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                      MinWidth="120" VerticalAlignment="Center"
                                      IsEnabled="{Binding IsLoadingNpcData, Converter={StaticResource BooleanNegationConverter}}"
-                                     ToolTip="Enter NPC search term (active after initial load)&#x0a;Ctrl+Shift+C clears all search filters"/>
+                                     ToolTip="{l:Loc enterNPCSearchTerm}"/>
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" Margin="0,2,15,2" VerticalAlignment="Center">
                             <CheckBox IsChecked="{Binding ShowMugshotOnlyMods, Mode=TwoWay}" 
-                                      Content="Show Mugshot-Only Mods"
-                                      ToolTip="If unchecked, mods that contain only images (no plugins or data folders) will be hidden from the list."
+                                      Content="{l:Loc showMugshotOnlyMods}"
+                                      ToolTip="{l:Loc ifUncheckedModsThat}"
                                       VerticalAlignment="Center"/>
                         </StackPanel>
-                        <TextBlock Text="Loading NPC data..." FontStyle="Italic"
+                        <TextBlock Text="{l:Loc loadingNPCData}" FontStyle="Italic"
                                    Margin="15,0,0,0" VerticalAlignment="Center"
                                    Visibility="{Binding IsLoadingNpcData, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                     </WrapPanel>
@@ -333,21 +334,12 @@
                                                       Visibility="{Binding HasPluginWithOverrideRecords, Converter={StaticResource BooleanToVisibilityConverter}}">
                                                  <Viewbox.ToolTip>
                                                      <ToolTip>
-                                                         <TextBlock TextWrapping="Wrap">
-                                                             This mod has overrides of non-NPC records.
-                                                             <LineBreak/>
-                                                             NPC2 can handle these using the default option in the settings menu, or on a per-mod basis configured here.
-                                                             <LineBreak/>
-                                                             <LineBreak/>
-                                                             IMPORTANT: Just because the plugin has overrides doesn't mean these overrides need to be handled. In most cases, non-NPC overrides are safe to ignore,
-                                                             <LineBreak/>
-                                                             and handling them for large plugins can slow down patching considerably. Only handle them if the NPC appearance is bugged otherwise, or you know that it's required.
-                                                         </TextBlock>
+                                                         <TextBlock TextWrapping="Wrap" Text="{l:Loc modsNonNpcOverridesTooltip}"/>
                                                      </ToolTip>
                                                  </Viewbox.ToolTip>
                                                  <Image Source="/NPC Plugin Chooser 2;component/Resources/Contains Overrides.png" />
                                              </Viewbox>
-                                         <TextBlock Text="Refreshing: "
+                                         <TextBlock Text="{l:Loc refreshing}"
                                                     Foreground="DarkOrange"
                                                     FontWeight="Bold"
                                                     FontSize="14"
@@ -404,9 +396,9 @@
                                             <ColumnDefinition Width="*"/>
                                             <ColumnDefinition Width="Auto"/>
                                         </Grid.ColumnDefinitions>
-                                        <TextBlock Grid.Column="0" Text="Mugshot Folders:" FontWeight="SemiBold" VerticalAlignment="Center" ToolTip="Folder(s) where mugshots for this mod are located."/>
-                                        <Button Grid.Column="2" Content="Add" Command="{Binding AddMugshotFolderPathCommand}" Padding="5,1" VerticalAlignment="Center" 
-                                                ToolTip="Add a folder where mugshots for this mod are located"/>
+                                        <TextBlock Grid.Column="0" Text="{l:Loc mugshotFolders}" FontWeight="SemiBold" VerticalAlignment="Center" ToolTip="{l:Loc folderSWhereMugshots}"/>
+                                        <Button Grid.Column="2" Content="{l:Loc add}" Command="{Binding AddMugshotFolderPathCommand}" Padding="5,1" VerticalAlignment="Center" 
+                                                ToolTip="{l:Loc addAFolderWhere}"/>
                                     </Grid>
 
                                     <ItemsControl Grid.Row="2" Grid.Column="0" ItemsSource="{Binding MugShotFolderPaths}" Margin="10,0,0,0">
@@ -423,23 +415,23 @@
                                                             <Binding Path="." Converter="{StaticResource PathExistenceToBrushConverter}"/>
                                                         </TextBlock.Foreground>
                                                     </TextBlock>
-                                                    <Button Grid.Column="1" Content="Browse..." 
+                                                    <Button Grid.Column="1" Content="{l:Loc browse}" 
                                                             Command="{Binding DataContext.BrowseMugshotFolderPathCommand, RelativeSource={RelativeSource AncestorType={x:Type ListBoxItem}}}" 
-                                                            CommandParameter="{Binding}" Padding="5,1" Margin="5,0" VerticalAlignment="Center" ToolTip="Select a new folder for this path"/>
-                                                    <Button Grid.Column="2" Content="X" Foreground="Red" FontWeight="Bold" 
+                                                            CommandParameter="{Binding}" Padding="5,1" Margin="5,0" VerticalAlignment="Center" ToolTip="{l:Loc selectANewFolder}"/>
+                                                    <Button Grid.Column="2" Content="{l:Loc x2}" Foreground="Red" FontWeight="Bold" 
                                                             Command="{Binding DataContext.RemoveMugshotFolderPathCommand, RelativeSource={RelativeSource AncestorType={x:Type ListBoxItem}}}" 
-                                                            CommandParameter="{Binding}" Padding="5,1" Margin="0,0,5,0" VerticalAlignment="Center" ToolTip="Delete this mugshot folder path"/>
+                                                            CommandParameter="{Binding}" Padding="5,1" Margin="0,0,5,0" VerticalAlignment="Center" ToolTip="{l:Loc deleteThisMugshotFolder}"/>
                                                 </Grid>
                                             </DataTemplate>
                                         </ItemsControl.ItemTemplate>
                                     </ItemsControl>
                                      
                                      <Button Grid.Row="3" Grid.Column="0" 
-                                             Content="Unlink Mugshot Data" 
+                                             Content="{l:Loc unlinkMugshotData}" 
                                              Command="{Binding UnlinkMugshotDataCommand}" 
                                              HorizontalAlignment="Left" 
                                              Margin="0,10,0,0" Padding="5,2" 
-                                             ToolTip="Separates the assigned mugshot folder into its own entry, if its name differs from the primary mod data folder." 
+                                             ToolTip="{l:Loc separatesTheAssignedMugshot}" 
                                              Visibility="{Binding CanUnlinkMugshots, Converter={StaticResource BooleanToVisibilityConverter}}"/> 
 
                                      <Grid Grid.Row="4" Grid.Column="0" Margin="0,5,0,5">
@@ -448,10 +440,10 @@
                                               <ColumnDefinition Width="*"/>
                                               <ColumnDefinition Width="Auto"/>
                                           </Grid.ColumnDefinitions>
-                                          <TextBlock Grid.Column="0" Text="Corresponding Mod Folder Paths:" FontWeight="SemiBold" VerticalAlignment="Center" ToolTip="Folder(s) containing plugins and resources (e.g. Meshes, Textures, FaceGen) for this mod."/>
-                                          <Button Grid.Column="2" Content="Add" Command="{Binding AddFolderPathCommand}" Padding="5,1" VerticalAlignment="Center" 
+                                          <TextBlock Grid.Column="0" Text="{l:Loc correspondingModFolderPaths}" FontWeight="SemiBold" VerticalAlignment="Center" ToolTip="{l:Loc folderSContainingPlugins}"/>
+                                          <Button Grid.Column="2" Content="{l:Loc add}" Command="{Binding AddFolderPathCommand}" Padding="5,1" VerticalAlignment="Center" 
                                                   Visibility="{Binding IsAutoGenerated, Converter={StaticResource BooleanToVisibilityConverter}, ConverterParameter=Invert}"
-                                                  ToolTip="Add another data folder where the contents of this mod are located"/>
+                                                  ToolTip="{l:Loc addAnotherDataFolder}"/>
                                      </Grid>
 
                                       <ItemsControl Grid.Row="5" Grid.Column="0" ItemsSource="{Binding CorrespondingFolderPaths}" Margin="10,0,0,0"
@@ -476,9 +468,9 @@
                                                      <!-- Hidden for the mod's own primary folder: too much of the app keys a mod
                                                           to the folder that shares its name, so repointing it (deliberately or
                                                           by a stray click) would quietly break that correspondence. -->
-                                                     <Button Grid.Column="1" Content="Browse..."
+                                                     <Button Grid.Column="1" Content="{l:Loc browse}"
                                                              Command="{Binding DataContext.BrowseFolderPathCommand, RelativeSource={RelativeSource AncestorType={x:Type ListBoxItem}}}"
-                                                             CommandParameter="{Binding}" Padding="5,1" Margin="5,0" VerticalAlignment="Center" ToolTip="Select a data folder for the contents of this mod">
+                                                             CommandParameter="{Binding}" Padding="5,1" Margin="5,0" VerticalAlignment="Center" ToolTip="{l:Loc selectADataFolder}">
                                                          <Button.Visibility>
                                                              <MultiBinding Converter="{StaticResource NonPrimaryFolderVisibilityConverter}">
                                                                  <Binding Path="."/>
@@ -505,9 +497,9 @@
                                                      <!-- Hidden for the mod's own primary folder: the next scan re-creates the
                                                           entry around the folder that shares its name, so removing it only
                                                           costs a Refresh to arrive back where it started. -->
-                                                     <Button Grid.Column="3" Content="X" Foreground="Red" FontWeight="Bold"
+                                                     <Button Grid.Column="3" Content="{l:Loc x2}" Foreground="Red" FontWeight="Bold"
                                                              Command="{Binding DataContext.RemoveFolderPathCommand, RelativeSource={RelativeSource AncestorType={x:Type ListBoxItem}}}"
-                                                             CommandParameter="{Binding}" Padding="5,1" Margin="0,0,5,0" VerticalAlignment="Center" ToolTip="Delete this data folder">
+                                                             CommandParameter="{Binding}" Padding="5,1" Margin="0,0,5,0" VerticalAlignment="Center" ToolTip="{l:Loc deleteThisDataFolder}">
                                                          <Button.Visibility>
                                                              <MultiBinding Converter="{StaticResource NonPrimaryFolderVisibilityConverter}">
                                                                  <Binding Path="."/>
@@ -523,7 +515,7 @@
                                      
                                      <WrapPanel Grid.Row="6" Grid.Column="0" Margin="0,5,0,0">
                                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,0">
-                                            <TextBlock Text="Merge Dependencies" 
+                                            <TextBlock Text="{l:Loc mergeDependencies}" 
                                                         VerticalAlignment="Center" 
                                                         ToolTip="{Binding MergeInToolTip}"
                                                         Visibility="{Binding MergeInDependencyRecordsVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
@@ -546,18 +538,18 @@
                                         </StackPanel>
 
                                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,0">
-                                            <TextBlock Text="Copy Assets"
+                                            <TextBlock Text="{l:Loc copyAssets}"
                                                         VerticalAlignment="Center"
-                                                        ToolTip="If checked, all assets required for the NPC's appearance (meshes, textures, etc.) will be copied to the output folder. If unchecked, only FaceGen files will be copied."/>
+                                                        ToolTip="{l:Loc ifCheckedAllAssets}"/>
                                             <CheckBox IsChecked="{Binding CopyAssets, Mode=TwoWay}"
                                                         VerticalAlignment="Center"
                                                         Margin="5 0 0 0"
-                                                        ToolTip="If checked, all assets required for the NPC's appearance (meshes, textures, etc.) will be copied to the output folder. If unchecked, only FaceGen files will be copied."/>
+                                                        ToolTip="{l:Loc ifCheckedAllAssets}"/>
                                         </StackPanel>
 
                                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,0"
                                                     Visibility="{Binding HasBaseGameAssetPaths, Converter={StaticResource BooleanToVisibilityConverter}}">
-                                            <TextBlock Text="Overwrite Base Game Assets"
+                                            <TextBlock Text="{l:Loc overwriteBaseGameAssets}"
                                                         VerticalAlignment="Center"
                                                         ToolTip="{Binding OverwriteBaseGameAssetsToolTip}"/>
                                             <CheckBox IsChecked="{Binding OverwriteBaseGameAssets, Mode=TwoWay}"
@@ -567,17 +559,17 @@
                                         </StackPanel>
 
                                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,0" Visibility="{Binding DataContext.CurrentPatchingMode, ElementName=ModSettingsItemsControl, Converter={StaticResource PatchingModeConverter}, ConverterParameter=CreateAndPatch}">
-                                            <TextBlock Text="Include Outfits" 
+                                            <TextBlock Text="{l:Loc includeOutfits}" 
                                                         VerticalAlignment="Center" 
-                                                        ToolTip="If checked, outfits from this mod will be transferred along with NPC appearance when in Create and Patch mode."/>
+                                                        ToolTip="{l:Loc ifCheckedOutfitsFrom}"/>
                                             <CheckBox IsChecked="{Binding IncludeOutfits, Mode=TwoWay}"
                                                         VerticalAlignment="Center"
                                                         Margin="5 0 0 0"
-                                                        ToolTip="If checked, outfits from this mod will be transferred along with NPC appearance when in Create and Patch mode."/>
+                                                        ToolTip="{l:Loc ifCheckedOutfitsFrom}"/>
                                         </StackPanel>
                                         
                                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,10,0">
-                                            <TextBlock Text="Handle Injected Records" 
+                                            <TextBlock Text="{l:Loc handleInjectedRecords}" 
                                                         VerticalAlignment="Center" 
                                                         ToolTip="{Binding HandleInjectedOverridesToolTip}"
                                                         Visibility="{Binding MergeInDependencyRecordsVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
@@ -595,9 +587,9 @@
                                             <CheckBox IsChecked="{Binding HandleInjectedRecords}"
                                                         VerticalAlignment="Center" 
                                                         Margin="5 0 0 0"
-                                                        ToolTip="If checked, the patcher will search for and merge in records that are injected. This can potentially make patching take longer."
+                                                        ToolTip="{l:Loc ifCheckedThePatcher}"
                                                         Visibility="{Binding MergeInDependencyRecordsVisible, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                                            <Button Content="Set Keywords"
+                                            <Button Content="{l:Loc setKeywords}"
                                                     Command="{Binding SetKeywordsCommand}"
                                                     Padding="5,2"
                                                     Margin="10,0,0,0"
@@ -612,24 +604,10 @@
                                           never splits a dropdown from its label — same shape as row 6. -->
                                      <WrapPanel Grid.Row="7" Grid.Column="0" Orientation="Horizontal" Margin="0,5,0,0">
                                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,0,3">
-                                         <TextBlock Text="Record Override Handling Mode" VerticalAlignment="Center">
+                                         <TextBlock Text="{l:Loc recordOverrideHandlingMode}" VerticalAlignment="Center">
                                              <TextBlock.ToolTip>
                                                  <ToolTip>
-                                                     <TextBlock TextWrapping="Wrap" Width="300">
-                                                         Controls what happens if plugins in this mod override records from another mod 
-                                                         (other than the direct NPC records).
-                                                         <LineBreak/>
-                                                         <LineBreak/>
-                                                         Default: Use the default setting from the Settings Tab.
-                                                         <LineBreak/>
-                                                         Ignore: Do not look for overridden records. Conflict patching will be fully taken care of by you.
-                                                         <LineBreak/>
-                                                         Include: Incorporate the overridden records into the output (as whole records in Default mode,
-                                                         or deltas in EasyNPC mode).
-                                                         <LineBreak/>
-                                                         Include as New: Copy the overrides as new records. Avoids conflicts if multiple appearance mods 
-                                                         override the same records.
-                                                     </TextBlock>
+                                                     <TextBlock TextWrapping="Wrap" Width="300" Text="{l:Loc modsOverrideHandlingTooltip}"/>
                                                  </ToolTip>
                                              </TextBlock.ToolTip>
                                          </TextBlock>
@@ -655,39 +633,10 @@
                                               for the current output mode (Create and Patch, or SkyPatcher mode). -->
                                          <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="15,0,0,3"
                                                      Visibility="{Binding IsWigHandlingVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
-                                             <TextBlock Text="Wig Handling Mode" VerticalAlignment="Center">
+                                             <TextBlock Text="{l:Loc wigHandlingMode}" VerticalAlignment="Center">
                                                  <TextBlock.ToolTip>
                                                      <ToolTip>
-                                                         <TextBlock TextWrapping="Wrap" Width="340">
-                                                             This mod ships wigs: hair-slot wig armors in its Default Outfits, and/or
-                                                             hair meshes carried directly in an NPC's skin (worn armor — the High Poly
-                                                             NPC Overhaul pattern). Controls how they are handled during patching — and
-                                                             how mugshots and the 3D preview depict the NPC. Antlers are controlled
-                                                             separately.
-                                                             <LineBreak/><LineBreak/>
-                                                             Default: Use the default setting from the Settings tab.
-                                                             <LineBreak/>
-                                                             Forward To Skin: transfer an outfit wig into the NPC's skin (WornArmor) so
-                                                             it shows regardless of the outfit worn (falls back to Forward To Outfit if
-                                                             the appearance plugin assigns no WornArmor). A skin-carried wig is already
-                                                             in this state and is left as-is.
-                                                             <LineBreak/>
-                                                             Forward To Outfit: duplicate the outfit the NPC actually wears in game and
-                                                             add the wig to the duplicate (no change if it already contains the wig). A
-                                                             skin-carried wig is moved into that outfit as a generated wig armor.
-                                                             <LineBreak/>
-                                                             Convert To Headparts (EXPERIMENTAL): discard the wig armor and make the wig
-                                                             the NPC's hair — generated head part records + the wig mesh baked into the
-                                                             FaceGen file (HDT-SMP preserved; helmets hide it like normal hair). Works
-                                                             for outfit wigs AND skin-carried wigs (the 3D preview's "Set Wig Meshes"
-                                                             button corrects which skin meshes count as wigs). An outfit wig falls back
-                                                             to Forward To Skin per NPC when the bake would be unsafe; a skin-carried
-                                                             wig is left as-is instead.
-                                                             <LineBreak/>
-                                                             Leave As Is: wigs are treated like any other outfit/skin element — an outfit wig
-                                                             is forwarded only if Include Outfits is selected; a skin-carried wig stays
-                                                             in the skin.
-                                                         </TextBlock>
+                                                         <TextBlock TextWrapping="Wrap" Width="340" Text="{l:Loc modsWigHandlingTooltip}"/>
                                                      </ToolTip>
                                                  </TextBlock.ToolTip>
                                              </TextBlock>
@@ -708,28 +657,10 @@
                                               above (it is a sub-option of Convert To Headparts). -->
                                          <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="15,0,0,3"
                                                      Visibility="{Binding IsWigHandlingVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
-                                             <TextBlock Text="Converted Wig Hair Color" VerticalAlignment="Center">
+                                             <TextBlock Text="{l:Loc convertedWigHairColor}" VerticalAlignment="Center">
                                                  <TextBlock.ToolTip>
                                                      <ToolTip>
-                                                         <TextBlock TextWrapping="Wrap" Width="340">
-                                                             Only applies when this mod's Wig Handling Mode resolves to Convert To
-                                                             Headparts. Many wig meshes carry a near-black placeholder hair color and
-                                                             rely on RaceMenu to recolor them in game (RaceMenu automatically tints worn
-                                                             hair-slot items — that is why High Poly NPC Overhaul gives every NPC black
-                                                             hair until RaceMenu is installed). A wig baked into the FaceGen file is no
-                                                             longer a worn item, so RaceMenu stops recoloring it and the placeholder
-                                                             sticks. This bakes the NPC's own hair color in instead.
-                                                             <LineBreak/><LineBreak/>
-                                                             Default: Use the default setting from the Settings tab.
-                                                             <LineBreak/>
-                                                             Auto: recolor only wigs carrying a placeholder tint; leave wigs whose
-                                                             textures are already colored by their author alone.
-                                                             <LineBreak/>
-                                                             Always use NPC's hair color: recolor every converted wig, exactly as
-                                                             RaceMenu would have done to the original worn wig.
-                                                             <LineBreak/>
-                                                             Keep the wig's own color: never touch the wig's baked hair color.
-                                                         </TextBlock>
+                                                         <TextBlock TextWrapping="Wrap" Width="340" Text="{l:Loc modsWigColorTooltip}"/>
                                                      </ToolTip>
                                                  </TextBlock.ToolTip>
                                              </TextBlock>
@@ -751,30 +682,10 @@
                                               for the current output mode. Independent of the wig dropdown. -->
                                          <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="15,0,0,3"
                                                      Visibility="{Binding IsAntlerHandlingVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
-                                             <TextBlock Text="Antler Handling Mode" VerticalAlignment="Center">
+                                             <TextBlock Text="{l:Loc antlerHandlingMode}" VerticalAlignment="Center">
                                                  <TextBlock.ToolTip>
                                                      <ToolTip>
-                                                         <TextBlock TextWrapping="Wrap" Width="340">
-                                                             This mod ships antlers (in an outfit, baked into the worn armor, or as a
-                                                             keyword-detected FaceGen head part). Controls how they are handled during
-                                                             patching — and how mugshots and the 3D preview depict the NPC.
-                                                             <LineBreak/><LineBreak/>
-                                                             Default: Use the default setting from the Settings tab.
-                                                             <LineBreak/>
-                                                             Forward To Skin: transfer the antler into the NPC's skin (WornArmor) so it shows
-                                                             regardless of the outfit worn. Falls back to Forward To Outfit if the appearance
-                                                             plugin assigns no WornArmor.
-                                                             <LineBreak/>
-                                                             Forward To Outfit: duplicate the outfit the NPC actually wears in game and add
-                                                             the antler to the duplicate.
-                                                             <LineBreak/>
-                                                             Remove: keep the antler OFF the NPC entirely — stripped from a forwarded outfit,
-                                                             from the worn armor, and from the FaceGen. An outfit the load order owns (not
-                                                             forwarded) can't be reached.
-                                                             <LineBreak/>
-                                                             Leave As Is: the antler is treated like any other outfit element — forwarded only if
-                                                             Include Outfits is selected.
-                                                         </TextBlock>
+                                                         <TextBlock TextWrapping="Wrap" Width="340" Text="{l:Loc modsAntlerHandlingTooltip}"/>
                                                      </ToolTip>
                                                  </TextBlock.ToolTip>
                                              </TextBlock>
@@ -797,24 +708,10 @@
                                               to record and SkyPatcher output alike. -->
                                          <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="15,0,0,3"
                                                      Visibility="{Binding HasTemplatedNpcs, Converter={StaticResource BooleanToVisibilityConverter}}">
-                                             <TextBlock Text="Templated NPCs" VerticalAlignment="Center">
+                                             <TextBlock Text="{l:Loc templatedNPCs}" VerticalAlignment="Center">
                                                  <TextBlock.ToolTip>
                                                      <ToolTip>
-                                                         <TextBlock TextWrapping="Wrap" Width="340">
-                                                             Some of this mod's NPCs copy their face from another NPC instead of having
-                                                             one of their own (the NPCs tab marks them with a Template icon). Controls
-                                                             what a selection from this mod does for those NPCs.
-                                                             <LineBreak/><LineBreak/>
-                                                             Default: Use the default setting from the Settings tab.
-                                                             <LineBreak/>
-                                                             Use the template's appearance: they keep showing the other NPC's face, and
-                                                             any appearance you pick for them is ignored.
-                                                             <LineBreak/>
-                                                             Give each NPC its own copy: your choice is applied to each of them
-                                                             individually, so NPCs that share a template can look different. Adds one
-                                                             copy of the face files per NPC. NPCs whose face the game picks at random
-                                                             from a levelled list keep inheriting either way.
-                                                         </TextBlock>
+                                                         <TextBlock TextWrapping="Wrap" Width="340" Text="{l:Loc modsTemplateNpcsTooltip}"/>
                                                      </ToolTip>
                                                  </TextBlock.ToolTip>
                                              </TextBlock>
@@ -837,19 +734,11 @@
                                         <!-- Max Nested Search Layers - hidden when Include All is checked -->
                                         <StackPanel Orientation="Horizontal" 
                                                     Visibility="{Binding IsMaxNestedIntervalDepthVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
-                                            <TextBlock Text="Max Nested Search Layers"
+                                            <TextBlock Text="{l:Loc maxNestedSearchLayers}"
                                                        VerticalAlignment="Center">
                                                 <TextBlock.ToolTip>
                                                     <ToolTip>
-                                                        <TextBlock TextWrapping="Wrap" Width="300">
-                                                            Controls how many layers deep the patcher will search for overridden records between finding relevant records.
-                                                            <LineBreak/><LineBreak/>
-                                                            This is not a total depth limit. The count resets every time a record from this mod is found, so a continuous chain of the mod's records is always followed all the way down.
-                                                            <LineBreak/><LineBreak/>
-                                                            The default of 2 is what lets the search cross one unrelated record (e.g. a vanilla outfit) to reach the mod's edits below it. Higher values may find more obscure overrides but will significantly increase patching time.
-                                                            <LineBreak/><LineBreak/>
-                                                            Leave blank to use the default. Set to 1 to only check direct dependencies; 0 disables the search entirely.
-                                                        </TextBlock>
+                                                        <TextBlock TextWrapping="Wrap" Width="300" Text="{l:Loc modsTraversalDepthTooltip}"/>
                                                     </ToolTip>
                                                 </TextBlock.ToolTip>
                                             </TextBlock>
@@ -858,18 +747,18 @@
                                                      MinWidth="40"
                                                      VerticalAlignment="Center"
                                                      Margin="5 0 0 0"
-                                                     ToolTip="Default is 2. Leave blank to use default."/>
+                                                     ToolTip="{l:Loc defaultIs2Leave}"/>
                                         </StackPanel>
                                         
                                         <!-- Include All checkbox - always visible when this row is visible -->
                                         <StackPanel Orientation="Horizontal" Margin="10,0,0,0">
-                                            <TextBlock Text="Include All" 
+                                            <TextBlock Text="{l:Loc includeAll}" 
                                                        VerticalAlignment="Center"
-                                                       ToolTip="If checked, grabs ALL override records from the plugins instead of traversing from NPC records. Use with caution."/>
+                                                       ToolTip="{l:Loc ifCheckedGrabsALL}"/>
                                             <CheckBox IsChecked="{Binding IncludeAllOverrides, Mode=TwoWay}"
                                                       VerticalAlignment="Center"
                                                       Margin="5,0,0,0"
-                                                      ToolTip="If checked, grabs ALL override records from the plugins instead of traversing from NPC records. Use with caution - this may include irrelevant overrides."/>
+                                                      ToolTip="{l:Loc ifCheckedGrabs}"/>
                                         </StackPanel>
 
                                         <!-- Which NPC fields the override search starts from. Hidden under
@@ -881,41 +770,34 @@
                                                 Visibility="{Binding IsMaxNestedIntervalDepthVisible, Converter={StaticResource BooleanToVisibilityConverter}}">
                                             <Button.ToolTip>
                                                 <ToolTip>
-                                                    <TextBlock TextWrapping="Wrap" Width="320">
-                                                        Choose which fields of an NPC record the search for this mod's overridden
-                                                        records may start from.
-                                                        <LineBreak/><LineBreak/>
-                                                        A selected field is followed as deep as it goes, through any kind of record.
-                                                        This does not limit which record types can be merged in — only where the
-                                                        search begins. Defaults to the fields that carry appearance.
-                                                    </TextBlock>
+                                                    <TextBlock TextWrapping="Wrap" Width="320" Text="{l:Loc modsOverrideRootsTooltip}"/>
                                                 </ToolTip>
                                             </Button.ToolTip>
                                         </Button>
                                     </StackPanel>
 
                                      <Button Grid.Row="9" Grid.Column="0"
-                                             Content="Delete"
+                                             Content="{l:Loc delete}"
                                              Command="{Binding DeleteCommand}"
                                              HorizontalAlignment="Right"
                                              Margin="0,5,0,0" Padding="5,2"
                                              Foreground="Red" FontWeight="Bold"
-                                             ToolTip="Permanently delete this empty entry. Only visible if no paths or mugshots are assigned."
+                                             ToolTip="{l:Loc permanentlyDeleteThisEmpty}"
                                              Visibility="{Binding CanDelete, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                                      
                                      <StackPanel Grid.Row="9" Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Left" 
                                                  Margin="0,5,0,0"
                                                  Visibility="{Binding CanDelete, Converter={StaticResource BooleanToVisibilityConverter}, ConverterParameter=Invert}">
-                                         <Button Content="Set Resource Plugins"
+                                         <Button Content="{l:Loc setResourcePlugins}"
                                                  Command="{Binding SetResourcePluginsCommand}"
                                                  Padding="5,2"
-                                                 ToolTip="Select plugins within this mod to be treated as resource files, ignoring their NPCs."/>
+                                                 ToolTip="{l:Loc selectPluginsWithinThis}"/>
     
                                          <Button Command="{Binding RefreshCommand}"
                                                  Margin="5,0,0,0" 
                                                  Padding="5,2"
-                                                 Content="Refresh"
-                                                 ToolTip="Refresh this mod's data from its source folders."/>
+                                                 Content="{l:Loc refresh}"
+                                                 ToolTip="{l:Loc refreshThisModS}"/>
                                      </StackPanel>
                                  </Grid> 
                              </Border> 
@@ -937,7 +819,7 @@
                      <Grid>
                           <TextBlock Text="{Binding SelectedModForMugshots.DisplayName, StringFormat='Mugshots for: {0}', TargetNullValue='Select a mod from the left panel'}"
                                      FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" HorizontalAlignment="Left" TextTrimming="CharacterEllipsis"/>
-                          <Button Content="Cancel Mugshot Load"
+                          <Button Content="{l:Loc cancelMugshotLoad}"
                                   Command="{Binding CancelMugshotLoadCommand}"
                                   VerticalAlignment="Center" HorizontalAlignment="Right"
                                   Padding="5,2"
@@ -1047,7 +929,7 @@
 
                                         <Grid HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0 0 0 10"
                                               Visibility="{Binding IsAmbiguousSource, Converter={StaticResource BooleanToVisibilityConverter}}"
-                                              ToolTip="This NPC is defined in multiple source plugins. Right-click to select the correct source."
+                                              ToolTip="{l:Loc thisNPCIsDefined}"
                                               Width="{Binding RelativeSource={RelativeSource AncestorType=Grid}, Path=ActualWidth, Converter={StaticResource PercentageSizingConverter}, ConverterParameter='20'}"
                                               Height="{Binding RelativeSource={RelativeSource Self}, Path=Width}">
                                             <Viewbox Stretch="Uniform">
@@ -1132,19 +1014,14 @@
                                                    </MenuItem.Style>
                                                </MenuItem>
                                                <Separator />
-                                               <MenuItem Command="{Binding AddToFavoritesCommand}"> 
-                                                   <MenuItem.Style> 
-                                                       <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}"> 
-                                                           <Setter Property="Header" Value="Add to Favorites"/> 
-                                                           <Style.Triggers> 
-                                                               <DataTrigger Binding="{Binding IsFavorite}" Value="True"> 
-                                                                   <Setter Property="Header" Value="Remove from Favorites"/> 
-                                                               </DataTrigger> 
-                                                           </Style.Triggers> 
-                                                       </Style> 
-                                                   </MenuItem.Style> 
+                                               <MenuItem Command="{Binding AddToFavoritesCommand}">
+                                                   <MenuItem.Style>
+                                                       <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
+                                                           <Setter Property="Header" Value="{Binding FavoriteMenuItemText}"/>
+                                                       </Style>
+                                                   </MenuItem.Style>
                                                </MenuItem> 
-                                               <MenuItem Header="Select Source Plugin" 
+                                               <MenuItem Header="{l:Loc selectSourcePlugin}" 
                                                          Visibility="{Binding IsAmbiguousSource, Converter={StaticResource BooleanToVisibilityConverter}}" 
                                                          ItemsSource="{Binding AvailableSourcePlugins}"> 
                                                    <MenuItem.ItemContainerStyle> 
@@ -1166,12 +1043,12 @@
                                                        </Style> 
                                                    </MenuItem.ItemContainerStyle> 
                                                </MenuItem> 
-                                               <MenuItem Header="Select Same Source Plugin Where Possible" 
+                                               <MenuItem Header="{l:Loc selectSameSourcePlugin}" 
                                                          Visibility="{Binding IsAmbiguousSource, Converter={StaticResource BooleanToVisibilityConverter}}" 
                                                          Command="{Binding SelectSameSourcePluginWherePossibleCommand}" 
-                                                         ToolTip="For all other ambiguous NPCs in this mod, sets their source to this source plugin if it contains the NPC."/> 
+                                                         ToolTip="{l:Loc forAllOtherAmbiguous}"/> 
                                                <Separator/>
-                                               <MenuItem Header="Open Mod Folder" 
+                                               <MenuItem Header="{l:Loc openModFolder}" 
                                                   ItemsSource="{Binding ParentVMModSetting.CorrespondingFolderPaths}"
                                                   Command="{Binding OpenFolderCommand}"
                                                   CommandParameter="{Binding ParentVMModSetting.CorrespondingFolderPaths[0]}"
@@ -1196,11 +1073,11 @@
                                                 </Style>
                                             </MenuItem.ItemContainerStyle>
                                         </MenuItem>
-                                        <MenuItem Header="Open Mugshot Folder" 
+                                        <MenuItem Header="{l:Loc openMugshotFolder}" 
                                                   Command="{Binding OpenFolderCommand}"
                                                   CommandParameter="{Binding MugshotFolderPath}"
                                                   Visibility="{Binding CanOpenMugshotFolder, Converter={StaticResource BooleanToVisibilityConverter}}"/>
-                                               <MenuItem Header="Visit Mod Page"
+                                               <MenuItem Header="{l:Loc visitModPage}"
                                                          DisplayMemberPath="DisplayName"
                                                          Visibility="{Binding CanVisitModPage, Converter={StaticResource BooleanToVisibilityConverter}}">
                                                    <MenuItem.Style>
@@ -1264,94 +1141,94 @@
         <Border Grid.Row="1" BorderBrush="Gray" BorderThickness="0,1,0,0" Padding="5">
             <DockPanel LastChildFill="True">
 
-                <GroupBox Header="Zoom Controls" DockPanel.Dock="Right" Margin="10,2,0,2" Padding="5,2">
+                <GroupBox Header="{l:Loc zoomControls}" DockPanel.Dock="Right" Margin="10,2,0,2" Padding="5,2">
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <Button x:Name="ZoomOutButtonMods" Content="-" Width="25" Height="25" Margin="2,0" ToolTip="Zoom Out (Ctrl+Scroll Wheel)"/>
+                        <Button x:Name="ZoomOutButtonMods" Content="-" Width="25" Height="25" Margin="2,0" ToolTip="{l:Loc zoomOutCtrlScroll}"/>
                         <TextBox x:Name="ZoomPercentageTextBoxMods" Width="60" Height="25" Margin="2,0" TextAlignment="Center" VerticalContentAlignment="Center"
                                  Text="{Binding ModsViewZoomLevel, StringFormat='F2', Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                  PreviewMouseWheel="ZoomPercentageTextBoxMods_PreviewMouseWheel"
-                                 ToolTip="Current Zoom Level. Editable. Ctrl+Scroll Wheel in image area or Scroll Wheel here to adjust."/>
+                                 ToolTip="{l:Loc currentZoomLevel}"/>
                         <TextBlock Text="%" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                        <Button x:Name="ZoomInButtonMods" Content="+" Width="25" Height="25" Margin="2,0" ToolTip="Zoom In (Ctrl+Scroll Wheel)"/>
-                        <CheckBox x:Name="LockZoomCheckBoxMods" Content="Lock Zoom" Margin="10,0,5,0" VerticalAlignment="Center" ToolTip="Lock the current zoom level. If unchecked, zoom adjusts to fit images."/>
-                        <Button x:Name="ResetZoomModsButton" Content="Reset Zoom" Margin="5,0,0,0" Padding="5,2"
+                        <Button x:Name="ZoomInButtonMods" Content="+" Width="25" Height="25" Margin="2,0" ToolTip="{l:Loc zoomInCtrlScroll}"/>
+                        <CheckBox x:Name="LockZoomCheckBoxMods" Content="{l:Loc lockZoom}" Margin="10,0,5,0" VerticalAlignment="Center" ToolTip="{l:Loc lockTheCurrentZoom}"/>
+                        <Button x:Name="ResetZoomModsButton" Content="{l:Loc resetZoom}" Margin="5,0,0,0" Padding="5,2"
                                 Command="{Binding ResetZoomModsCommand}"
-                                ToolTip="Reset zoom to automatically fit images."/>
+                                ToolTip="{l:Loc resetZoomToAutomatically}"/>
                     </StackPanel>
                 </GroupBox>
 
                 <WrapPanel VerticalAlignment="Center">
-                    <TextBlock Text="Batch Actions:" FontWeight="SemiBold" VerticalAlignment="Center" Margin="10,2,5,2"/>
+                    <TextBlock Text="{l:Loc batch}" FontWeight="SemiBold" VerticalAlignment="Center" Margin="10,2,5,2"/>
 
-                    <GroupBox Header="Refresh" Margin="5,2" Padding="5,2">
+                    <GroupBox Header="{l:Loc refresh}" Margin="5,2" Padding="5,2">
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                            <Button Content="Refresh All" Command="{Binding RefreshAllModsCommand}" Padding="5,2" ToolTip="Completely re-scans all mod folders and rebuilds the mod list."/>
-                            <CheckBox Content="Rescan Non-Appearance Mods"
+                            <Button Content="{l:Loc refreshAll}" Command="{Binding RefreshAllModsCommand}" Padding="5,2" ToolTip="{l:Loc completelyReScansAll}"/>
+                            <CheckBox Content="{l:Loc rescanNonAppearanceMods}"
                                       IsChecked="{Binding ShouldRescanNonAppearanceMods, Mode=TwoWay}"
                                       VerticalAlignment="Center"
                                       Margin="5,0,0,0"
-                                      ToolTip="If checked, the 'Refresh All' action will also clear the cache of non-appearance mods and attempt to re-import them."/>
+                                      ToolTip="{l:Loc ifCheckedTheRefresh}"/>
                         </StackPanel>
                     </GroupBox>
 
-                    <GroupBox Header="Outfits" Margin="5,2" Padding="5,2">
+                    <GroupBox Header="{l:Loc outfits}" Margin="5,2" Padding="5,2">
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                            <Button Content="Include" Command="{Binding BatchIncludeOutfitsCommand}" Margin="0,0,5,0" Padding="5,2" ToolTip="Enable 'Include Outfits' for ALL mods."/>
-                            <Button Content="Exclude" Command="{Binding BatchExcludeOutfitsCommand}" Padding="5,2" ToolTip="Disable 'Include Outfits' for ALL mods."/>
+                            <Button Content="{l:Loc include}" Command="{Binding BatchIncludeOutfitsCommand}" Margin="0,0,5,0" Padding="5,2" ToolTip="{l:Loc enableIncludeOutfitsFor}"/>
+                            <Button Content="{l:Loc exclude}" Command="{Binding BatchExcludeOutfitsCommand}" Padding="5,2" ToolTip="{l:Loc disableIncludeOutfitsFor}"/>
                         </StackPanel>
                     </GroupBox>
 
-                    <GroupBox Header="Injected Record Search" Margin="5,2" Padding="5,2">
+                    <GroupBox Header="{l:Loc injectedRecordSearch}" Margin="5,2" Padding="5,2">
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                            <Button Content="Enable" Command="{Binding BatchEnableInjectedRecordsCommand}" Margin="0,0,5,0" Padding="5,2" ToolTip="Enable 'Search for Injected Records' for ALL mods."/>
-                            <Button Content="Disable" Command="{Binding BatchDisableInjectedRecordsCommand}" Padding="5,2" ToolTip="Disable 'Search for Injected Records' for ALL mods."/>
+                            <Button Content="{l:Loc enable}" Command="{Binding BatchEnableInjectedRecordsCommand}" Margin="0,0,5,0" Padding="5,2" ToolTip="{l:Loc enableSearchForInjected}"/>
+                            <Button Content="{l:Loc disable}" Command="{Binding BatchDisableInjectedRecordsCommand}" Padding="5,2" ToolTip="{l:Loc disableSearchForInjected}"/>
                         </StackPanel>
                     </GroupBox>
 
-                    <GroupBox Header="Merge-in" Margin="5,2" Padding="5,2">
+                    <GroupBox Header="{l:Loc mergeIn}" Margin="5,2" Padding="5,2">
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                            <Button Content="On" Command="{Binding BatchEnableMergeInCommand}" Margin="0,0,5,0" Padding="5,2" ToolTip="Enable 'Merge Dependencies' for all mods not flagged as non-appearance."/>
-                            <Button Content="Force" Command="{Binding BatchForceEnableMergeInCommand}" Margin="0,0,5,0" Padding="5,2" ToolTip="Enable 'Merge Dependencies' for ALL mods (use with caution)."/>
-                            <Button Content="Off" Command="{Binding BatchDisableMergeInCommand}" Padding="5,2" ToolTip="Disable 'Merge Dependencies' for ALL mods."/>
+                            <Button Content="{l:Loc on}" Command="{Binding BatchEnableMergeInCommand}" Margin="0,0,5,0" Padding="5,2" ToolTip="{l:Loc enableMergeDependenciesFor}"/>
+                            <Button Content="{l:Loc force}" Command="{Binding BatchForceEnableMergeInCommand}" Margin="0,0,5,0" Padding="5,2" ToolTip="{l:Loc enableMergeDependencies}"/>
+                            <Button Content="{l:Loc off}" Command="{Binding BatchDisableMergeInCommand}" Padding="5,2" ToolTip="{l:Loc disableMergeDependenciesFor}"/>
                         </StackPanel>
                     </GroupBox>
 
-                    <GroupBox Header="Asset Copying" Margin="5,2" Padding="5,2">
+                    <GroupBox Header="{l:Loc assetCopying}" Margin="5,2" Padding="5,2">
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                            <Button Content="Enable" Command="{Binding BatchEnableCopyAssetsCommand}" Margin="0,0,5,0" Padding="5,2" ToolTip="Enable 'Copy Assets' for ALL mods."/>
-                            <Button Content="Disable" Command="{Binding BatchDisableCopyAssetsCommand}" Padding="5,2" ToolTip="Disable 'Copy Assets' for ALL mods."/>
+                            <Button Content="{l:Loc enable}" Command="{Binding BatchEnableCopyAssetsCommand}" Margin="0,0,5,0" Padding="5,2" ToolTip="{l:Loc enableCopyAssetsFor}"/>
+                            <Button Content="{l:Loc disable}" Command="{Binding BatchDisableCopyAssetsCommand}" Padding="5,2" ToolTip="{l:Loc disableCopyAssetsFor}"/>
                         </StackPanel>
                     </GroupBox>
                     
-                    <GroupBox Header="CotR" Margin="5,2" Padding="5,2">
+                    <GroupBox Header="{l:Loc cotR}" Margin="5,2" Padding="5,2">
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                            <TextBlock Text="Keyword:" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                            <TextBlock Text="{l:Loc keyword}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                             <TextBox Text="{Binding CotRKeyword, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" 
                                      Width="80" VerticalAlignment="Center" Margin="0,0,5,0"
-                                     ToolTip="The keyword that will be applied to Charmers of the Reach mods and used to identify them for RSV exclusion."/>
-                            <Button Content="Auto-Apply CotR Keyword" 
+                                     ToolTip="{l:Loc theKeywordThatWill}"/>
+                            <Button Content="{l:Loc autoApplyCotRKeyword}" 
                                     Command="{Binding ApplyCotRKeywordCommand}" 
                                     Margin="0,0,5,0" Padding="5,2" 
-                                    ToolTip="Reads CotR_Plugins.txt from the application directory and applies the CotR keyword to all mod settings containing a matching plugin. The default list includes many popular CotR-based replacers but can be edited manually."/>
-                            <Button Content="Write RSV Exclusion" 
+                                    ToolTip="{l:Loc readsCotRPluginsTxt}"/>
+                            <Button Content="{l:Loc writeRSVExclusion}" 
                                     Command="{Binding WriteRsvExclusionCommand}" 
                                     Padding="5,2" 
-                                    ToolTip="Adds the 'RSVignore' keyword to all mod settings that have the CotR keyword, preventing RSV from overwriting their skin textures."/>
+                                    ToolTip="{l:Loc addsTheRSVignoreKeyword}"/>
                         </StackPanel>
                     </GroupBox>
                     
                     <GroupBox Margin="5,2" Padding="5,2"
                               Visibility="{Binding ShowSourcePluginControls, Converter={StaticResource BooleanToVisibilityConverter}}">
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                            <TextBlock Text="Source Plugin for Ambiguous NPCs:" VerticalAlignment="Center" Margin="0,0,5,0"
-                                       ToolTip="Select a plugin to be the default source for NPCs found in multiple plugins within this mod setting."/>
+                            <TextBlock Text="{l:Loc sourcePluginForAmbiguous}" VerticalAlignment="Center" Margin="0,0,5,0"
+                                       ToolTip="{l:Loc selectAPluginTo}"/>
                             <ComboBox ItemsSource="{Binding AvailableSourcePluginsForSelectedMod}" 
                                       SelectedItem="{Binding SelectedSourcePluginForDisambiguation, Mode=TwoWay}"
                                       DisplayMemberPath="FileName"
                                       MinWidth="150" VerticalAlignment="Center" Margin="0,0,5,0"/>
-                            <Button Content="Set as Source Plugin" Command="{Binding SetGlobalSourcePluginCommand}" 
+                            <Button Content="{l:Loc setAsSourcePlugin}" Command="{Binding SetGlobalSourcePluginCommand}" 
                                     Padding="5,2" VerticalAlignment="Center"
-                                    ToolTip="Set the selected plugin as the primary source for all NPCs in this mod setting that are found in multiple plugins."/>
+                                    ToolTip="{l:Loc setTheSelectedPlugin}"/>
                         </StackPanel>
                     </GroupBox>
                 </WrapPanel>

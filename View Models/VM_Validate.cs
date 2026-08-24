@@ -11,6 +11,7 @@ using Mutagen.Bethesda.Plugins;
 using Mutagen.Bethesda.Skyrim;
 using NPC_Plugin_Chooser_2.BackEnd;
 using NPC_Plugin_Chooser_2.Models;
+using NPC_Plugin_Chooser_2.Localization;
 using NPC_Plugin_Chooser_2.Views;
 using ReactiveUI;
 
@@ -80,15 +81,15 @@ public class VM_Validate : ReactiveObject, IDisposable
         if (_environmentStateProvider.Status != EnvironmentStateProvider.EnvironmentStatus.Valid)
         {
             ScrollableMessageBox.ShowWarning(
-                "The game environment is not valid. Resolve it on the Settings page (a working load order and data folder are required) before validating output.",
-                "Validate Output");
+                GetTranslation("theGameEnvironmentIs", "The game environment is not valid. Resolve it on the Settings page (a working load order and data folder are required) before validating output."),
+                GetTranslation("validateOutput", "Validate Output"));
             return;
         }
 
         var selections = _model.SelectedAppearanceMods;
         if (selections == null || selections.Count == 0)
         {
-            ScrollableMessageBox.ShowWarning("No appearance selections have been made yet, so there is nothing to validate.", "Validate Output");
+            ScrollableMessageBox.ShowWarning(GetTranslation("msg_noAppearanceSelectionsMade", "No appearance selections have been made yet, so there is nothing to validate."), GetTranslation("validateOutput", "Validate Output"));
             return;
         }
 
@@ -107,7 +108,7 @@ public class VM_Validate : ReactiveObject, IDisposable
                 "To validate reliably: close N.P.C.2, make sure the generated output is installed and " +
                 "enabled in your mod manager, then relaunch N.P.C.2 through the mod manager and validate.\n\n" +
                 "Validate anyway?",
-                "Validate Output", MessageBoxImage.Warning);
+                GetTranslation("validateOutput", "Validate Output"), MessageBoxImage.Warning);
 
             if (!proceed) return;
             _staleOutputWarningAcknowledged = true;
@@ -120,7 +121,7 @@ public class VM_Validate : ReactiveObject, IDisposable
         var readiness = await Task.Run(() => _outputValidator.CheckDeployReadiness());
         if (!readiness.Ok)
         {
-            ScrollableMessageBox.ShowWarning(readiness.BlockReason ?? "Validation could not run.", "Validate Output");
+            ScrollableMessageBox.ShowWarning(readiness.BlockReason ?? GetTranslation("validationCouldNotRun", "Validation could not run."), GetTranslation("validateOutput", "Validate Output"));
             return;
         }
 
@@ -136,13 +137,13 @@ public class VM_Validate : ReactiveObject, IDisposable
         if (scopeResult != true) return;
         if (chosen.Count == 0)
         {
-            ScrollableMessageBox.ShowWarning("No NPCs were selected to validate.", "Validate Output");
+            ScrollableMessageBox.ShowWarning(GetTranslation("msg_noNpcsSelectedToValidate", "No NPCs were selected to validate."), GetTranslation("validateOutput", "Validate Output"));
             return;
         }
 
         var progressVm = new VM_ProgressWindow
         {
-            Title = "Validating Output",
+            Title = GetTranslation("validatingOutput", "Validating Output"),
             StatusMessage = "Preparing...",
             IsIndeterminate = true,
             ProgressMaximum = chosen.Count
@@ -184,7 +185,7 @@ public class VM_Validate : ReactiveObject, IDisposable
         {
             progressWindow.Close();
             progressVm.Dispose();
-            ScrollableMessageBox.ShowError("Validation failed:\n" + ExceptionLogger.GetExceptionStack(ex), "Validate Output");
+            ScrollableMessageBox.ShowError(string.Format(GetTranslation("validationFailed", "Validation failed:\n{0}"), ExceptionLogger.GetExceptionStack(ex)), GetTranslation("validateOutput", "Validate Output"));
             return;
         }
 
@@ -195,7 +196,7 @@ public class VM_Validate : ReactiveObject, IDisposable
 
         if (result.Blocked)
         {
-            ScrollableMessageBox.ShowWarning(result.BlockReason ?? "Validation could not run.", "Validate Output");
+            ScrollableMessageBox.ShowWarning(result.BlockReason ?? GetTranslation("validationCouldNotRun", "Validation could not run."), GetTranslation("validateOutput", "Validate Output"));
             return;
         }
 
@@ -247,4 +248,8 @@ public class VM_Validate : ReactiveObject, IDisposable
     {
         _disposables.Dispose();
     }
+
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
+
 }

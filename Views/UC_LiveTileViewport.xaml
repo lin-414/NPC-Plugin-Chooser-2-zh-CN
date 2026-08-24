@@ -1,6 +1,6 @@
-<UserControl x:Class="NPC_Plugin_Chooser_2.Views.UC_LiveTileViewport"
+﻿<UserControl x:Class="NPC_Plugin_Chooser_2.Views.UC_LiveTileViewport"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:vm="clr-namespace:NPC_Plugin_Chooser_2.View_Models"
@@ -19,7 +19,7 @@
         <glWpf:GLWpfControl x:Name="GlControl" Render="GlControl_OnRender"/>
         <Border Background="#80000000"
                 Visibility="{Binding Viewer.IsLoading, Converter={StaticResource BooleanToVisibilityConverter}, FallbackValue=Collapsed}">
-            <TextBlock Text="Loading…" Foreground="White" FontSize="13"
+            <TextBlock Text="{l:Loc loading}" Foreground="White" FontSize="13"
                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
         </Border>
     </Grid>

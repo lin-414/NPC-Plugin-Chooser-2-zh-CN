@@ -7,11 +7,12 @@
         xmlns:themes="clr-namespace:NPC_Plugin_Chooser_2.Themes"
         xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
         xmlns:reactiveui="http://reactiveui.net"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
         mc:Ignorable="d"
         x:TypeArguments="vm:VM_FavoriteBatchModSelector"
         d:DataContext="{d:DesignInstance Type=vm:VM_FavoriteBatchModSelector}"
         Style="{DynamicResource ThemedWindowStyle}"
-        Title="{Binding WindowTitle}" Width="540" SizeToContent="Height"
+        Title="{Binding WindowTitle}" Width="540" SizeToContent="{l:Loc height}"
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize"
         ShowInTaskbar="False">
@@ -34,12 +35,12 @@
                   SelectedItem="{Binding SelectedMod, Mode=TwoWay}"
                   DisplayMemberPath="DisplayText"
                   MaxDropDownHeight="400"
-                  ToolTip="Choose a mod. With the list focused you can type the start of a mod's name to jump to it."/>
+                  ToolTip="{l:Loc chooseAModWith}"/>
 
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,15,0,0">
             <Button Content="{Binding ConfirmButtonText}" MinWidth="80" IsDefault="True"
                     Command="{Binding ConfirmCommand}"/>
-            <Button Content="Cancel" MinWidth="80" Margin="5,0,0,0" IsCancel="True"
+            <Button Content="{l:Loc cancel}" MinWidth="80" Margin="5,0,0,0" IsCancel="True"
                     Command="{Binding CancelCommand}"/>
         </StackPanel>
     </Grid>

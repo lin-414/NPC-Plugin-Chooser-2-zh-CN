@@ -7,9 +7,10 @@
                            xmlns:local="clr-namespace:NPC_Plugin_Chooser_2.Views"
                            xmlns:vm="clr-namespace:NPC_Plugin_Chooser_2.View_Models"
                            xmlns:reactiveui="http://reactiveui.net"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
                            mc:Ignorable="d"
                            x:TypeArguments="vm:VM_FullScreenImage"
-                           Title="Image Preview"
+                           Title="{l:Loc imagePreview}"
                            WindowStyle="None" AllowsTransparency="True" Background="Transparent"
                            WindowState="Maximized" ShowInTaskbar="False"
                            d:DataContext="{d:DesignInstance Type=vm:VM_FullScreenImage}">

@@ -15,11 +15,14 @@ using NPC_Plugin_Chooser_2.View_Models;
 using NPC_Plugin_Chooser_2.Themes;
 using ReactiveUI;
 using Splat;
+using NPC_Plugin_Chooser_2.Localization;
 
 namespace NPC_Plugin_Chooser_2.Views
 {
     public partial class MainWindow : ReactiveWindow<VM_MainWindow>
     {
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
         private Settings _appSettings; // Store a reference to the settings
         public MainWindow()
         {
@@ -30,8 +33,8 @@ namespace NPC_Plugin_Chooser_2.Views
             if (ViewModel == null)
             {
                 MessageBox.Show(
-                    "Critical Error: Could not resolve the Main Window ViewModel.",
-                    "Initialization Failed",
+                    GetTranslation("msg_mainWindowVmResolveError", "Critical Error: Could not resolve the Main Window ViewModel."),
+                    GetTranslation("title_initializationFailed", "Initialization Failed"),
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
                 return;
@@ -239,8 +242,8 @@ namespace NPC_Plugin_Chooser_2.Views
             if (runner == null)
             {
                 MessageBox.Show(this,
-                    "MeshSurveyRunner is not registered in the container.",
-                    "Mesh Survey", MessageBoxButton.OK, MessageBoxImage.Error);
+                    GetTranslation("msg_meshSurveyNotRegistered", "MeshSurveyRunner is not registered in the container."),
+                    GetTranslation("title_meshSurvey", "Mesh Survey"), MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
             }
             var dlg = new MeshSurveyDialog(runner) { Owner = this };

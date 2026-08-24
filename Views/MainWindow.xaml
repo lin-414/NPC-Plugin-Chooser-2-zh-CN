@@ -9,10 +9,11 @@
                            xmlns:themes="clr-namespace:NPC_Plugin_Chooser_2.Themes"
                            xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
                            xmlns:reactiveui="http://reactiveui.net"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
                            mc:Ignorable="d"
                            x:TypeArguments="vm:VM_MainWindow"
                            d:DataContext="{d:DesignInstance Type=vm:VM_MainWindow}"
-                           Title="NPC Plugin Chooser" Height="700" Width="1000"
+                           Title="{l:Loc nPCPluginChooser}" Height="700" Width="1000"
                            Style="{DynamicResource ThemedWindowStyle}">
     
     <i:Interaction.Behaviors>

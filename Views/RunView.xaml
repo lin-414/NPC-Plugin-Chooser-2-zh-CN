@@ -7,6 +7,7 @@
                                 xmlns:local="clr-namespace:NPC_Plugin_Chooser_2.Views"
                                 xmlns:vm="clr-namespace:NPC_Plugin_Chooser_2.View_Models"
                                 xmlns:reactiveui="http://reactiveui.net"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
                                 mc:Ignorable="d"
                                 x:TypeArguments="vm:VM_Run"
                                 MinHeight="400"
@@ -35,7 +36,7 @@
                     Command="{Binding RunCommand}"
                     MinWidth="150" Padding="10,5" VerticalAlignment="Center"/>
 
-            <TextBlock Text="Patch NPCs In Group:" 
+            <TextBlock Text="{l:Loc patchNPCsInGroup}" 
                        DockPanel.Dock="Left" 
                        Margin="15,0,5,0" 
                        VerticalAlignment="Center"/>
@@ -46,36 +47,36 @@
                       SelectedItem="{Binding SelectedNpcGroup, Mode=TwoWay}"
                       DisplayMemberPath="."
                       VerticalAlignment="Center"
-                      ToolTip="Select an NPC group to process, or 'All NPCs' to process all selected NPCs."/>
+                      ToolTip="{l:Loc selectAnNPCGroup}"/>
             
-            <Button Content="Generate Spawn Bat"
+            <Button Content="{l:Loc generateSpawnBat}"
                     Command="{Binding GenerateSpawnBatCommand}"
                     DockPanel.Dock="Left"
                     Margin="5,0,0,0"
                     VerticalAlignment="Center"
-                    ToolTip="Generates a .txt batch file to spawn all NPCs from the selected group."/>
+                    ToolTip="{l:Loc generatesATxtBatch}"/>
 
             <CheckBox x:Name="PerformanceLoggingCheckBox"
                       DockPanel.Dock="Left"
-                      Content="Performance Logging"
+                      Content="{l:Loc performanceLogging}"
                       IsChecked="{Binding IsPerformanceLoggingEnabled, Mode=TwoWay}"
                       VerticalAlignment="Center"
                       Margin="15,0,0,0"
-                      ToolTip="Log the per-batch performance report (total NPCs processed, total cycle time, average time per NPC) to the log below. Turn off to keep the log focused on what was patched."/>
+                      ToolTip="{l:Loc logThePerBatch}"/>
 
             <CheckBox x:Name="VerboseModeCheckBox"
                       DockPanel.Dock="Left"
-                      Content="Verbose Logging"
+                      Content="{l:Loc verboseLogging}"
                       IsChecked="{Binding IsVerboseModeEnabled, Mode=TwoWay}"
                       VerticalAlignment="Center"
                       Margin="15,0,0,0"/>
             
-            <Button Content="Environment Status"
+            <Button Content="{l:Loc environmentStatus}"
                     Command="{Binding ShowStatusCommand}"
                     DockPanel.Dock="Left"
                     Margin="15,0,0,0"
                     VerticalAlignment="Center"
-                    ToolTip="Generates a report detailing the current app environment"/>
+                    ToolTip="{l:Loc generatesAReportDetailing}"/>
             
             <TextBlock /> <!-- Fills remaining space as LastChildFill is true by default -->
         </DockPanel>
@@ -109,10 +110,10 @@
                  LostMouseCapture="LogListBox_LostMouseCapture">
             <ListBox.ContextMenu>
                 <ContextMenu>
-                    <MenuItem Header="Copy Selected Lines"
-                              InputGestureText="Ctrl+C"
+                    <MenuItem Header="{l:Loc copySelectedLines}"
+                              InputGestureText="{l:Loc ctrlC}"
                               Click="CopySelectedLogLines_Click"/>
-                    <MenuItem Header="Copy Entire Log"
+                    <MenuItem Header="{l:Loc copyEntireLog}"
                               Click="CopyEntireLog_Click"/>
                 </ContextMenu>
             </ListBox.ContextMenu>

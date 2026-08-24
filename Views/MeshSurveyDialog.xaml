@@ -5,8 +5,9 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:themes="clr-namespace:NPC_Plugin_Chooser_2.Themes"
         xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
         mc:Ignorable="d"
-        Title="Mesh Survey"
+        Title="{l:Loc meshSurvey}"
         Height="200" Width="560"
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize"
@@ -26,7 +27,7 @@
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0"
-                   Text="Surveying NIFs for one NPC per mod with a non-empty mod-folder list."
+                   Text="{l:Loc surveyingNIFsForOne}"
                    TextWrapping="Wrap"
                    Margin="0,0,0,8"/>
 
@@ -40,7 +41,7 @@
                    x:Name="StatusText"
                    Margin="0,8,0,0"
                    TextTrimming="CharacterEllipsis"
-                   Text="Preparing…"/>
+                   Text="{l:Loc preparing}"/>
 
         <TextBlock Grid.Row="3"
                    x:Name="OutputPathText"
@@ -55,12 +56,12 @@
                     HorizontalAlignment="Right"
                     Margin="0,8,0,0">
             <Button x:Name="OpenFolderButton"
-                    Content="Open RenderLogs Folder"
+                    Content="{l:Loc openRenderLogsFolder}"
                     Padding="10,4"
                     IsEnabled="False"
                     Click="OpenFolderButton_Click"/>
             <Button x:Name="CancelButton"
-                    Content="Cancel"
+                    Content="{l:Loc cancel}"
                     Margin="8,0,0,0"
                     Padding="10,4"
                     IsCancel="True"

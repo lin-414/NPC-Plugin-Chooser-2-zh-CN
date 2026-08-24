@@ -9,11 +9,15 @@ using Noggog;
 using NPC_Plugin_Chooser_2.Models;
 using NPC_Plugin_Chooser_2.View_Models;
 using NPC_Plugin_Chooser_2.Views;
+using NPC_Plugin_Chooser_2.Localization;
 
 namespace NPC_Plugin_Chooser_2.BackEnd;
 
 public class EasyNpcTranslator
 {
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
+
     private readonly EnvironmentStateProvider _environmentStateProvider;
     private readonly NpcConsistencyProvider _consistencyProvider;
     private readonly Lazy<VM_NpcSelectionBar> _lazyNpcSelectionBar;
@@ -190,7 +194,7 @@ public class EasyNpcTranslator
         }
         catch (Exception ex)
         {
-            ScrollableMessageBox.ShowError($"Error reading file '{filePath}':\n{ex.Message}", "File Read Error");
+            ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_fileReadError", "Error reading file '{0}':\n{1}"), filePath, ex.Message), GetTranslation("title_fileReadError", "File Read Error"));
             return;
         }
 
@@ -199,10 +203,10 @@ public class EasyNpcTranslator
         {
             var errorMsg =
                 new StringBuilder(
-                    $"Encountered {errors.Count} errors while parsing '{Path.GetFileName(filePath)}':\n\n");
+                    string.Format(GetTranslation("msg_parsingErrorsEncountered", "Encountered {0} errors while parsing '{1}':\n\n"), errors.Count, Path.GetFileName(filePath)));
             errorMsg.AppendLine(string.Join("\n", errors));
-            errorMsg.AppendLine("\nThese lines were skipped. Continue processing?");
-            if (!ScrollableMessageBox.Confirm(errorMsg.ToString(), "Parsing Errors"))
+            errorMsg.AppendLine(GetTranslation("msg_linesSkippedContinue", "\nThese lines were skipped. Continue processing?"));
+            if (!ScrollableMessageBox.Confirm(errorMsg.ToString(), GetTranslation("title_parsingErrors", "Parsing Errors")))
             {
                 return; // Cancel based on parsing errors
             }
@@ -239,12 +243,12 @@ public class EasyNpcTranslator
             
 
             missingMsg.AppendLine(
-                $"\nWould you like to import the remaining {potentialChanges.Count} NPCs for which a mod could be found?");
+                string.Format(GetTranslation("msg_importRemainingPrompt", "\nWould you like to import the remaining {0} NPCs for which a mod could be found?"), potentialChanges.Count));
 
-            if (!ScrollableMessageBox.Confirm(missingMsg.ToString(), "Missing Appearance Plugin Mappings",
+            if (!ScrollableMessageBox.Confirm(missingMsg.ToString(), GetTranslation("title_missingAppearancePluginMappings", "Missing Appearance Plugin Mappings"),
                     MessageBoxImage.Warning)) // User chose Cancel
             {
-                MessageBox.Show("Import cancelled.", "Import Cancelled", MessageBoxButton.OK,
+                MessageBox.Show(GetTranslation("msg_importCancelled", "Import cancelled."), GetTranslation("title_importCancelled", "Import Cancelled"), MessageBoxButton.OK,
                     MessageBoxImage.Information);
                 return;
             }
@@ -259,16 +263,16 @@ public class EasyNpcTranslator
         {
             var ambiguousMsg =
                 new StringBuilder(
-                    "The following Appearance Plugins from EasyNPC match multiple AppearanceMods in your mod list:");
+                    GetTranslation("msg_ambiguousPluginsIntro", "The following Appearance Plugins from EasyNPC match multiple AppearanceMods in your mod list:"));
             foreach (var entry in ambiguousChanges)
             {
                 ambiguousMsg.AppendLine($"{entry.Key.FileName}: " + string.Join(", ", entry.Value));
             }
 
             ambiguousMsg.AppendLine(
-                $"\nWould you like to import the corresponding NPCs using the first matched Appearance Mod for each plugin?");
+                GetTranslation("msg_ambiguousImportPrompt", "\nWould you like to import the corresponding NPCs using the first matched Appearance Mod for each plugin?"));
 
-            if (!ScrollableMessageBox.Confirm(ambiguousMsg.ToString(), "Ambiguous Appearance Plugin Mappings",
+            if (!ScrollableMessageBox.Confirm(ambiguousMsg.ToString(), GetTranslation("title_ambiguousAppearancePluginMappings", "Ambiguous Appearance Plugin Mappings"),
                     MessageBoxImage.Warning))
             {
                 var toRemove = ambiguousChanges.Keys.ToHashSet();
@@ -283,8 +287,8 @@ public class EasyNpcTranslator
         if (!potentialChanges.Any())
         {
             ScrollableMessageBox.Show(
-                "No valid changes found to apply after processing the file (possibly due to skipping or parsing errors).",
-                "Import Empty");
+                GetTranslation("msg_noValidChangesFound", "No valid changes found to apply after processing the file (possibly due to skipping or parsing errors)."),
+                GetTranslation("title_importEmpty", "Import Empty"));
             return;
         }
 
@@ -319,10 +323,9 @@ public class EasyNpcTranslator
         if (changesToConfirm.Any()) // Specific *overwrites* will occur
         {
             confirmationMessage =
-                $"The following {changesToConfirm.Count} existing NPC appearance assignments will be changed:\n\n" +
-                string.Join("\n", changesToConfirm);
+                string.Format(GetTranslation("msg_confirmImportChanges", "The following {0} existing NPC appearance assignments will be changed:\n\n{1}"), changesToConfirm.Count, string.Join("\n", changesToConfirm));
 
-            if (!ScrollableMessageBox.Confirm(confirmationMessage, "Confirm Import"))
+            if (!ScrollableMessageBox.Confirm(confirmationMessage, GetTranslation("title_confirmImport", "Confirm Import")))
             {
                 return;
             }
@@ -352,7 +355,7 @@ public class EasyNpcTranslator
         var assignedAppearanceNpcFormKeys = _settings.SelectedAppearanceMods.Keys.ToList();
         if (!assignedAppearanceNpcFormKeys.Any())
         {
-            ScrollableMessageBox.Show("No NPC appearance assignments have been made yet. Nothing to export.", "Export Empty");
+            ScrollableMessageBox.Show(GetTranslation("msg_exportNothingYet", "No NPC appearance assignments have been made yet. Nothing to export."), GetTranslation("title_exportEmpty", "Export Empty"));
             return;
         }
 
@@ -411,24 +414,23 @@ public class EasyNpcTranslator
         var allErrors = formKeyErrors.Concat(appearanceModErrors).Concat(defaultPluginErrors).ToList();
         if (allErrors.Any())
         {
-            var errorMsg = new StringBuilder($"Encountered {allErrors.Count} errors during export processing:\n\n");
+            var errorMsg = new StringBuilder(string.Format(GetTranslation("msg_exportErrorsEncountered", "Encountered {0} errors during export processing:\n\n"), allErrors.Count));
             errorMsg.AppendLine(string.Join("\n", allErrors));
-            errorMsg.AppendLine("\nDo you want to save the successfully processed entries?");
+            errorMsg.AppendLine(GetTranslation("msg_exportSaveSuccessfulPrompt", "\nDo you want to save the successfully processed entries?"));
 
-            if (!ScrollableMessageBox.Confirm(errorMsg.ToString(), "Export Errors"))
+            if (!ScrollableMessageBox.Confirm(errorMsg.ToString(), GetTranslation("title_exportErrors", "Export Errors")))
             {
-                MessageBox.Show("Export cancelled due to errors.", "Export Cancelled", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show(GetTranslation("msg_exportCancelledDueToErrors", "Export cancelled due to errors."), GetTranslation("title_exportCancelled", "Export Cancelled"), MessageBoxButton.OK, MessageBoxImage.Information);
                 return;
             }
         }
 
         if (facegenOnlyWarnings.Any())
         {
-            var warningMsg = new StringBuilder("The following NPCs are assigned to FaceGen-only mods, which EasyNPC can't ");
-            warningMsg.AppendLine("differentiate from the originating plugin. Press Yes to include them, or No to remove them from the output:\n\n");
+            var warningMsg = new StringBuilder(GetTranslation("msg_facegenOnlyWarning", "The following NPCs are assigned to FaceGen-only mods, which EasyNPC can't differentiate from the originating plugin. Press Yes to include them, or No to remove them from the output:\n\n"));
             warningMsg.AppendLine(string.Join("\n", facegenOnlyWarnings.Values));
 
-            if (!ScrollableMessageBox.Confirm(warningMsg.ToString(), "Export Warnings"))
+            if (!ScrollableMessageBox.Confirm(warningMsg.ToString(), GetTranslation("title_exportWarnings", "Export Warnings")))
             {
                 outputStrs.RemoveAll(line => facegenOnlyWarnings.ContainsKey(line.Split('=')[0]));
             }
@@ -436,7 +438,7 @@ public class EasyNpcTranslator
 
         if (!outputStrs.Any())
         {
-            ScrollableMessageBox.Show("No valid NPC assignments could be exported.", "Export Empty");
+            ScrollableMessageBox.Show(GetTranslation("msg_exportNothingValid", "No valid NPC assignments could be exported."), GetTranslation("title_exportEmpty", "Export Empty"));
             return;
         }
 
@@ -450,7 +452,7 @@ public class EasyNpcTranslator
 
         if (saveFileDialog.ShowDialog() != true)
         {
-            ScrollableMessageBox.Show("Export cancelled by user.", "Export Cancelled");
+            ScrollableMessageBox.Show(GetTranslation("msg_exportCancelledByUser", "Export cancelled by user."), GetTranslation("title_exportCancelled", "Export Cancelled"));
             return;
         }
         string outputFilePath = saveFileDialog.FileName;
@@ -459,11 +461,11 @@ public class EasyNpcTranslator
         try
         {
             File.WriteAllLines(outputFilePath, outputStrs, new UTF8Encoding(false));
-            ScrollableMessageBox.Show($"Successfully exported assignments for {outputStrs.Count} NPCs to:\n{outputFilePath}", "Export Complete");
+            ScrollableMessageBox.Show(string.Format(GetTranslation("msg_exportComplete", "Successfully exported assignments for {0} NPCs to:\n{1}"), outputStrs.Count, outputFilePath), GetTranslation("title_exportComplete", "Export Complete"));
         }
         catch (Exception ex)
         {
-            ScrollableMessageBox.ShowError($"Failed to save the export file:\n{ex.Message}", "File Save Error");
+            ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_exportFileSaveError", "Failed to save the export file:\n{0}"), ex.Message), GetTranslation("title_fileSaveError", "File Save Error"));
         }
     }
 
@@ -530,7 +532,7 @@ public class EasyNpcTranslator
         }
         catch (Exception ex)
         {
-            ScrollableMessageBox.ShowError($"Error reading existing profile file '{filePath}':\n{ex.Message}", "File Read Error");
+            ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_updateFileReadError", "Error reading existing profile file '{0}':\n{1}"), filePath, ex.Message), GetTranslation("title_fileReadError", "File Read Error"));
             return;
         }
 
@@ -538,7 +540,7 @@ public class EasyNpcTranslator
         var appNpcSelections = _settings.SelectedAppearanceMods.ToList();
         if (!appNpcSelections.Any())
         {
-            ScrollableMessageBox.Show("No NPC appearance assignments are currently selected in the application. Nothing to update.", "Update Empty");
+            ScrollableMessageBox.Show(GetTranslation("msg_updateNothingSelected", "No NPC appearance assignments are currently selected in the application. Nothing to update."), GetTranslation("title_updateEmpty", "Update Empty"));
             return;
         }
 
@@ -634,11 +636,11 @@ public class EasyNpcTranslator
                 reportMsg.AppendLine();
             }
 
-            reportMsg.AppendLine("Do you want to save the updates for the successfully processed NPCs?");
+            reportMsg.AppendLine(GetTranslation("msg_updateSavePrompt", "Do you want to save the updates for the successfully processed NPCs?"));
 
-            if (!ScrollableMessageBox.Confirm(reportMsg.ToString(), "Update Issues"))
+            if (!ScrollableMessageBox.Confirm(reportMsg.ToString(), GetTranslation("title_updateIssues", "Update Issues")))
             {
-                ScrollableMessageBox.Show("Update cancelled.", "Update Cancelled");
+                ScrollableMessageBox.Show(GetTranslation("msg_updateCancelled", "Update cancelled."), GetTranslation("title_updateCancelled", "Update Cancelled"));
                 return;
             }
         }
@@ -653,7 +655,7 @@ public class EasyNpcTranslator
 
         if (updatedCount == 0 && addedCount == 0)
         {
-            ScrollableMessageBox.Show("No changes were made to the profile file (assignments might already match).", "No Changes");
+            ScrollableMessageBox.Show(GetTranslation("msg_updateNoChanges", "No changes were made to the profile file (assignments might already match)."), GetTranslation("title_noChanges", "No Changes"));
             return;
         }
 
@@ -668,7 +670,7 @@ public class EasyNpcTranslator
 
         if (saveFileDialog.ShowDialog() != true)
         {
-            ScrollableMessageBox.Show("Update cancelled by user.", "Update Cancelled");
+            ScrollableMessageBox.Show(GetTranslation("msg_updateCancelledByUser", "Update cancelled by user."), GetTranslation("title_updateCancelled", "Update Cancelled"));
             return;
         }
         string outputFilePath = saveFileDialog.FileName;
@@ -678,15 +680,13 @@ public class EasyNpcTranslator
         {
             File.WriteAllLines(outputFilePath, updatedLines, new UTF8Encoding(false));
 
-            string successMessage = $"Successfully updated profile file:\n{outputFilePath}\n\n";
-            successMessage += $"Existing NPCs Updated: {updatedCount}\n";
-            successMessage += $"Missing NPCs Added: {addedCount}";
+            string successMessage = string.Format(GetTranslation("msg_updateCompleteBody", "Successfully updated profile file:\n{0}\n\nExisting NPCs Updated: {1}\nMissing NPCs Added: {2}"), outputFilePath, updatedCount, addedCount);
 
-            ScrollableMessageBox.Show(successMessage, "Update Complete");
+            ScrollableMessageBox.Show(successMessage, GetTranslation("title_updateComplete", "Update Complete"));
         }
         catch (Exception ex)
         {
-            ScrollableMessageBox.ShowError($"Failed to save the updated profile file:\n{ex.Message}", "File Save Error");
+            ScrollableMessageBox.ShowError(string.Format(GetTranslation("msg_updateFileSaveError", "Failed to save the updated profile file:\n{0}"), ex.Message), GetTranslation("title_fileSaveError", "File Save Error"));
         }
     }
 

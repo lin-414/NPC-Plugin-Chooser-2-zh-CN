@@ -5,8 +5,9 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:themes="clr-namespace:NPC_Plugin_Chooser_2.Themes"
         xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
+             xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
         mc:Ignorable="d"
-        Title="Select Masters to Analyze"
+        Title="{l:Loc selectMastersToAnalyze}"
         Height="450" Width="500"
         WindowStartupLocation="CenterOwner"
         ResizeMode="CanResizeWithGrip"
@@ -26,19 +27,19 @@
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0" 
-                   Text="Analyzing Masters For:" 
+                   Text="{l:Loc analyzingMastersFor}" 
                    FontWeight="SemiBold"
                    Margin="0,0,0,5"/>
         
         <TextBlock Grid.Row="1" 
                    x:Name="TargetPluginTextBlock"
-                   Text="[Plugin Name]"
+                   Text="{l:Loc pluginName}"
                    Foreground="{DynamicResource PrimaryForeground}"
                    FontWeight="Bold"
                    TextWrapping="Wrap"
                    Margin="0,0,0,15"/>
 
-        <GroupBox Grid.Row="2" Header="Select Masters to Analyze" Margin="0,0,0,10">
+        <GroupBox Grid.Row="2" Header="{l:Loc selectMastersToAnalyze}" Margin="0,0,0,10">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
@@ -46,12 +47,12 @@
                 </Grid.RowDefinitions>
                 
                 <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="5,5,5,5">
-                    <Button Content="Select All" 
+                    <Button Content="{l:Loc selectAll}" 
                             x:Name="SelectAllButton"
                             Click="SelectAllButton_Click"
                             Padding="10,3" 
                             Margin="0,0,5,0"/>
-                    <Button Content="Select None" 
+                    <Button Content="{l:Loc selectNone}" 
                             x:Name="SelectNoneButton"
                             Click="SelectNoneButton_Click"
                             Padding="10,3"/>
@@ -74,7 +75,7 @@
 
         <TextBlock Grid.Row="3" 
                    x:Name="StatusTextBlock"
-                   Text="Select the masters you want to analyze, then click Analyze."
+                   Text="{l:Loc selectTheMastersYou}"
                    TextWrapping="Wrap"
                    Foreground="{DynamicResource DisabledForeground}"
                    Margin="0,0,0,10"/>
@@ -82,14 +83,14 @@
         <StackPanel Grid.Row="4" 
                     Orientation="Horizontal" 
                     HorizontalAlignment="Right">
-            <Button Content="Analyze" 
+            <Button Content="{l:Loc analyze}" 
                     x:Name="AnalyzeButton"
                     Click="AnalyzeButton_Click"
                     IsDefault="True"
                     MinWidth="80" 
                     Padding="15,5" 
                     Margin="0,0,10,0"/>
-            <Button Content="Cancel" 
+            <Button Content="{l:Loc cancel}" 
                     x:Name="CancelButton"
                     Click="CancelButton_Click"
                     IsCancel="True"
