@@ -595,7 +595,7 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
     // --- Manual CSV export: optional gender filter (a full run over every NPC takes a while,
     // so let the user batch it by gender) ---
     [Reactive] public GenderFilterType ExportGenderFilter { get; set; } = GenderFilterType.Any;
-    public List<KeyValuePair<GenderFilterType, string>> ExportGenderFilterOptions { get; }
+    public List<KeyValuePair<GenderFilterType, string>> ExportGenderFilterOptions { get; private set; }
     public ReactiveCommand<Unit, Unit> ShowFullEnvironmentErrorCommand { get; }
     public ReactiveCommand<Unit, Unit> AddIgnoredModCommand { get; }
     public ReactiveCommand<string, Unit> RemoveIgnoredModCommand { get; }
@@ -649,12 +649,7 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
         SectionLogging = MakeSection("Logging", defaultExpanded: false);
         SectionOtherSettings = MakeSection("Other Settings", defaultExpanded: false);
 
-        ExportGenderFilterOptions = new List<KeyValuePair<GenderFilterType, string>>
-        {
-            new(GenderFilterType.Any, TranslationServiceProvider.GetService()?.GetString("exportGenderAny") ?? "Any"),
-            new(GenderFilterType.Male, TranslationServiceProvider.GetService()?.GetString("exportGenderMale") ?? "Male"),
-            new(GenderFilterType.Female, TranslationServiceProvider.GetService()?.GetString("exportGenderFemale") ?? "Female"),
-        };
+        RebuildExportGenderFilterOptions();
 
         // The rejection logs are read only once the user opens the panel — the folder holds one
         // file per mod and can run to tens of thousands of lines, which is not worth paying for
@@ -1515,6 +1510,7 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
                 string code = opt?.Code ?? "en";
                 _model.UiLanguage = code;
                 TranslationServiceProvider.GetService()?.SetLanguage(code);
+                RebuildExportGenderFilterOptions();
                 SaveSettings();
             })
             .DisposeWith(_disposables);
@@ -4323,6 +4319,21 @@ Options:
         IsDefaultOverrideHandlingControlsVisible = SelectedRecordOverrideHandlingMode != RecordOverrideHandlingMode.Ignore;
         // Max Nested is visible only if mode is not Ignore AND "Include All" is not checked
         IsDefaultMaxNestedIntervalDepthVisible = SelectedRecordOverrideHandlingMode != RecordOverrideHandlingMode.Ignore && !DefaultIncludeAllOverrides;
+    }
+
+
+    private void RebuildExportGenderFilterOptions()
+    {
+        // Rebuilt on every language switch: the dropdown binds to this list directly
+        // (DisplayMemberPath="Value"), so a static ctor-time snapshot would stay in the
+        // startup language forever while every {l:Loc} binding around it updates live.
+        ExportGenderFilterOptions = new List<KeyValuePair<GenderFilterType, string>>
+        {
+            new(GenderFilterType.Any, TranslationServiceProvider.GetService()?.GetString("exportGenderAny") ?? "Any"),
+            new(GenderFilterType.Male, TranslationServiceProvider.GetService()?.GetString("exportGenderMale") ?? "Male"),
+            new(GenderFilterType.Female, TranslationServiceProvider.GetService()?.GetString("exportGenderFemale") ?? "Female"),
+        };
+        this.RaisePropertyChanged(nameof(ExportGenderFilterOptions));
     }
 
 
