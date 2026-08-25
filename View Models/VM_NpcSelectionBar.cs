@@ -66,6 +66,7 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
     private readonly FaceFinderClient _faceFinderClient;
     private readonly EventLogger _eventLogger;
     private readonly CompositeDisposable _disposables = new();
+    private TranslationService? _translationService;
     private readonly Action<bool> _themeChangedHandler;
     private readonly Lazy<VM_Mods> _lazyModsVm;
     private readonly Lazy<VM_MainWindow> _lazyMainWindowVm;
@@ -160,14 +161,15 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
     public VM_CollapsibleGroup GroupSelectedMugshots { get; }
     public VM_CollapsibleGroup GroupSubmenus { get; }
 
-    private VM_CollapsibleGroup MakeCollapsibleGroup(string title) =>
+    private VM_CollapsibleGroup MakeCollapsibleGroup(string title, string? displayTitle = null) =>
         new(title,
             isExpanded: !_settings.NpcsViewCollapsedGroups.Contains(title),
             onChanged: (key, expanded) =>
             {
                 if (expanded) _settings.NpcsViewCollapsedGroups.Remove(key);
                 else _settings.NpcsViewCollapsedGroups.Add(key);
-            });
+            },
+            displayTitle: displayTitle ?? title);
 
     // --- Search Properties ---
     [Reactive] public string SearchText1 { get; set; } = string.Empty;
@@ -454,11 +456,21 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
         // Titles double as the persistence keys, so they must match the captions shown in
         // NpcsView. Changing one resets that group to expanded on the next launch.
         _settings.NpcsViewCollapsedGroups ??= new(StringComparer.OrdinalIgnoreCase);
-        GroupNpcGroups = MakeCollapsibleGroup("NPC Groups");
-        GroupShow = MakeCollapsibleGroup("Show");
-        GroupAppearanceSelections = MakeCollapsibleGroup("NPC Appearance Selections");
-        GroupSelectedMugshots = MakeCollapsibleGroup("Selected Mugshots");
-        GroupSubmenus = MakeCollapsibleGroup("Submenus");
+        GroupNpcGroups = MakeCollapsibleGroup("NPC Groups", GetTranslation("npcGroups", "NPC Groups"));
+        GroupShow = MakeCollapsibleGroup("Show", GetTranslation("showGroup", "Show"));
+        GroupAppearanceSelections = MakeCollapsibleGroup("NPC Appearance Selections", GetTranslation("npcAppearanceSelections", "NPC Appearance Selections"));
+        GroupSelectedMugshots = MakeCollapsibleGroup("Selected Mugshots", GetTranslation("selectedMugshots", "Selected Mugshots"));
+        GroupSubmenus = MakeCollapsibleGroup("Submenus", GetTranslation("submenus", "Submenus"));
+
+        // Group captions follow the UI language: the titles double as persistence keys
+        // (NpcsViewCollapsedGroups), so the localized caption is a separate property
+        // refreshed here whenever the language switches.
+        var langSvc = TranslationServiceProvider.GetService();
+        if (langSvc != null)
+        {
+            langSvc.LanguageChanged += RefreshCollapsibleGroupTitles;
+            _translationService = langSvc;
+        }
 
         NpcsViewZoomLevel =
             Math.Max(_minZoomPercentage,
@@ -6587,8 +6599,28 @@ public class VM_NpcSelectionBar : ReactiveObject, IDisposable, ISearchFilterHost
     }
 
     // --- Disposal ---
+    private void RefreshCollapsibleGroupTitles()
+    {
+        GroupNpcGroups.DisplayTitle = GetTranslation("npcGroups", "NPC Groups");
+        GroupShow.DisplayTitle = GetTranslation("showGroup", "Show");
+        GroupAppearanceSelections.DisplayTitle = GetTranslation("npcAppearanceSelections", "NPC Appearance Selections");
+        GroupSelectedMugshots.DisplayTitle = GetTranslation("selectedMugshots", "Selected Mugshots");
+        GroupSubmenus.DisplayTitle = GetTranslation("submenus", "Submenus");
+    }
+
+
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
+
+
     public void Dispose()
     {
+        if (_translationService != null)
+        {
+            _translationService.LanguageChanged -= RefreshCollapsibleGroupTitles;
+            _translationService = null;
+        }
+
         if (_themeChangedHandler != null)
         {
             ThemeManager.ThemeChanged -= _themeChangedHandler;

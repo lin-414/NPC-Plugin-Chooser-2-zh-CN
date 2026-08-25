@@ -67,7 +67,7 @@
                       Fill="{Binding Foreground, ElementName=GroupCaption}"
                       VerticalAlignment="Center" Margin="0,0,5,0"
                       RenderTransformOrigin="0.5,0.5"/>
-                <TextBlock x:Name="GroupCaption" Text="{Binding Title}" VerticalAlignment="Center"/>
+                <TextBlock x:Name="GroupCaption" Text="{Binding DisplayTitle}" VerticalAlignment="Center"/>
             </StackPanel>
             <DataTemplate.Triggers>
                 <DataTrigger Binding="{Binding IsExpanded}" Value="False">
@@ -1336,10 +1336,10 @@
                                                    ToolTip="{l:Loc liveTileViewportExplanation}">
                                              <MenuItem.Style>
                                                  <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
-                                                     <Setter Property="Header" Value="Make Live Tile"/>
+                                                     <Setter Property="Header" Value="{Binding LiveTileMenuItemText}"/>
                                                      <Style.Triggers>
                                                          <DataTrigger Binding="{Binding IsLiveTile}" Value="True">
-                                                             <Setter Property="Header" Value="Make Mugshot"/>
+                                                             <Setter Property="Header" Value="{Binding LiveTileMenuItemText}"/>
                                                          </DataTrigger>
                                                      </Style.Triggers>
                                                  </Style>

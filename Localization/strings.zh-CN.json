@@ -1296,5 +1296,7 @@
   "meshSurveyNoEligibleMods": "网格调查 — 没有符合条件的模组",
   "noModsWithMeshes": "没有包含非空模组文件夹且至少有一个 NPC 的模组。",
   "outputPath": "输出：{0}",
-  "aborting": "正在中止…"
+  "aborting": "正在中止…",
+  "makeLiveTile": "转为实时磁贴",
+  "makeMugshot": "生成头像"
 }

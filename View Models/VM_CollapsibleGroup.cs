@@ -25,9 +25,10 @@ public sealed class VM_CollapsibleGroup : ReactiveObject
     /// <param name="isExpanded">Initial state, restored from Settings.</param>
     /// <param name="onChanged">Invoked with (title, isExpanded) after a user toggle so the
     /// owner can write the new state back to Settings.</param>
-    public VM_CollapsibleGroup(string title, bool isExpanded, Action<string, bool> onChanged = null)
+    public VM_CollapsibleGroup(string title, bool isExpanded, Action<string, bool> onChanged = null, string? displayTitle = null)
     {
         Title = title;
+        DisplayTitle = displayTitle ?? title;
         IsExpanded = isExpanded;
 
         // Toggling through the command is the only way IsExpanded changes, so persistence
@@ -41,6 +42,12 @@ public sealed class VM_CollapsibleGroup : ReactiveObject
     }
 
     public string Title { get; }
+
+    /// <summary>Localized caption shown in the GroupBox header. Falls back to
+    /// <see cref="Title"/> (the persistence key) when no translation is available;
+    /// the two diverge when a UI language is active so the key stays stable while
+    /// the caption displays in the current language.</summary>
+    [Reactive] public string DisplayTitle { get; set; }
 
     [Reactive] public bool IsExpanded { get; set; }
 

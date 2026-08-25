@@ -189,6 +189,7 @@ public class VM_NpcsMenuMugshot : ReactiveObject, IDisposable, IHasMugshotImage,
     public string OriginalTargetName { get; set; }
     [Reactive] public bool IsFavorite { get; set; }
     [Reactive] public string FavoriteMenuItemText { get; set; } = "Add to Favorites";
+    [Reactive] public string LiveTileMenuItemText { get; set; } = "Make Live Tile";
     [Reactive] public bool IsShareSource { get; private set; }
     [Reactive] public bool IsSelectedByGuest { get; private set; }
     [Reactive] public string ShareSourceTooltipText { get; private set; } = string.Empty;
@@ -435,6 +436,13 @@ public class VM_NpcsMenuMugshot : ReactiveObject, IDisposable, IHasMugshotImage,
             .Subscribe(_ => FavoriteMenuItemText = GetTranslation(
                 IsFavorite ? "removeFromFavorites" : "addToFavorites",
                 IsFavorite ? "Remove from Favorites" : "Add to Favorites"))
+            .DisposeWith(Disposables);
+
+        // Live-Tile toggle menu text follows the live state, in the current UI language
+        this.WhenAnyValue(x => x.IsLiveTile)
+            .Subscribe(_ => LiveTileMenuItemText = GetTranslation(
+                IsLiveTile ? "makeMugshot" : "makeLiveTile",
+                IsLiveTile ? "Make Mugshot" : "Make Live Tile"))
             .DisposeWith(Disposables);
 
         if (HasNoData)

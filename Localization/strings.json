@@ -1296,5 +1296,7 @@
   "meshSurveyNoEligibleMods": "Mesh Survey — No eligible mods",
   "noModsWithMeshes": "No mods with non-empty mod folders + at least one NPC.",
   "outputPath": "Output: {0}",
-  "aborting": "Aborting…"
+  "aborting": "Aborting…",
+  "makeLiveTile": "Make Live Tile",
+  "makeMugshot": "Make Mugshot"
 }

@@ -136,6 +136,7 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
 
     [Reactive] public bool IsFavorite { get; set; }
     [Reactive] public string FavoriteMenuItemText { get; set; } = "Add to Favorites";
+    [Reactive] public string LiveTileMenuItemText { get; set; } = "Make Live Tile";
 
     [Reactive] public bool IsLoading { get; private set; }
     [Reactive] public double LoadingIconRadiusModifier { get; set; } = 0.2;
@@ -245,6 +246,13 @@ public class VM_ModsMenuMugshot : ReactiveObject, IHasMugshotImage, IDisposable
             .Subscribe(_ => FavoriteMenuItemText = GetTranslation(
                 IsFavorite ? "removeFromFavorites" : "addToFavorites",
                 IsFavorite ? "Remove from Favorites" : "Add to Favorites"))
+            .DisposeWith(_disposables);
+
+        // Live-Tile toggle menu text follows the live state, in the current UI language
+        this.WhenAnyValue(x => x.IsLiveTile)
+            .Subscribe(_ => LiveTileMenuItemText = GetTranslation(
+                IsLiveTile ? "makeMugshot" : "makeLiveTile",
+                IsLiveTile ? "Make Mugshot" : "Make Live Tile"))
             .DisposeWith(_disposables);
 
         // START MODIFIED SECTION
