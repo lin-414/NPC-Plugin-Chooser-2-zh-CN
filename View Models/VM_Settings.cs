@@ -2247,29 +2247,25 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
 
             // *** FIX: Removed the incorrect Task.Run wrapper. ***
             // The called methods are already async and handle their own threading internally.
-            if (_lazyModListVM.IsValueCreated)
-            {
-                await _lazyModListVM.Value.PopulateModSettingsAsync(splashScreen);
+            // NOTE: No IsValueCreated guard here (and below). The user just picked a
+            // folder — that is an explicit request to (re)scan, so the lazies must be
+            // created on demand even when startup never touched them (e.g. an invalid
+            // environment made InitializeAsync early-return; without this, the splash
+            // flashes and the mods list silently stays empty until the next launch).
+            await _lazyModListVM.Value.PopulateModSettingsAsync(splashScreen);
 
-                // Sync VM_Mods.AllModSettings → Settings.ModSettings. PopulateModSettingsAsync
-                // writes only to _allModSettingsInternal; without this call the model
-                // (which we just cleared at line 1708) stays empty until the next
-                // throttled SaveSettings fires. Same root cause as the fresh-install
-                // BSA pre-warm bug fixed in App.xaml.cs after the initial InitializeAsync.
-                _lazyModListVM.Value.SaveModSettingsToModel();
-            }
+            // Sync VM_Mods.AllModSettings → Settings.ModSettings. PopulateModSettingsAsync
+            // writes only to _allModSettingsInternal; without this call the model
+            // (which we just cleared at line 1708) stays empty until the next
+            // throttled SaveSettings fires. Same root cause as the fresh-install
+            // BSA pre-warm bug fixed in App.xaml.cs after the initial InitializeAsync.
+            _lazyModListVM.Value.SaveModSettingsToModel();
             StartupLogger.Log("Mod population complete");
 
-            if (_lazyNpcSelectionBar.IsValueCreated)
-            {
-                await _lazyNpcSelectionBar.Value.InitializeAsync(splashScreen);
-            }
+            await _lazyNpcSelectionBar.Value.InitializeAsync(splashScreen);
             StartupLogger.Log("NPC selection bar initialized");
 
-            if (_lazyModListVM.IsValueCreated)
-            {
-                _lazyModListVM.Value.ApplyFilters();
-            }
+            _lazyModListVM.Value.ApplyFilters();
 
             RefreshNonAppearanceMods();
             RejectedNpcs.Invalidate(); // Logs were wiped above and rewritten by the repopulation.
@@ -2352,21 +2348,13 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
             _lazyMainWindowVm.Value.IsLoadingFolders = true;
             splashScreen = VM_SplashScreen.InitializeAndShow(App.ProgramVersion, isModal: false);
 
-            // *** FIX: Removed the incorrect Task.Run wrapper. ***
-            if (_lazyNpcSelectionBar.IsValueCreated)
-            {
-                await _lazyNpcSelectionBar.Value.InitializeAsync(splashScreen);
-            }
+            // NOTE: No IsValueCreated guards (same rationale as SelectModsFolderAsync —
+            // picking a folder is an explicit rescan request).
+            await _lazyNpcSelectionBar.Value.InitializeAsync(splashScreen);
 
-            if (_lazyModListVM.IsValueCreated)
-            {
-                await _lazyModListVM.Value.PopulateModSettingsAsync(splashScreen);
-            }
+            await _lazyModListVM.Value.PopulateModSettingsAsync(splashScreen);
 
-            if (_lazyModListVM.IsValueCreated)
-            {
-                _lazyModListVM.Value.ApplyFilters();
-            }
+            _lazyModListVM.Value.ApplyFilters();
         }
         finally
         {
