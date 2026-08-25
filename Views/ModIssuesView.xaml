@@ -108,13 +108,13 @@
                             <TextBlock Text="{l:Loc filterName}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                             <TextBox Text="{Binding NameFilterText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                      MinWidth="120" VerticalAlignment="Center"
-                                     ToolTip="Filter the list by mod display name&#x0a;Ctrl+Shift+C clears all search filters"/>
+                                     ToolTip="{l:Loc filterByModDisplayName}"/>
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" Margin="0,2,15,2">
                             <TextBlock Text="{l:Loc filterNPC}" VerticalAlignment="Center" Margin="0,0,5,0"/>
                             <TextBox Text="{Binding NpcSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                      MinWidth="120" VerticalAlignment="Center"
-                                     ToolTip="Show only mods with an affected NPC whose name or FormKey matches&#x0a;Ctrl+Shift+C clears all search filters"/>
+                                     ToolTip="{l:Loc showOnlyAffectedMods}"/>
                         </StackPanel>
                         <StackPanel Orientation="Horizontal" Margin="0,2,15,2">
                             <TextBlock Text="{l:Loc issueType}" VerticalAlignment="Center" Margin="0,0,5,0"/>
@@ -244,7 +244,7 @@
                                     </ItemsControl>
                                     <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
                                         <TextBlock Text="{Binding ScanTimeText}" FontSize="10" Foreground="Gray"/>
-                                        <TextBlock Text="  ⚠ Mod has changed since this scan — results may be outdated"
+                                        <TextBlock Text="{l:Loc modHasChangedSince}"
                                                    FontSize="10" Foreground="Orange"
                                                    Visibility="{Binding IsStale, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                                     </StackPanel>
@@ -354,7 +354,7 @@
                                         <!-- Orbiting-dragon spinner while the tile's mugshot generates,
                                              same as the NPCs/Mods menus. -->
                                         <Image x:Name="LoadingDragonImage"
-                                               Source="/NPC Plugin Chooser 2;component/Resources/RedDragon.png"
+                                               Source="pack://siteoforigin:,,,/Resources/RedDragon.png"
                                                Visibility="{Binding IsLoading, Converter={StaticResource BooleanToVisibilityConverter}}"
                                                HorizontalAlignment="Center"
                                                VerticalAlignment="Center"
@@ -429,7 +429,7 @@
                                               Width="{Binding RelativeSource={RelativeSource AncestorType=Grid}, Path=ActualWidth, Converter={StaticResource PercentageSizingConverter}, ConverterParameter='20'}"
                                               Height="{Binding RelativeSource={RelativeSource Self}, Path=Width}">
                                             <Viewbox Stretch="Uniform">
-                                                <Image Source="/NPC Plugin Chooser 2;component/Resources/Missing Asset.png"/>
+                                                <Image Source="pack://siteoforigin:,,,/Resources/Missing Asset.png"/>
                                             </Viewbox>
                                         </Grid>
 
@@ -440,7 +440,7 @@
                                               Width="{Binding RelativeSource={RelativeSource AncestorType=Grid}, Path=ActualWidth, Converter={StaticResource PercentageSizingConverter}, ConverterParameter='20'}"
                                               Height="{Binding RelativeSource={RelativeSource Self}, Path=Width}">
                                             <Viewbox Stretch="Uniform">
-                                                <Image Source="/NPC Plugin Chooser 2;component/Resources/Missing Outfit Assets.png"/>
+                                                <Image Source="pack://siteoforigin:,,,/Resources/Missing Outfit Assets.png"/>
                                             </Viewbox>
                                         </Grid>
 
@@ -453,7 +453,7 @@
                                               Width="{Binding RelativeSource={RelativeSource AncestorType=Grid}, Path=ActualWidth, Converter={StaticResource PercentageSizingConverter}, ConverterParameter='20'}"
                                               Height="{Binding RelativeSource={RelativeSource Self}, Path=Width}">
                                             <Viewbox Stretch="Uniform">
-                                                <Image Source="/NPC Plugin Chooser 2;component/Resources/Data Folder Assets.png" />
+                                                <Image Source="pack://siteoforigin:,,,/Resources/Data Folder Assets.png" />
                                             </Viewbox>
                                         </Grid>
                                     </Grid>

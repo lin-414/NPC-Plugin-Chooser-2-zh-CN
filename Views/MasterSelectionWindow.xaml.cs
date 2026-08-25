@@ -93,7 +93,10 @@ public partial class MasterSelectionWindow : Window
     private void UpdateStatus()
     {
         int selectedCount = Masters.Count(m => m.IsSelected);
-        StatusTextBlock.Text = $"{selectedCount} of {Masters.Count} master(s) selected for analysis.";
+        StatusTextBlock.Text = string.Format(
+            GetTranslation("mastersSelectedForAnalysis", "{0} of {1} master(s) selected for analysis."),
+            selectedCount,
+            Masters.Count);
         AnalyzeButton.IsEnabled = selectedCount > 0;
     }
 

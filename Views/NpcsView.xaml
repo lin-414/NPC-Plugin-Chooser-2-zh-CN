@@ -210,16 +210,16 @@
                           Padding="{Binding GroupAppearanceSelections.IsExpanded, Converter={StaticResource GroupPaddingConverter}}">
                     <StackPanel Orientation="Horizontal"
                                 Visibility="{Binding GroupAppearanceSelections.IsExpanded, Converter={StaticResource BooleanToVisibilityConverter}}">
-                        <Button Content="Match Load Order" Margin="0,2,5,2" Padding="5,2" VerticalAlignment="Center"
-                                Command="{Binding ImportChoicesFromLoadOrderCommand}" ToolTip="Automatically select appearance mods for NPCs based on your current load order and loose file overrides."/>
-                        <Button Content="Randomize" Margin="0,2,5,2" Padding="5,2" VerticalAlignment="Center"
-                                Command="{Binding RandomizeChoicesCommand}" ToolTip="Open the Randomize dialog to pick random appearances for the visible or all NPCs, with options for base / shared / favorite faces and which mods are eligible as sources."/>
-                        <Button Content="Export" Margin="0,2,5,2" Padding="5,2" VerticalAlignment="Center"
-                                Command="{Binding ExportChoicesCommand}" ToolTip="Export the current list of selected appearance mods for each NPC to a .json file."/>
-                        <Button Content="Import" Margin="0,2,5,2" Padding="5,2" VerticalAlignment="Center"
-                                Command="{Binding ImportChoicesCommand}" ToolTip="Import a list of NPC appearance selections from a .json file, overwriting current choices."/>
-                        <Button Content="Clear" Margin="0,2,0,2" Padding="5,2" VerticalAlignment="Center"
-                                Command="{Binding ClearChoicesCommand}" ToolTip="Clear all selections you have made."/>
+                        <Button Content="{l:Loc matchLoadOrder}" Margin="0,2,5,2" Padding="5,2" VerticalAlignment="Center"
+                                Command="{Binding ImportChoicesFromLoadOrderCommand}" ToolTip="{l:Loc automaticallySelectAppearanceMods}"/>
+                        <Button Content="{l:Loc randomize}" Margin="0,2,5,2" Padding="5,2" VerticalAlignment="Center"
+                                Command="{Binding RandomizeChoicesCommand}" ToolTip="{l:Loc openTheRandomizeDialog}"/>
+                        <Button Content="{l:Loc export}" Margin="0,2,5,2" Padding="5,2" VerticalAlignment="Center"
+                                Command="{Binding ExportChoicesCommand}" ToolTip="{l:Loc exportTheCurrentList}"/>
+                        <Button Content="{l:Loc import}" Margin="0,2,5,2" Padding="5,2" VerticalAlignment="Center"
+                                Command="{Binding ImportChoicesCommand}" ToolTip="{l:Loc importAListOf}"/>
+                        <Button Content="{l:Loc clear}" Margin="0,2,0,2" Padding="5,2" VerticalAlignment="Center"
+                                Command="{Binding ClearChoicesCommand}" ToolTip="{l:Loc clearAllSelectionsYou}"/>
                     </StackPanel>
                 </GroupBox>
                 
@@ -236,13 +236,13 @@
                                 ContextMenu="{StaticResource HideUnhideContextMenuResource}"
                                 Click="HideUnhideButton_Click"
                                 IsEnabled="{Binding CanOpenHideUnhideMenu}"
-                                ToolTip="Hide or unhide mugshots. Right-click or click for options (enabled if at least one mugshot is checked)."/>
-                        <Button Content="Deselect" Margin="0,2,5,2" Padding="5,2" VerticalAlignment="Center"
+                                ToolTip="{l:Loc hideOrUnhideMugshots}"/>
+                        <Button Content="{l:Loc deselect}" Margin="0,2,5,2" Padding="5,2" VerticalAlignment="Center"
                                 Command="{Binding DeselectAllCommand}"
-                                ToolTip="Uncheck all mugshots for the current NPC (Requires 1+ selected)."/>
+                                ToolTip="{l:Loc uncheckAllMugshotsFor}"/>
                         <Button Content="{Binding LiveTileToggleLabel}" Margin="0,2,0,2" Padding="5,2" VerticalAlignment="Center"
                                 Command="{Binding ToggleLiveTilesForCheckedCommand}"
-                                ToolTip="Toggle Live Tile mode for the checked mugshots (Requires 1+ selected). 3D turns them into embedded 3D viewports; 2D turns them back into static mugshots. On a mixed selection the button applies the state shown."/>
+                                ToolTip="{l:Loc toggleLiveTileTooltip}"/>
                         </StackPanel>
                 </GroupBox>
                 
@@ -794,7 +794,7 @@
                                                                 Visibility="{Binding DataContext.IsLiveTile, RelativeSource={RelativeSource AncestorType=Border}, Converter={StaticResource BooleanToVisibilityConverter}}"/>
 
                                      <Image x:Name="LoadingDragonImage"
-                                        Source="/NPC Plugin Chooser 2;component/Resources/RedDragon.png"
+                                        Source="pack://siteoforigin:,,,/Resources/RedDragon.png"
                                         Visibility="{Binding IsLoading, Converter={StaticResource BooleanToVisibilityConverter}}"
                                         HorizontalAlignment="Center"
                                         VerticalAlignment="Center"
@@ -912,7 +912,7 @@
 
                                              <!-- FaceGen-only issues (mod ships FaceGen but no
                                                   plugin record for this NPC) use a dedicated icon -->
-                                             <Image Source="/NPC Plugin Chooser 2;component/Resources/No Npc Record.png"
+                                             <Image Source="pack://siteoforigin:,,,/Resources/No Npc Record.png"
                                                     Stretch="Uniform">
                                                  <Image.Style>
                                                      <Style TargetType="Image">
@@ -941,7 +941,7 @@
                                              <Viewbox Stretch="Uniform"
                                                       HorizontalAlignment="Center"
                                                       VerticalAlignment="Center">
-                                                 <Image Source="/NPC Plugin Chooser 2;component/Resources/No Antlers.png" />
+                                                 <Image Source="pack://siteoforigin:,,,/Resources/No Antlers.png" />
                                              </Viewbox>
                                          </Grid>
 
@@ -972,7 +972,7 @@
                                                      <DropShadowEffect Color="White" ShadowDepth="0"
                                                                        BlurRadius="6" Opacity="0.9"/>
                                                  </Viewbox.Effect>
-                                                 <Image Source="/NPC Plugin Chooser 2;component/Resources/Has Wig.png" />
+                                                 <Image Source="pack://siteoforigin:,,,/Resources/Has Wig.png" />
                                              </Viewbox>
 
                                              <!-- Crossed out when the wig will NOT reach the output
@@ -1065,7 +1065,7 @@
                                                Visibility="{Binding HasMissingAssets, Converter={StaticResource BooleanToVisibilityConverter}}"
                                                ToolTip="{Binding MissingAssetNotificationText}">
                                              <Viewbox Stretch="Uniform">
-                                                 <Image Source="/NPC Plugin Chooser 2;component/Resources/Missing Asset.png" />
+                                                 <Image Source="pack://siteoforigin:,,,/Resources/Missing Asset.png" />
                                              </Viewbox>
                                          </Grid>
 
@@ -1080,7 +1080,7 @@
                                                Visibility="{Binding HasMissingOutfitAssets, Converter={StaticResource BooleanToVisibilityConverter}}"
                                                ToolTip="{Binding MissingOutfitAssetsText}">
                                              <Viewbox Stretch="Uniform">
-                                                 <Image Source="/NPC Plugin Chooser 2;component/Resources/Missing Outfit Assets.png" />
+                                                 <Image Source="pack://siteoforigin:,,,/Resources/Missing Outfit Assets.png" />
                                              </Viewbox>
                                          </Grid>
 
@@ -1095,7 +1095,7 @@
                                                Visibility="{Binding HasDataFolderAssets, Converter={StaticResource BooleanToVisibilityConverter}}"
                                                ToolTip="{Binding DataFolderAssetsText}">
                                              <Viewbox Stretch="Uniform">
-                                                 <Image Source="/NPC Plugin Chooser 2;component/Resources/Data Folder Assets.png" />
+                                                 <Image Source="pack://siteoforigin:,,,/Resources/Data Folder Assets.png" />
                                              </Viewbox>
                                          </Grid>
 
@@ -1107,7 +1107,7 @@
                                                Visibility="{Binding IsAmbiguousSource, Converter={StaticResource BooleanToVisibilityConverter}}"
                                                ToolTip="{l:Loc thisNPCIsDefined}">
                                              <Viewbox Stretch="Uniform">
-                                                 <Image Source="/NPC Plugin Chooser 2;component/Resources/Multiple Plugins for NPC.png" />
+                                                 <Image Source="pack://siteoforigin:,,,/Resources/Multiple Plugins for NPC.png" />
                                              </Viewbox>
                                          </Grid>
                                      </StackPanel>
@@ -1168,7 +1168,7 @@
                                          <Viewbox Stretch="Uniform" 
                                                   HorizontalAlignment="Center" 
                                                   VerticalAlignment="Center">
-                                             <Image Source="/NPC Plugin Chooser 2;component/Resources/No Associated Data.png" />
+                                             <Image Source="pack://siteoforigin:,,,/Resources/No Associated Data.png" />
                                          </Viewbox>
                                      </Grid>
                                      
@@ -1182,7 +1182,7 @@
                                                  <ToolTip.Content>
                                                      <TextBlock>
                                                          <TextBlock.Text>
-                                                             <MultiBinding StringFormat="Select this mugshot to apply this version of {0}'s appearance to {1}.">
+                                                             <MultiBinding StringFormat="{l:Loc guestAppearanceTooltip}">
                                                                  <Binding Path="OriginalTargetName"/>
                                                                  <Binding Path="TargetDisplayName"/>
                                                              </MultiBinding>
@@ -1193,7 +1193,7 @@
                                          </Grid.ToolTip>
 
                                          <Viewbox Stretch="Uniform">
-                                             <Image Source="/NPC Plugin Chooser 2;component/Resources/Guest Plugin.png"/>
+                                             <Image Source="pack://siteoforigin:,,,/Resources/Guest Plugin.png"/>
                                          </Viewbox>
                                      </Grid>
                                      
@@ -1220,10 +1220,10 @@
                                              <Image>
                                                  <Image.Style>
                                                      <Style TargetType="Image">
-                                                         <Setter Property="Source" Value="/NPC Plugin Chooser 2;component/Resources/SourcePlugin.png"/>
+                                                         <Setter Property="Source" Value="pack://siteoforigin:,,,/Resources/SourcePlugin.png"/>
                                                          <Style.Triggers>
                                                              <DataTrigger Binding="{Binding IsSelectedByGuest}" Value="True">
-                                                                 <Setter Property="Source" Value="/NPC Plugin Chooser 2;component/Resources/SelectedSourcePlugin.png"/>
+                                                                 <Setter Property="Source" Value="pack://siteoforigin:,,,/Resources/SelectedSourcePlugin.png"/>
                                                              </DataTrigger>
                                                          </Style.Triggers>
                                                      </Style>
@@ -1330,10 +1330,10 @@
                                                     ToolTip="{l:Loc forAllOtherAmbiguous}"/>
                                         <Separator Visibility="{Binding IsAmbiguousSource, Converter={StaticResource BooleanToVisibilityConverter}}"/>
                                          
-                                         <MenuItem Header="Show Full Image (Ctrl+RClick)" Command="{Binding ToggleFullScreenCommand}"/>
-                                         <MenuItem Header="Show 3D Preview (Ctrl+Shift+RClick)" Command="{Binding Show3DPreviewCommand}"/>
+                                         <MenuItem Header="{l:Loc showFullImageCtrl}" Command="{Binding ToggleFullScreenCommand}"/>
+                                         <MenuItem Header="{l:Loc show3DPreviewCtrl}" Command="{Binding Show3DPreviewCommand}"/>
                                          <MenuItem Command="{Binding ToggleLiveTileCommand}"
-                                                   ToolTip="Live Tile turns this mugshot into a miniature 3D viewport (left-drag to rotate, middle-drag to move, wheel to zoom), framed like the auto-generated mugshot. Make Mugshot turns it back into a static image.">
+                                                   ToolTip="{l:Loc liveTileViewportExplanation}">
                                              <MenuItem.Style>
                                                  <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
                                                      <Setter Property="Header" Value="Make Live Tile"/>
@@ -1346,14 +1346,14 @@
                                              </MenuItem.Style>
                                          </MenuItem>
                                          <Separator/>
-                                         <MenuItem Header="Generate Mugshot"
+                                         <MenuItem Header="{l:Loc generateMugshot}"
                                                    Command="{Binding GenerateMugshotCommand}"
                                                    Visibility="{Binding CanGenerateMugshot, Converter={StaticResource BooleanToVisibilityConverter}}"
-                                                   ToolTip="Render this appearance now with the built-in 3D renderer, replacing any auto-generated mugshot it already has. Works whether or not Auto-Generate missing mugshots is switched on."/>
+                                                   ToolTip="{l:Loc renderNowTooltip}"/>
                                          <MenuItem Header="{Binding DeleteMugshotHeader}"
                                                    Command="{Binding DeleteMugshotCommand}"
                                                    Visibility="{Binding CanDeleteMugshot, Converter={StaticResource BooleanToVisibilityConverter}}"
-                                                   ToolTip="Delete the image currently shown on this tile and fall back to the next available mugshot source."/>
+                                                   ToolTip="{l:Loc deleteTileImageTooltip}"/>
                                          <Separator/>
                                          <MenuItem Command="{Binding ShareWithNpcCommand}"
                                                    Header="{l:Loc shareWithNPC}"

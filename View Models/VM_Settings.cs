@@ -27,6 +27,7 @@ using NPC_Plugin_Chooser_2.BackEnd.CharacterViewerHost;
 using NPC_Plugin_Chooser_2.Models;
 using NPC_Plugin_Chooser_2.Views;
 using NPC_Plugin_Chooser_2.Themes;
+using NPC_Plugin_Chooser_2.Localization;
 using ReactiveUI;
 using ReactiveUI.Fody.Helpers;
 using Splat;
@@ -38,6 +39,14 @@ public enum MugshotSearchMode
     Fast,
     Comprehensive
 }
+
+/// <summary>
+/// A single selectable UI language for the Settings > UI Language dropdown.
+/// <see cref="Code"/> is the value persisted to <see cref="Settings.UiLanguage"/>
+/// ("en" / "zh-CN") and consumed by TranslationService; <see cref="DisplayName"/>
+/// is the human-readable label shown in the ComboBox.
+/// </summary>
+public record UiLanguageOption(string Code, string DisplayName);
 
 /// <summary>
 /// Row VM for the "Non-Appearance Mods" list in the Settings view. Wraps the
@@ -487,6 +496,17 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
     public IEnumerable<Language> AvailableLanguages { get; } = Enum.GetValues(typeof(Language)).Cast<Language>();
     [Reactive] public bool FixGarbledText { get; set; } = true;
 
+    // --- UI Language (en / zh-CN) ---
+    // These back the Settings > "UI Language" ComboBox. The model stores a plain
+    // string (Settings.UiLanguage = "en" | "zh-CN"); we wrap each in a small option
+    // record so the dropdown can show a friendly label while binding the code.
+    public List<UiLanguageOption> AvailableUiLanguages { get; } = new()
+    {
+        new UiLanguageOption("en", "English"),
+        new UiLanguageOption("zh-CN", "中文 (简体)"),
+    };
+    [Reactive] public UiLanguageOption? SelectedUiLanguage { get; set; }
+
     // --- NPC Display ---
     [Reactive] public bool ShowNpcNameInList { get; set; } = true;
     [Reactive] public bool ShowNpcEditorIdInList { get; set; }
@@ -828,6 +848,7 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
         SuppressPopupWarnings = _model.SuppressPopupWarnings;
         IsLocalizationEnabled = _model.LocalizationLanguage.HasValue;
         SelectedLocalizationLanguage = _model.LocalizationLanguage;
+        SelectedUiLanguage = AvailableUiLanguages.FirstOrDefault(x => x.Code == _model.UiLanguage) ?? AvailableUiLanguages[0];
         FixGarbledText = _model.FixGarbledText;
         IsDarkMode = _model.IsDarkMode;
 
@@ -1442,6 +1463,19 @@ public class VM_Settings : ReactiveObject, IDisposable, IActivatableViewModel
                     // If it's enabled and no language is selected, default to English
                     SelectedLocalizationLanguage = Language.English;
                 }
+            })
+            .DisposeWith(_disposables);
+
+        // UI Language: write the chosen code back to the model, apply it live so the
+        // whole UI switches without a restart, and persist immediately.
+        this.WhenAnyValue(x => x.SelectedUiLanguage)
+            .Skip(1) // Skip the initial value set from the model
+            .Subscribe(opt =>
+            {
+                string code = opt?.Code ?? "en";
+                _model.UiLanguage = code;
+                TranslationServiceProvider.GetService()?.SetLanguage(code);
+                SaveSettings();
             })
             .DisposeWith(_disposables);
 

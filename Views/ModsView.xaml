@@ -337,7 +337,7 @@
                                                          <TextBlock TextWrapping="Wrap" Text="{l:Loc modsNonNpcOverridesTooltip}"/>
                                                      </ToolTip>
                                                  </Viewbox.ToolTip>
-                                                 <Image Source="/NPC Plugin Chooser 2;component/Resources/Contains Overrides.png" />
+                                                 <Image Source="pack://siteoforigin:,,,/Resources/Contains Overrides.png" />
                                              </Viewbox>
                                          <TextBlock Text="{l:Loc refreshing}"
                                                     Foreground="DarkOrange"
@@ -871,7 +871,7 @@
                                                                    Visibility="{Binding DataContext.IsLiveTile, RelativeSource={RelativeSource AncestorType=Border}, Converter={StaticResource BooleanToVisibilityConverter}}"/>
 
                                         <Image x:Name="LoadingDragonImage"
-                                               Source="/NPC Plugin Chooser 2;component/Resources/RedDragon.png"
+                                               Source="pack://siteoforigin:,,,/Resources/RedDragon.png"
                                                Visibility="{Binding IsLoading, Converter={StaticResource BooleanToVisibilityConverter}}"
                                                HorizontalAlignment="Center"
                                                VerticalAlignment="Center"
@@ -933,7 +933,7 @@
                                               Width="{Binding RelativeSource={RelativeSource AncestorType=Grid}, Path=ActualWidth, Converter={StaticResource PercentageSizingConverter}, ConverterParameter='20'}"
                                               Height="{Binding RelativeSource={RelativeSource Self}, Path=Width}">
                                             <Viewbox Stretch="Uniform">
-                                                <Image Source="/NPC Plugin Chooser 2;component/Resources/Multiple Plugins for NPC.png" />
+                                                <Image Source="pack://siteoforigin:,,,/Resources/Multiple Plugins for NPC.png" />
                                             </Viewbox>
                                         </Grid>
 
@@ -944,7 +944,7 @@
                                               Width="{Binding RelativeSource={RelativeSource AncestorType=Grid}, Path=ActualWidth, Converter={StaticResource PercentageSizingConverter}, ConverterParameter='20'}"
                                               Height="{Binding RelativeSource={RelativeSource Self}, Path=Width}">
                                             <Viewbox Stretch="Uniform">
-                                                <Image Source="/NPC Plugin Chooser 2;component/Resources/Missing Asset.png" />
+                                                <Image Source="pack://siteoforigin:,,,/Resources/Missing Asset.png" />
                                             </Viewbox>
                                         </Grid>
 
@@ -960,7 +960,7 @@
                                               Width="{Binding RelativeSource={RelativeSource AncestorType=Grid}, Path=ActualWidth, Converter={StaticResource PercentageSizingConverter}, ConverterParameter='20'}"
                                               Height="{Binding RelativeSource={RelativeSource Self}, Path=Width}">
                                             <Viewbox Stretch="Uniform">
-                                                <Image Source="/NPC Plugin Chooser 2;component/Resources/Missing Outfit Assets.png" />
+                                                <Image Source="pack://siteoforigin:,,,/Resources/Missing Outfit Assets.png" />
                                             </Viewbox>
                                         </Grid>
 
@@ -974,7 +974,7 @@
                                               Width="{Binding RelativeSource={RelativeSource AncestorType=Grid}, Path=ActualWidth, Converter={StaticResource PercentageSizingConverter}, ConverterParameter='20'}"
                                               Height="{Binding RelativeSource={RelativeSource Self}, Path=Width}">
                                             <Viewbox Stretch="Uniform">
-                                                <Image Source="/NPC Plugin Chooser 2;component/Resources/Data Folder Assets.png" />
+                                                <Image Source="pack://siteoforigin:,,,/Resources/Data Folder Assets.png" />
                                             </Viewbox>
                                         </Grid>
 
@@ -997,11 +997,11 @@
                                     
                                     <Border.ContextMenu>
                                         <ContextMenu> 
-                                               <MenuItem  Header="Jump to NPC in List" Command="{Binding JumpToNpcCommand}"/> 
-                                               <MenuItem Header="View Full Screen (Ctrl+RClick)" Command="{Binding ToggleFullScreenCommand}"/>
-                                               <MenuItem Header="Show 3D Preview (Ctrl+Shift+RClick)" Command="{Binding Show3DPreviewCommand}"/>
+                                               <MenuItem  Header="{l:Loc jumpToNPCIn}" Command="{Binding JumpToNpcCommand}"/> 
+                                               <MenuItem Header="{l:Loc viewFullScreenCtrl}" Command="{Binding ToggleFullScreenCommand}"/>
+                                               <MenuItem Header="{l:Loc show3DPreviewCtrl}" Command="{Binding Show3DPreviewCommand}"/>
                                                <MenuItem Command="{Binding ToggleLiveTileCommand}"
-                                                         ToolTip="Live Tile turns this mugshot into a miniature 3D viewport (left-drag to rotate, middle-drag to move, wheel to zoom), framed like the auto-generated mugshot. Make Mugshot turns it back into a static image.">
+                                                         ToolTip="{l:Loc liveTileViewportExplanation}">
                                                    <MenuItem.Style>
                                                        <Style TargetType="MenuItem" BasedOn="{StaticResource {x:Type MenuItem}}">
                                                            <Setter Property="Header" Value="Make Live Tile"/>

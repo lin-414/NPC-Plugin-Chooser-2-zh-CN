@@ -104,7 +104,7 @@
                                         </StackPanel>
                                     </Border>
                                     
-                                    <Image Source="/NPC Plugin Chooser 2;component/Resources/RedDragon.png"
+                                    <Image Source="pack://siteoforigin:,,,/Resources/RedDragon.png"
                                            Visibility="{Binding IsLoading, Converter={StaticResource BooleanToVisibilityConverter}}"
                                            HorizontalAlignment="Center"
                                            VerticalAlignment="Center"

@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using NPC_Plugin_Chooser_2.BackEnd.CharacterViewerHost;
+using NPC_Plugin_Chooser_2.Localization;
 
 namespace NPC_Plugin_Chooser_2.Views;
 
@@ -17,6 +18,9 @@ namespace NPC_Plugin_Chooser_2.Views;
 /// </summary>
 public partial class MeshSurveyDialog : Window
 {
+    private static string GetTranslation(string key, string fallback) =>
+        TranslationServiceProvider.GetService()?.GetString(key) ?? fallback;
+
     private readonly MeshSurveyRunner _runner;
     private readonly CancellationTokenSource _cts = new();
     private string? _outputPath;
@@ -56,24 +60,29 @@ public partial class MeshSurveyDialog : Window
         }
         catch (Exception ex)
         {
-            StatusText.Text = "Survey failed: " + ex.Message;
-            CancelButton.Content = "Close";
+            StatusText.Text = string.Format(
+                GetTranslation("meshSurveyFailed", "Survey failed: {0}"), ex.Message);
+            CancelButton.Content = GetTranslation("close", "Close");
             _runFinished = true;
             return;
         }
 
         _runFinished = true;
-        CancelButton.Content = "Close";
+        CancelButton.Content = GetTranslation("close", "Close");
         OpenFolderButton.IsEnabled = _outputPath != null;
         if (_outputPath != null)
         {
-            Title = _cts.IsCancellationRequested ? "Mesh Survey — Aborted" : "Mesh Survey — Done";
-            OutputPathText.Text = "Output: " + _outputPath;
+            Title = _cts.IsCancellationRequested
+                ? GetTranslation("meshSurveyAborted", "Mesh Survey — Aborted")
+                : GetTranslation("meshSurveyDone", "Mesh Survey — Done");
+            OutputPathText.Text = string.Format(
+                GetTranslation("outputPath", "Output: {0}"), _outputPath);
         }
         else
         {
-            Title = "Mesh Survey — No eligible mods";
-            StatusText.Text = "No mods with non-empty mod folders + at least one NPC.";
+            Title = GetTranslation("meshSurveyNoEligibleMods", "Mesh Survey — No eligible mods");
+            StatusText.Text = GetTranslation(
+                "noModsWithMeshes", "No mods with non-empty mod folders + at least one NPC.");
         }
     }
 
@@ -87,7 +96,7 @@ public partial class MeshSurveyDialog : Window
         // Mid-run: signal cancel; OnLoaded's await will resume and finalize
         // the dialog state. Disable the button so we don't double-cancel.
         CancelButton.IsEnabled = false;
-        StatusText.Text = "Aborting…";
+        StatusText.Text = GetTranslation("aborting", "Aborting…");
         _cts.Cancel();
     }
 

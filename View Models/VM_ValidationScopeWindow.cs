@@ -7,6 +7,7 @@ using System.Reactive.Disposables;
 using System.Reactive.Disposables.Fluent;
 using System.Reactive.Linq;
 using Mutagen.Bethesda.Plugins;
+using NPC_Plugin_Chooser_2.Localization;
 using ReactiveUI;
 using ReactiveUI.Fody.Helpers;
 
@@ -53,7 +54,10 @@ public sealed class VM_ValidationScopeWindow : ReactiveObject, IDisposable
     public VM_ValidationScopeWindow(IEnumerable<VM_ValidationScopeItem> items)
     {
         _allItems = items.OrderBy(i => i.DisplayName, StringComparer.OrdinalIgnoreCase).ToList();
-        SummaryText = $"{_allItems.Count} NPC(s) have appearance selections.";
+        SummaryText = string.Format(
+            TranslationServiceProvider.GetService()?.GetString("validationScopeSummary")
+                ?? "{0} NPC(s) have appearance selections.",
+            _allItems.Count);
 
         ApplyFilter();
 

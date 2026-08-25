@@ -701,14 +701,14 @@
                         </ListBox.ItemTemplate>
                     </ListBox>
 
-                    <CheckBox Content="Enable Live Tiles on Selection"
+                    <CheckBox Content="{l:Loc enableLiveTilesOnSelection}"
                               IsChecked="{Binding EnableLiveTilesOnSelection, Mode=TwoWay}"
                               Margin="0,0,0,2"
-                              ToolTip="Allows the 'Live Tile' mugshot source above: when NPC selection reaches it, the tile becomes an embedded 3D viewport rendered on the spot instead of a static image. Costs a render per tile each time an NPC is selected. Individual tiles can always be switched via right-click &gt; Make Live Tile, regardless of this setting."/>
-                    <TextBlock Text="Un-greys the 'Live Tile' source above. Place it first to always get live 3D tiles, or last as a fallback when no image exists."
+                              ToolTip="{l:Loc liveTileSourceExplanation}"/>
+                    <TextBlock Text="{l:Loc ungreyLiveTileExplanation}"
                                FontSize="10" Foreground="{DynamicResource HintForeground}" Margin="0,0,0,10"/>
 
-                    <CheckBox Content="Use FaceFinder API for missing mugshots"
+                    <CheckBox Content="{l:Loc useFaceFinderAPIFor}"
                               IsChecked="{Binding UseFaceFinderFallback, Mode=TwoWay}"
                               Margin="0,0,0,5"/>
                     
@@ -1167,11 +1167,11 @@
                                 <CheckBox Content="{l:Loc showMissingOutfitAssets}"
                                           IsChecked="{Binding InternalShowMissingOutfitAssetsIcon, Mode=TwoWay}"
                                           VerticalAlignment="Center" Margin="0,0,12,0"
-                                          ToolTip="When on (default), a mugshot whose outfit/headgear is missing meshes or textures — or references a physics config that doesn't exist (a broken SMP/HDT link inside the mod; the render itself is correct) — shows the outfit-assets warning icon, recorded in the PNG so it survives restarts. The missing meshes/textures re-render when you install the assets (via 'Re-render When: Missing Assets'); the broken physics link is informational. Unchecking hides the icon and re-renders the affected mugshots once so their recorded state is cleared."/>
-                                <CheckBox Content="Show Data Folder Assets Icon"
+                                          ToolTip="{l:Loc whenOnDefaultAMugshot4}"/>
+                                <CheckBox Content="{l:Loc showDataFolderAssetsIcon}"
                                           IsChecked="{Binding InternalShowDataFolderAssetsIcon, Mode=TwoWay}"
                                           VerticalAlignment="Center"
-                                          ToolTip="When on (default), a mugshot that pulled non-vanilla assets from your data folder — because they were not found in the mod's Corresponding Mod Folders — shows the data-folder-assets icon, recorded in the PNG so it survives restarts. These assets come from some other installed mod: it must stay activated, or be added to this mod's Corresponding Mod Folders, for the NPC to look right in game. Informational only — the render itself is correct. Unchecking hides the icon and re-renders the affected mugshots once so their recorded state is cleared."/>
+                                          ToolTip="{l:Loc dataFolderAssetsIconExplanation}"/>
                             </WrapPanel>
 
                             <!-- Attire defaults: apply to both the mugshot renderer and
@@ -1597,6 +1597,7 @@
                                                                                             <TextBlock Text="{l:Loc uiLanguage}"
                                                                                                        VerticalAlignment="Center"/>
                                                                                             <ComboBox ItemsSource="{Binding AvailableUiLanguages}"
+                                                                                                      DisplayMemberPath="DisplayName"
                                                                                                       SelectedItem="{Binding SelectedUiLanguage, Mode=TwoWay}"
                                                                                                       MinWidth="120"
                                                                                                       Margin="10,0,0,0"/>

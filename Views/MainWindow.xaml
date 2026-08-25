@@ -129,37 +129,37 @@
 
           <RadioButton x:Name="NpcsRadioButton"
                        Style="{StaticResource TabToggleButtonStyle}"
-                       Content="NPCs"
+                       Content="{l:Loc nPCs}"
                        GroupName="MainTabs" />
 
           <RadioButton x:Name="ModsRadioButton"
                        Style="{StaticResource TabToggleButtonStyle}"
-                       Content="Mods"
+                       Content="{l:Loc mods}"
                        GroupName="MainTabs" />
 
           <RadioButton x:Name="ModIssuesRadioButton"
                        Style="{StaticResource TabToggleButtonStyle}"
-                       Content="Mod Issues"
+                       Content="{l:Loc modIssues}"
                        GroupName="MainTabs" />
 
           <RadioButton x:Name="SummaryRadioButton"
                        Style="{StaticResource TabToggleButtonStyle}"
-                       Content="Summary"
+                       Content="{l:Loc summary}"
                        GroupName="MainTabs" />
 
           <RadioButton x:Name="SettingsRadioButton"
                        Style="{StaticResource TabToggleButtonStyle}"
-                       Content="Settings"
+                       Content="{l:Loc settings}"
                        GroupName="MainTabs" />
 
           <RadioButton x:Name="RunRadioButton"
                        Style="{StaticResource TabToggleButtonStyle}"
-                       Content="Run"
+                       Content="{l:Loc run}"
                        GroupName="MainTabs" />
 
           <RadioButton x:Name="ValidateRadioButton"
                        Style="{StaticResource TabToggleButtonStyle}"
-                       Content="Validate"
+                       Content="{l:Loc validate}"
                        GroupName="MainTabs" />
 
         </StackPanel>

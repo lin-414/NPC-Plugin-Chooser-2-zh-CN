@@ -13,7 +13,7 @@
              xmlns:l="clr-namespace:NPC_Plugin_Chooser_2.Localization"
         mc:Ignorable="d"
         d:DataContext="{d:DesignInstance Type=vm:VM_InvalidSelectionsWindow}"
-        Title="Invalid Selections Found"
+        Title="{l:Loc invalidSelectionsFound}"
         Height="620" Width="1060"
         MinHeight="360" MinWidth="640"
         WindowStartupLocation="CenterOwner"
@@ -42,11 +42,11 @@
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="Filter:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <TextBlock Grid.Column="0" Text="{l:Loc filter}" VerticalAlignment="Center" Margin="0,0,6,0"/>
             <TextBox Grid.Column="1"
                      Text="{Binding FilterText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                      VerticalContentAlignment="Center"
-                     ToolTip="Filter rows by any column"/>
+                     ToolTip="{l:Loc filterRowsByAny}"/>
         </Grid>
 
         <!-- One row per rejected NPC, sortable by any column. Cell selection + ExcludeHeader:
@@ -76,7 +76,7 @@
                   VerticalGridLinesBrush="{DynamicResource BorderBrush}">
             <DataGrid.ContextMenu>
                 <ContextMenu>
-                    <MenuItem Header="Copy selected cells"
+                    <MenuItem Header="{l:Loc copySelectedCells}"
                               Command="ApplicationCommands.Copy"
                               InputGestureText="Ctrl+C"/>
                 </ContextMenu>
@@ -111,23 +111,23 @@
                 </Style>
             </DataGrid.RowStyle>
             <DataGrid.Columns>
-                <DataGridTextColumn Header="Issue" Binding="{Binding Reason}" Width="2*">
+                <DataGridTextColumn Header="{l:Loc issue}" Binding="{Binding Reason}" Width="2*">
                     <DataGridTextColumn.ElementStyle>
                         <Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
                             <Setter Property="TextWrapping" Value="Wrap"/>
                         </Style>
                     </DataGridTextColumn.ElementStyle>
                 </DataGridTextColumn>
-                <DataGridTextColumn Header="Mod" Binding="{Binding ModName}" Width="1.5*">
+                <DataGridTextColumn Header="{l:Loc mod}" Binding="{Binding ModName}" Width="1.5*">
                     <DataGridTextColumn.ElementStyle>
                         <Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
                             <Setter Property="TextWrapping" Value="Wrap"/>
                         </Style>
                     </DataGridTextColumn.ElementStyle>
                 </DataGridTextColumn>
-                <DataGridTextColumn Header="NPC" Binding="{Binding NpcDescription}" Width="1.2*"/>
-                <DataGridTextColumn Header="FormKey" Binding="{Binding NpcFormKey}" Width="160"/>
-                <DataGridTextColumn Header="Missing Record" Binding="{Binding Detail}" Width="1.5*">
+                <DataGridTextColumn Header="{l:Loc nPC}" Binding="{Binding NpcDescription}" Width="1.2*"/>
+                <DataGridTextColumn Header="{l:Loc formKey}" Binding="{Binding NpcFormKey}" Width="160"/>
+                <DataGridTextColumn Header="{l:Loc missingRecord}" Binding="{Binding Detail}" Width="1.5*">
                     <DataGridTextColumn.ElementStyle>
                         <Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
                             <Setter Property="TextWrapping" Value="Wrap"/>
@@ -138,7 +138,7 @@
         </DataGrid>
 
         <TextBlock Grid.Row="3" Margin="0,10,0,0" TextWrapping="Wrap"
-                   Text="Skip them and continue with only the valid selections?"/>
+                   Text="{l:Loc skipThemAndContinue}"/>
 
         <Grid Grid.Row="4" Margin="0,12,0,0">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">

@@ -170,51 +170,64 @@
       <Resource Include="Resources\Face Bug.png">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       </Resource>
-      <Resource Include="Resources\No Associated Data.png">
+      <!-- The 13 badge PNGs below are referenced from XAML via pack://siteoforigin:,,,/Resources/X.png
+           (disk-load, consistent with Dragon Drop/Face Bug/No Mugshot). Declared as <Content> (not
+           <Resource>) so the WPF build emits them as loose files in the output Resources\ folder and
+           they travel with the deployed app — embedding via <Resource> was broken (the merge left a
+           stale/empty .g.resources, so component/ URIs threw "could not find resource"). -->
+      <Content Include="Resources\No Associated Data.png">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      </Resource>
+      </Content>
       <None Remove="Resources\Multiple Plugins for NPC.png" />
-      <Resource Include="Resources\Multiple Plugins for NPC.png">
+      <Content Include="Resources\Multiple Plugins for NPC.png">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      </Resource>
+      </Content>
       <None Remove="Resources\No Npc Record.png" />
-      <Resource Include="Resources\No Npc Record.png">
+      <Content Include="Resources\No Npc Record.png">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      </Resource>
+      </Content>
       <None Remove="Resources\Missing Asset.png" />
-      <Resource Include="Resources\Missing Asset.png">
+      <Content Include="Resources\Missing Asset.png">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      </Resource>
+      </Content>
       <None Remove="Resources\Missing Outfit Assets.png" />
-      <Resource Include="Resources\Missing Outfit Assets.png">
+      <Content Include="Resources\Missing Outfit Assets.png">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      </Resource>
+      </Content>
       <None Remove="Resources\Data Folder Assets.png" />
-      <Resource Include="Resources\Data Folder Assets.png">
+      <Content Include="Resources\Data Folder Assets.png">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      </Resource>
+      </Content>
       <None Remove="Resources\No Antlers.png" />
-      <Resource Include="Resources\No Antlers.png">
+      <Content Include="Resources\No Antlers.png">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      </Resource>
+      </Content>
       <None Remove="Resources\Has Wig.png" />
-      <Resource Include="Resources\Has Wig.png">
+      <Content Include="Resources\Has Wig.png">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      </Resource>
+      </Content>
       <None Remove="Resources\Contains Overrides.png" />
-      <Resource Include="Resources\Contains Overrides.png">
+      <Content Include="Resources\Contains Overrides.png">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      </Resource>
+      </Content>
       <None Remove="Resources\Replace Selected Mod.png" />
       <Resource Include="Resources\Replace Selected Mod.png" />
       <None Remove="Resources\Guest Plugin.png" />
-      <Resource Include="Resources\Guest Plugin.png" />
+      <Content Include="Resources\Guest Plugin.png">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
       <None Remove="Resources\SourcePlugin.png" />
-      <Resource Include="Resources\SourcePlugin.png" />
+      <Content Include="Resources\SourcePlugin.png">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
       <None Remove="Resources\SelectedSourcePlugin.png" />
-      <Resource Include="Resources\SelectedSourcePlugin.png" />
+      <Content Include="Resources\SelectedSourcePlugin.png">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
       <None Remove="Resources\RedDragon.png" />
-      <Resource Include="Resources\RedDragon.png" />
+      <Content Include="Resources\RedDragon.png">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
       <None Remove="Resources\CotR_Plugins.txt" />
       <Content Include="Resources\CotR_Plugins.txt">
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
