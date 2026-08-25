@@ -221,4 +221,16 @@
       </Content>
     </ItemGroup>
 
-</Project>
+        <!-- Localization JSON files -->
+        <ItemGroup>
+          <None Remove="Localization\strings.json" />
+          <Content Include="Localization\strings.json">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+          </Content>
+          <None Remove="Localization\strings.zh-CN.json" />
+          <Content Include="Localization\strings.zh-CN.json">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+          </Content>
+        </ItemGroup>
+
+    </Project>
