@@ -48,6 +48,7 @@ public class VM_Run : ReactiveObject, IDisposable
     private readonly Lazy<IOffscreenRenderer> _offscreenRenderer;
     private CancellationTokenSource? _patchingCts;
     private readonly CompositeDisposable _disposables = new();
+    private Localization.TranslationService? _translationService;
     private readonly Subject<RunLogEntry> _logMessageSubject = new Subject<RunLogEntry>();
 
     // --- Constants ---
@@ -153,10 +154,20 @@ public class VM_Run : ReactiveObject, IDisposable
         forwardedOutfitDistributor.ConnectToUILogger(AppendLog, UpdateProgress, ResetProgress, ResetLog);
 
         this.WhenAnyValue(x => x.IsRunning)
-            .Select(isRunning => isRunning ? GetTranslation("cancelPatching", "Cancel Patching") : GetTranslation("runPatchGeneration", "Run Patch Generation"))
             .ObserveOn(RxApp.MainThreadScheduler)
-            .BindTo(this, x => x.RunButtonText)
+            .Subscribe(_ => RefreshRunButtonText())
             .DisposeWith(_disposables);
+
+        // The button caption is also language-bound. It used to be a
+        // construction-time snapshot refreshed only on IsRunning changes, so
+        // switching the UI language at runtime left it untranslated until the
+        // next run/cancel toggle. Follow TranslationService switches as well.
+        _translationService = TranslationServiceProvider.GetService();
+        if (_translationService != null)
+        {
+            _translationService.LanguageChanged += RefreshRunButtonText;
+        }
+        RefreshRunButtonText();
 
         // Command should be executable if the environment is valid (to start) OR if it's already running (to cancel).
         var canExecute = this.WhenAnyValue(
@@ -995,9 +1006,20 @@ public class VM_Run : ReactiveObject, IDisposable
         AppendLog("BSA Handler: " + _bsaHandler.GetStatusReport(), forceLog: true);
     }
 
-    // Add Dispose method if not present
+    /// <summary>Sets the Run/Cancel button caption for the current run state and UI language.</summary>
+    private void RefreshRunButtonText()
+    {
+        RunButtonText = IsRunning
+            ? GetTranslation("cancelPatching", "Cancel Patching")
+            : GetTranslation("runPatchGeneration", "Run Patch Generation");
+    }
+
     public void Dispose()
     {
+        if (_translationService != null)
+        {
+            _translationService.LanguageChanged -= RefreshRunButtonText;
+        }
         _disposables.Dispose();
     }
 
